@@ -195,7 +195,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         let anywhere = cursor
             .position()
             .map(|p| Point::new(p.x - bounds.x, p.y - bounds.y));
-        let free = state.modifiers.shift();
+        let free = state.modifiers.alt() || state.modifiers.shift();
 
         match event {
             canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
