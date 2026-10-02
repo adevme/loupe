@@ -99,11 +99,15 @@ impl Rt {
                 }
             }
             let rising = self.playing && self.seek.is_none();
-            let part = if rising {
+            let mut part = if rising {
                 frames - done
             } else {
                 (self.fade as usize).clamp(1, frames - done)
             };
+            let song_end = self.project.length();
+            if self.pos < song_end {
+                part = part.min((song_end - self.pos) as usize);
+            }
             let chunk = &mut out[done..done + part];
             render(&self.project, self.pos, chunk);
             if !rising || self.fade < self.fade_len {
@@ -118,15 +122,10 @@ impl Rt {
                     frame[1] *= level;
                 }
             }
-            let length = self.project.length();
-            let crossed_end = self.pos < length && self.pos + part as Frames >= length;
             self.pos += part as Frames;
             done += part;
-            if crossed_end && rising {
-                self.playing = false;
-                self.fade = 0;
-                self.pos = length;
-                self.shared.playing.store(false, Ordering::Relaxed);
+            if rising && song_end > 0 && self.pos == song_end {
+                self.pos = 0;
             }
         }
         self.shared.pos.store(self.pos, Ordering::Relaxed);
@@ -386,16 +385,24 @@ mod tests {
     }
 
     #[test]
-    fn playback_stops_at_the_end_of_the_song() {
+    fn playback_goes_round_to_the_start_at_the_end_of_the_song() {
         let (mut rt, mut remote) = rig(1000);
-        remote.shared.playing.store(true, Ordering::Relaxed);
         remote.outbox.push(Msg::Play).ok().unwrap();
-        for _ in 0..5 {
+        rt.process(480);
+        rt.process(480);
+        let out = rt.process(480).to_vec();
+        assert!(out.iter().all(|f| *f == [1.0, 1.0]), "no gap at the join");
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 440);
+    }
+
+    #[test]
+    fn an_empty_song_just_keeps_rolling() {
+        let (mut rt, mut remote) = pair(RATE);
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        for _ in 0..3 {
             rt.process(480);
         }
-        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 1000);
-        assert!(!remote.shared.playing.load(Ordering::Relaxed));
-        assert!(rt.process(480).iter().all(|f| *f == [0.0, 0.0]));
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 1440);
     }
 
     #[test]

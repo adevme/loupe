@@ -145,10 +145,6 @@ impl App {
             Message::Tick => {
                 self.engine.collect();
                 self.settle = self.settle.saturating_sub(1);
-                if self.playing && !self.engine.is_playing() {
-                    self.playing = false;
-                    self.settle = SETTLE_TICKS;
-                }
                 let position = self.engine.position();
                 if position != self.playhead {
                     self.playhead = position;
