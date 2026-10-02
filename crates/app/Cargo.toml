@@ -1,0 +1,9 @@
+[package]
+name = "loupe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+loupe-engine = { path = "../engine" }
+iced = { version = "0.13", features = ["tokio", "canvas", "advanced"] }
+rfd = "0.14"

@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine", "crates/app"]
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3
+
+[profile.dev.package.loupe-engine]
+opt-level = 3
