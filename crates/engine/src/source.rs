@@ -48,6 +48,12 @@ impl Source {
         Ok(Self { name, path: path.to_path_buf(), frames, peaks })
     }
 
+    pub fn stretched(&self, rate: u32, stretch: f64) -> Self {
+        let frames = loupe_stretch::stretch(&self.frames, rate, stretch);
+        let peaks = build_peaks(&frames);
+        Self { name: self.name.clone(), path: self.path.clone(), frames, peaks }
+    }
+
     pub fn peak(&self, from: usize, to: usize) -> (f32, f32) {
         let to = to.min(self.frames.len());
         if from >= to {

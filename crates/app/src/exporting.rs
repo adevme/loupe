@@ -92,6 +92,14 @@ impl App {
         let Some(exports) = self.exports_folder() else {
             return Task::none();
         };
+        let still_stretching = self.project.clips().filter(|clip| clip.waiting_for_stretch()).count();
+        if still_stretching > 0 {
+            self.problem = Some(format!(
+                "Still working out the time stretch on {still_stretching} clip{}. Try again in a moment.",
+                if still_stretching == 1 { "" } else { "s" }
+            ));
+            return self.stretch_waiting();
+        }
         let folder = next_version_folder(&exports);
         let plan = ExportPlan {
             folder: folder.clone(),

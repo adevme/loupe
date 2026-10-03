@@ -23,5 +23,6 @@ pub use model::{
 };
 pub use envelope::{Envelope, Mode, Point, Shape, Target, Writer};
 pub use render::{mix_tracks, render, render_through, scale, Chains, Mixdown};
+pub use loupe_stretch::{LONGEST as LONGEST_STRETCH, SHORTEST as SHORTEST_STRETCH};
 pub use source::Source;
 pub use wav::repair_takes;

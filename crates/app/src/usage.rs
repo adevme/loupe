@@ -209,6 +209,7 @@ mod tests {
             last_version: None,
             metronome: false,
             count_in_bars: 0,
+            snap: true,
         };
         let (usage, told) = Usage::begin(&fresh);
         assert!(told, "the notice should be shown on the first run");

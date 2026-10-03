@@ -18,6 +18,7 @@ mod pool;
 mod routing;
 mod plugins;
 mod racks;
+mod stretching;
 mod stockwin;
 mod recording;
 mod selection;
@@ -244,6 +245,9 @@ pub enum Message {
     PaintMute { clip: ClipId, muted: bool },
     PaintDelete(ClipId),
     TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
+    StretchClip { clip: ClipId, start: Frames, len: Frames },
+    Stretched { source: Arc<Source>, stretch: f64, made: Option<Arc<Source>> },
+    ToggleSnap,
     Slice { cuts: Vec<(TrackId, Frames)> },
     TrackGain(TrackId, f32),
     TogglePool,
@@ -314,6 +318,7 @@ enum Run {
     Master,
     Paint,
     Trim(ClipId),
+    Stretch(ClipId),
     Send(TrackId, TrackId),
     Point(loupe_engine::Target),
     Notes(ClipId),
@@ -455,6 +460,8 @@ struct App {
     metronome: bool,
     count_in_bars: u32,
     copied_clips: Option<clipboard::Copied>,
+    snap: bool,
+    stretches: stretching::Stretches,
 }
 
 impl App {
@@ -556,6 +563,8 @@ impl App {
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
             copied_clips: None,
+            snap: settings.snap,
+            stretches: stretching::Stretches::default(),
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -603,6 +612,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         let before = self.screen;
         let task = self.handle(message);
+        let task = Task::batch([task, self.stretch_waiting()]);
         self.keep_safe();
         self.aim_keys();
         match (before, self.screen) {
@@ -1059,6 +1069,14 @@ impl App {
             Message::Refresh => {}
             Message::PaintMute { clip, muted } => self.mute_clips(self.affected_by(clip), muted),
             Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
+            Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
+            Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
+            Message::ToggleSnap => {
+                self.snap = !self.snap;
+                if let Err(why) = settings::save("snap", if self.snap { "on" } else { "off" }) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
             Message::TrimClip { clip, start, offset, len } => {
                 if let Some(track) = self.project.track_of(clip).map(|track| track.id) {
                     self.transact(Some(Run::Trim(clip)), |project| {
@@ -2061,6 +2079,7 @@ impl App {
             playhead: self.playhead,
             loop_range: self.loop_range,
             tool: self.tool,
+            snap: self.snap,
             armed: &self.armed,
             recording_from: self.recording.as_ref().map(|recording| recording.from),
             input_level: self.input_level,
@@ -2373,6 +2392,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
+                ("n", false, _) => Some(Message::ToggleSnap),
                 ("r", false, _) => Some(Message::ToggleRecord),
                 ("p", false, _) => Some(Message::SetTool(Tool::Pencil)),
                 ("c", false, _) => Some(Message::SetTool(Tool::Razor)),

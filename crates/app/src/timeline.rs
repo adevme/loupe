@@ -93,6 +93,7 @@ pub struct Timeline<'a> {
     pub playhead: Frames,
     pub loop_range: LoopRange,
     pub tool: Tool,
+    pub snap: bool,
     pub armed: &'a HashSet<TrackId>,
     pub recording_from: Option<Frames>,
     pub input_level: f32,
@@ -117,6 +118,7 @@ enum Drag {
     Slice { from: Point, to: Point },
     Marquee { from: Point, to: Point },
     Trim { clip: ClipId, edge: Edge },
+    Stretch { clip: ClipId, edge: Edge },
     Paint { muted: Option<bool>, touched: Vec<ClipId> },
     Point { target: loupe_engine::Target, which: usize },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
@@ -151,6 +153,7 @@ impl ClipBox {
 
 enum Hit<'a> {
     Tool(Tool),
+    Snap,
     Scrollbar,
     Ruler,
     Resize(&'a Track),
@@ -214,6 +217,14 @@ impl Timeline<'_> {
                 (self.lanes_top() - TOOL_BUTTON) / 2.0,
             ),
             Size::new(TOOL_BUTTON, TOOL_BUTTON),
+        )
+    }
+
+    fn snap_button(&self) -> Rectangle {
+        let tools = self.tool_button(Tool::ALL.len() - 1);
+        Rectangle::new(
+            Point::new((self.header_right() - TOOLS_LEFT - TOOL_BUTTON).max(tools.x + TOOL_BUTTON + TOOL_GAP), tools.y),
+            tools.size(),
         )
     }
 
@@ -535,6 +546,7 @@ impl Timeline<'_> {
             return match (!self.in_header(p.x), p.y < self.palette.scrollbar_height) {
                 (true, true) => Hit::Scrollbar,
                 (true, false) => Hit::Ruler,
+                (false, _) if self.snap_button().contains(p) => Hit::Snap,
                 (false, _) => Tool::ALL
                     .into_iter()
                     .enumerate()
@@ -646,7 +658,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         use canvas::event::Status::{Captured, Ignored};
 
         let anywhere = cursor.position().map(|p| Point::new(p.x - bounds.x, p.y - bounds.y));
-        let free = state.modifiers.alt() || state.modifiers.shift();
+        let free = !self.snap || state.modifiers.shift();
 
         match event {
             canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
@@ -693,6 +705,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 }
                 let message = match (self.tool, self.hit(p)) {
                     (_, Hit::Tool(tool)) => Some(Message::SetTool(tool)),
+                    (_, Hit::Snap) => Some(Message::ToggleSnap),
                     (_, Hit::Envelope(target, near, at, value)) => {
                         let which = match near {
                             Some(which) => which,
@@ -758,7 +771,10 @@ impl canvas::Program<Message> for Timeline<'_> {
                         None
                     }
                     (_, Hit::Edge(clip, edge)) => {
-                        state.drag = Some(Drag::Trim { clip: clip.id, edge });
+                        state.drag = Some(match state.modifiers.alt() && clip.notes.is_none() {
+                            true => Drag::Stretch { clip: clip.id, edge },
+                            false => Drag::Trim { clip: clip.id, edge },
+                        });
                         Some(Message::Select(Some(clip.id)))
                     }
                     (_, Hit::Clip(clip)) => {
@@ -868,7 +884,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             return (Captured, None);
                         };
                         let at = self.snap(self.frames_at(p.x), free);
-                        let recorded = clip.source.frames.len() as Frames;
+                        let recorded = clip.audio_len();
                         let (start, offset, len) = match edge {
                             Edge::In => {
                                 let earliest = clip.start.saturating_sub(clip.offset);
@@ -884,6 +900,24 @@ impl canvas::Program<Message> for Timeline<'_> {
                         };
                         let changed = start != clip.start || len != clip.len;
                         (Captured, changed.then_some(Message::TrimClip { clip: clip.id, start, offset, len }))
+                    }
+                    Drag::Stretch { clip, edge } => {
+                        let Some(clip) = self.project.clip(*clip) else {
+                            return (Captured, None);
+                        };
+                        let at = self.snap(self.frames_at(p.x), free);
+                        let unstretched = clip.len as f64 / clip.stretch;
+                        let shortest = (unstretched * loupe_engine::SHORTEST_STRETCH).ceil() as Frames;
+                        let longest = (unstretched * loupe_engine::LONGEST_STRETCH).floor() as Frames;
+                        let (start, len) = match edge {
+                            Edge::In => {
+                                let start = at.clamp(clip.end().saturating_sub(longest), clip.end().saturating_sub(shortest.max(SHORTEST_CLIP)));
+                                (start, clip.end() - start)
+                            }
+                            Edge::Out => (clip.start, at.saturating_sub(clip.start).clamp(shortest.max(SHORTEST_CLIP), longest)),
+                        };
+                        let changed = start != clip.start || len != clip.len;
+                        (Captured, changed.then_some(Message::StretchClip { clip: clip.id, start, len }))
                     }
                     Drag::Marquee { from, to } => {
                         *to = p;
@@ -922,7 +956,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
                 Some(Drag::Range { anchor, moving: false, .. }) => (Captured, Some(Message::RulerClicked(anchor))),
-                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. } | Drag::Trim { .. }) => {
+                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. } | Drag::Trim { .. } | Drag::Stretch { .. }) => {
                     (Captured, Some(Message::DragEnd))
                 }
                 Some(Drag::Marquee { .. }) => (Captured, Some(Message::Refresh)),
@@ -1001,6 +1035,22 @@ impl canvas::Program<Message> for Timeline<'_> {
                     ..Text::default()
                 });
             }
+            let magnet = self.snap_button();
+            if self.snap {
+                let chosen = Path::new(|b| b.rounded_rectangle(magnet.position(), magnet.size(), p.corner.into()));
+                frame.fill(&chosen, p.hover);
+            }
+            frame.fill_text(Text {
+                content: icons::glyph("magnet").to_string(),
+                position: magnet.center(),
+                color: if self.snap { p.text } else { p.text_dim },
+                size: 14.0.into(),
+                font: icons::font("magnet"),
+                horizontal_alignment: alignment::Horizontal::Center,
+                vertical_alignment: alignment::Vertical::Center,
+                shaping: iced::widget::text::Shaping::Advanced,
+                ..Text::default()
+            });
             frame.fill_rectangle(Point::new(0.0, self.lanes_top() - 1.0), Size::new(bounds.width, 1.0), p.line);
             let divider = if p.headers == Side::Left { p.header_width - 1.0 } else { self.header_left() };
             frame.fill_rectangle(Point::new(divider, 0.0), Size::new(1.0, bounds.height), p.line);
@@ -1041,7 +1091,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 Stroke::default().with_color(theme::alpha(p.accent, 0.6)).with_width(1.0),
             );
         }
-        let free = state.modifiers.alt() || state.modifiers.shift();
+        let free = !self.snap || state.modifiers.shift();
         let slicing = match (&state.drag, self.tool, cursor.position_in(bounds)) {
             (Some(Drag::Slice { from, to }), _, _) => Some((*from, *to)),
             (None, Tool::Razor, Some(at)) if self.in_lanes(at.x) && at.y >= self.lanes_top() => Some((at, at)),
@@ -1159,11 +1209,12 @@ impl canvas::Program<Message> for Timeline<'_> {
             Some(Drag::Resize { .. }) => return mouse::Interaction::ResizingVertically,
             Some(Drag::Grip { grip, .. }) => return grip.pointer(),
             Some(Drag::Trim { .. }) => return mouse::Interaction::ResizingHorizontally,
+            Some(Drag::Stretch { .. }) => return mouse::Interaction::ResizingHorizontally,
             _ => {}
         }
         match (self.tool, cursor.position_in(bounds).map(|p| self.hit(p))) {
             (_, Some(Hit::Resize(_))) => mouse::Interaction::ResizingVertically,
-            (_, Some(Hit::Mute(_) | Hit::Arm(_) | Hit::Route(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => {
+            (_, Some(Hit::Mute(_) | Hit::Arm(_) | Hit::Route(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_) | Hit::Snap)) => {
                 mouse::Interaction::Pointer
             }
             (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
@@ -1421,7 +1472,11 @@ impl Timeline<'_> {
         if let Some(visible) = title_on_canvas.intersection(&lanes_on_canvas) {
             frame.with_clip(visible, |name_region| {
                 name_region.fill_text(Text {
-                    content: clip.source.name.clone(),
+                    content: match (clip.is_stretched(), clip.waiting_for_stretch()) {
+                        (false, _) => clip.source.name.clone(),
+                        (true, false) => format!("{}  {:.0}%", clip.source.name, clip.stretch * 100.0),
+                        (true, true) => format!("{}  {:.0}%  stretching…", clip.source.name, clip.stretch * 100.0),
+                    },
                     position: Point::new(
                         self.lanes_left() + left.max(0.0) + 8.0 - visible.x,
                         title_on_canvas.y - visible.y + self.palette.clip_title_height / 2.0,
@@ -1495,7 +1550,7 @@ impl Timeline<'_> {
         if frames_per_px < 1.0 {
             let first = source_at(from_x).floor().max(clip.offset as f64) as usize;
             let last = (source_at(to_x).ceil().min(source_end - 1.0)) as usize;
-            let samples = &clip.source.frames;
+            let samples = clip.audio();
             let point = |i: usize| {
                 let level = clip.gain * clip.fade_level(i as Frames - clip.offset);
                 let value = ((samples[i][0] + samples[i][1]) * 0.5 * level).clamp(-1.0, 1.0);
@@ -1534,7 +1589,7 @@ impl Timeline<'_> {
             if b <= a {
                 break;
             }
-            let (lo, hi) = clip.source.peak(a as usize, (b.ceil() as usize).max(a as usize + 1));
+            let (lo, hi) = clip.peak(a as usize, (b.ceil() as usize).max(a as usize + 1));
             let level = clip.gain * clip.fade_level((a - clip.offset as f64) as Frames);
             let hi = middle - (hi * level).clamp(-1.0, 1.0) * reach;
             let lo = middle - (lo * level).clamp(-1.0, 1.0) * reach;

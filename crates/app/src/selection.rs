@@ -115,6 +115,9 @@ impl App {
         if clips.iter().any(|clip| self.project.track_of(*clip).map(|t| t.id) != Some(track.id)) {
             return Err("Select clips on one track to consolidate them.".into());
         }
+        if clips.iter().filter_map(|clip| self.project.clip(*clip)).any(|clip| clip.waiting_for_stretch()) {
+            return Err("Still working out the time stretch. Try again in a moment.".into());
+        }
         let folder = self
             .path
             .as_deref()
