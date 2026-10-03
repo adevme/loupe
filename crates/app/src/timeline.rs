@@ -229,11 +229,17 @@ impl Timeline<'_> {
         inside
     }
 
+    fn slice_line(&self, from: Point, to: Point, free: bool) -> (Point, Point) {
+        let on_grid = |at: Point| Point::new(self.x_of(self.snap(self.frames_at(at.x), free) as f64), at.y);
+        (on_grid(from), on_grid(to))
+    }
+
     fn slice_cuts(&self, from: Point, to: Point, free: bool) -> Vec<(usize, Frames)> {
         let aims_at_nothing = from == to && self.track_at(from.y).is_none();
         if self.project.tracks.is_empty() || aims_at_nothing {
             return Vec::new();
         }
+        let (from, to) = self.slice_line(from, to, free);
         let first = self.row_for_drag(from.y.min(to.y));
         let last = self.row_for_drag(from.y.max(to.y));
         (first..=last)
@@ -241,7 +247,7 @@ impl Timeline<'_> {
                 let middle = self.track_top(row) + self.height_of(&self.project.tracks[row]) / 2.0;
                 let along = if from.y == to.y { 0.0 } else { ((middle - from.y) / (to.y - from.y)).clamp(0.0, 1.0) };
                 let x = from.x + (to.x - from.x) * along;
-                (row, self.snap(self.frames_at(x), free))
+                (row, self.frames_at(x).round() as Frames)
             })
             .collect()
     }
@@ -877,17 +883,22 @@ impl canvas::Program<Message> for Timeline<'_> {
             _ => None,
         };
         if let Some((from, to)) = slicing {
-            if from != to {
-                let stroke = Path::line(from, to);
-                overlay.stroke(&stroke, Stroke::default().with_color(theme::alpha(p.accent, 0.55)).with_width(1.0));
-            }
-            for (row, at) in self.slice_cuts(from, to, free) {
-                let x = self.x_of(at as f64).round();
-                let top = self.track_top(row).max(LANES_TOP);
-                let height = self.track_top(row) + self.height_of(&self.project.tracks[row]) - top;
-                if x >= HEADER_W && height > 0.0 {
-                    overlay.fill_rectangle(Point::new(x - 1.0, top), Size::new(2.0, height), p.accent);
+            let rows = self.slice_cuts(from, to, free);
+            let (from, to) = self.slice_line(from, to, free);
+            let aimed_row = rows.first().filter(|_| from == to).map(|(row, _)| *row);
+            let (start, end) = match aimed_row {
+                Some(row) => {
+                    let top = self.track_top(row).max(LANES_TOP);
+                    let bottom = self.track_top(row) + self.height_of(&self.project.tracks[row]);
+                    (Point::new(from.x, top), Point::new(from.x, bottom))
                 }
+                None => (from, to),
+            };
+            if !rows.is_empty() && start.x >= HEADER_W && start.x == end.x {
+                let upright = Size::new(1.0, (end.y - start.y).abs());
+                overlay.fill_rectangle(Point::new(start.x.round() - 0.5, start.y.min(end.y)), upright, p.accent);
+            } else if !rows.is_empty() && start.x >= HEADER_W {
+                overlay.stroke(&Path::line(start, end), Stroke::default().with_color(p.accent).with_width(1.0));
             }
         }
         for (i, track) in self.project.tracks.iter().enumerate() {
