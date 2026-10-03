@@ -51,6 +51,8 @@ const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
 const METER_FALL_PER_TICK: f32 = 0.86;
+const FADER_STEP_DB: f32 = 0.5;
+const MASTER_STEP_PERCENT: f32 = 1.0;
 const SYSTEM_INPUT: &str = "System default";
 const COPIED_SHOWN_FOR: Duration = Duration::from_millis(1500);
 const EXPORT_PROGRESS_STEPS: u32 = 1000;
@@ -160,6 +162,7 @@ pub enum Message {
     AddPlugin(TrackId, usize),
     RemovePlugin(TrackId, usize),
     BypassPlugin(TrackId, usize),
+    WheelOverFader(mixer::Level, iced::mouse::ScrollDelta),
     ShowPlugin(TrackId, usize),
     OpenMatrix,
     AddSend { from: TrackId, to: TrackId },
@@ -800,6 +803,29 @@ impl App {
                 self.resizing_mixer = false;
                 if let Err(why) = settings::save("mixer_height", &self.mixer_height.round().to_string()) {
                     self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
+            Message::WheelOverFader(level, delta) => {
+                let notches = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => y.signum() * (y != 0.0) as u8 as f32,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => y / 50.0,
+                };
+                if notches != 0.0 {
+                    match level {
+                        mixer::Level::Track(track) => {
+                            let now = self.project.tracks.iter().find(|t| t.id == track).map(|t| t.gain).unwrap_or(1.0);
+                            let db = (mixer::db_from_gain(now) + notches * FADER_STEP_DB)
+                                .clamp(mixer::SILENT_DB, mixer::LOUDEST_DB);
+                            let gain = mixer::gain_from_db(db);
+                            self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
+                        }
+                        mixer::Level::Master => {
+                            let percent = (self.project.master * 100.0 + notches * MASTER_STEP_PERCENT)
+                                .clamp(0.0, mixer::LOUDEST_MASTER_PERCENT);
+                            self.edit(Some(Run::Master), Command::SetMasterGain(percent / 100.0));
+                        }
+                        mixer::Level::Clip(_) => {}
+                    }
                 }
             }
             Message::TrackGain(track, db) => {

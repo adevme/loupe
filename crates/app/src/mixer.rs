@@ -99,12 +99,15 @@ impl App {
                 }),
                 text("Master").size(12).font(palette.semibold),
                 hrow![
-                    vertical_slider(0.0..=LOUDEST_MASTER_PERCENT, percent, Message::MasterPercent)
-                        .step(1.0)
-                        .default(100.0)
-                        .on_release(Message::DragEnd)
-                        .height(Length::Fill)
-                        .style(move |_, status| palette.slider(status)),
+                    mouse_area(
+                        vertical_slider(0.0..=LOUDEST_MASTER_PERCENT, percent, Message::MasterPercent)
+                            .step(1.0)
+                            .default(100.0)
+                            .on_release(Message::DragEnd)
+                            .height(Length::Fill)
+                            .style(move |_, status| palette.slider(status))
+                    )
+                    .on_scroll(|delta| Message::WheelOverFader(Level::Master, delta)),
                     meter(palette, self.master_level),
                 ]
                 .spacing(10)
@@ -157,12 +160,15 @@ impl App {
                     text(name).size(12).font(palette.medium),
                     self.fx_block(id),
                     hrow![
-                        vertical_slider(SILENT_DB..=LOUDEST_DB, db, move |db| Message::TrackGain(id, db))
-                            .step(0.1)
-                            .default(0.0)
-                            .on_release(Message::DragEnd)
-                            .height(Length::Fill)
-                            .style(move |_, status| palette.slider(status)),
+                        mouse_area(
+                            vertical_slider(SILENT_DB..=LOUDEST_DB, db, move |db| Message::TrackGain(id, db))
+                                .step(0.1)
+                                .default(0.0)
+                                .on_release(Message::DragEnd)
+                                .height(Length::Fill)
+                                .style(move |_, status| palette.slider(status))
+                        )
+                        .on_scroll(move |delta| Message::WheelOverFader(Level::Track(id), delta)),
                         meter(palette, level),
                     ]
                     .spacing(10)
