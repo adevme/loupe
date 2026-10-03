@@ -1,4 +1,4 @@
-use crate::model::{Frames, Project};
+use crate::model::{Clip, Frames, Project};
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
     out.fill([0.0; 2]);
@@ -18,18 +18,43 @@ pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
             let count = ((to - from) as usize).min(source.len() - source_from);
             let gain = clip.gain * track.gain;
             let target = &mut out[(from - pos) as usize..][..count];
-            for (o, s) in target.iter_mut().zip(&source[source_from..][..count]) {
-                o[0] += s[0] * gain;
-                o[1] += s[1] * gain;
-            }
+            let audio = &source[source_from..][..count];
+            let first = from - clip.start;
+            let fade_in_frames = (clip.fade_in.len.saturating_sub(first) as usize).min(count);
+            let steady_end = clip.len - clip.fade_out.len;
+            let fade_out_from = (steady_end.saturating_sub(first) as usize).clamp(fade_in_frames, count);
+            mix_faded(&mut target[..fade_in_frames], &audio[..fade_in_frames], gain, clip, first);
+            mix(&mut target[fade_in_frames..fade_out_from], &audio[fade_in_frames..fade_out_from], gain);
+            mix_faded(
+                &mut target[fade_out_from..],
+                &audio[fade_out_from..],
+                gain,
+                clip,
+                first + fade_out_from as Frames,
+            );
         }
+    }
+}
+
+fn mix(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32) {
+    for (o, s) in target.iter_mut().zip(audio) {
+        o[0] += s[0] * gain;
+        o[1] += s[1] * gain;
+    }
+}
+
+fn mix_faded(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32, clip: &Clip, first: Frames) {
+    for (i, (o, s)) in target.iter_mut().zip(audio).enumerate() {
+        let level = gain * clip.fade_level(first + i as Frames);
+        o[0] += s[0] * level;
+        o[1] += s[1] * level;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipId, Command, Outcome, TrackId};
+    use crate::model::{ClipId, Command, Edge, Fade, Outcome, TrackId};
     use crate::source::Source;
     use std::sync::Arc;
 
@@ -115,6 +140,69 @@ mod tests {
         assert_eq!(out[499], [499.0, -499.0]);
         assert_eq!(out[500], [250.0, -250.0]);
         assert_eq!(out[999], [499.5, -499.5]);
+    }
+
+    fn steady(len: usize) -> Arc<Source> {
+        Arc::new(Source::from_frames("one", vec![[1.0, 1.0]; len]))
+    }
+
+    #[test]
+    fn fades_shape_only_the_ends_of_their_own_clip() {
+        let mut p = Project::new(48_000);
+        let t = track(&mut p);
+        let c = clip(&mut p, t, steady(1000), 0);
+        p.apply(Command::SetClipFade { clip: c, edge: Edge::In, fade: Fade { len: 100, curve: 0.0 } }).unwrap();
+        p.apply(Command::SetClipFade { clip: c, edge: Edge::Out, fade: Fade { len: 200, curve: 0.0 } }).unwrap();
+        let out = whole(&p, 1000);
+        assert_eq!(out[0], [0.0, 0.0]);
+        assert_eq!(out[50], [0.5, 0.5]);
+        assert_eq!(out[100], [1.0, 1.0]);
+        assert_eq!(out[799], [1.0, 1.0]);
+        assert_eq!(out[900], [0.495, 0.495]);
+        assert_eq!(out[999], [0.0, 0.0]);
+        for block in [1, 7, 64, 333] {
+            let mut pieces = Vec::new();
+            let mut pos = 0;
+            while pos < 1000 {
+                let n = block.min(1000 - pos);
+                let mut part = vec![[0.0; 2]; n];
+                render(&p, pos as Frames, &mut part);
+                pieces.extend(part);
+                pos += n;
+            }
+            assert_eq!(pieces, out, "block size {block}");
+        }
+    }
+
+    #[test]
+    fn a_curved_fade_bends_but_keeps_its_ends() {
+        let mut p = Project::new(48_000);
+        let t = track(&mut p);
+        let c = clip(&mut p, t, steady(1000), 0);
+        p.apply(Command::SetClipFade { clip: c, edge: Edge::In, fade: Fade { len: 100, curve: 1.0 } }).unwrap();
+        let fast = whole(&p, 1000);
+        p.apply(Command::SetClipFade { clip: c, edge: Edge::In, fade: Fade { len: 100, curve: -1.0 } }).unwrap();
+        let slow = whole(&p, 1000);
+        assert_eq!((fast[0], fast[100]), ([0.0, 0.0], [1.0, 1.0]));
+        assert_eq!((slow[0], slow[100]), ([0.0, 0.0], [1.0, 1.0]));
+        assert!(fast[50][0] > 0.8 && slow[50][0] < 0.1);
+    }
+
+    #[test]
+    fn fades_that_do_not_fit_are_refused_and_a_split_drops_the_inner_ones() {
+        let mut p = Project::new(48_000);
+        let t = track(&mut p);
+        let c = clip(&mut p, t, steady(1000), 0);
+        p.apply(Command::SetClipFade { clip: c, edge: Edge::In, fade: Fade { len: 600, curve: 0.0 } }).unwrap();
+        assert!(p.apply(Command::SetClipFade { clip: c, edge: Edge::Out, fade: Fade { len: 500, curve: 0.0 } }).is_err());
+        assert!(p.apply(Command::SetClipFade { clip: c, edge: Edge::Out, fade: Fade { len: 10, curve: 2.0 } }).is_err());
+        p.apply(Command::SetClipFade { clip: c, edge: Edge::Out, fade: Fade { len: 300, curve: 0.0 } }).unwrap();
+        let Ok(Outcome::Clip(right)) = p.apply(Command::SplitClip { clip: c, at: 400 }) else {
+            panic!("no split")
+        };
+        let (left, right) = (p.clip(c).unwrap(), p.clip(right).unwrap());
+        assert_eq!((left.fade_in.len, left.fade_out.len), (400, 0));
+        assert_eq!((right.fade_in.len, right.fade_out.len), (0, 300));
     }
 
     #[test]

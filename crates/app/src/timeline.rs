@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, Theme};
-use loupe_engine::{Clip, ClipId, Frames, Project, Track, TrackId};
+use loupe_engine::{Clip, ClipId, Edge, Fade, Frames, Project, Track, TrackId};
 
 use crate::theme::{self, Palette};
 use crate::{icons, Message};
@@ -16,6 +16,14 @@ const MIN_GRID_PX: f64 = 14.0;
 const DRAG_THRESHOLD: f32 = 4.0;
 const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
+const HANDLE_RADIUS: f32 = 4.5;
+const HANDLE_REACH: f32 = 9.0;
+const MIN_CLIP_PX_FOR_HANDLES: f32 = 36.0;
+const MIN_FADE_PX_FOR_SHAPE_HANDLE: f32 = 24.0;
+const CURVE_PER_PX: f32 = 1.0 / 50.0;
+const GAIN_DB_PER_PX: f32 = 0.1;
+pub const MIN_GAIN_DB: f32 = -24.0;
+pub const MAX_GAIN_DB: f32 = 12.0;
 pub const MIN_ZOOM: f64 = 2.0;
 
 pub type LoopRange = Option<(Frames, Frames)>;
@@ -41,6 +49,7 @@ pub struct Timeline<'a> {
     pub selected: Option<ClipId>,
     pub playhead: Frames,
     pub loop_range: LoopRange,
+    pub width: f32,
     pub cache: &'a Cache,
 }
 
@@ -54,6 +63,33 @@ enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Resize { track: TrackId, top: f32 },
+    Grip { clip: ClipId, grip: Grip, origin: Point, curve_at_grab: f32, db_at_grab: f32 },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Grip {
+    FadeIn,
+    FadeOut,
+    ShapeIn,
+    ShapeOut,
+    Gain,
+}
+
+struct ClipBox {
+    left: f32,
+    right: f32,
+    top: f32,
+    height: f32,
+}
+
+impl ClipBox {
+    fn wave_top(&self) -> f32 {
+        self.top + CLIP_TITLE_H + 2.0
+    }
+
+    fn wave_height(&self) -> f32 {
+        self.height - CLIP_TITLE_H - 5.0
+    }
 }
 
 enum Hit<'a> {
@@ -62,6 +98,7 @@ enum Hit<'a> {
     Mute(&'a Track),
     Remove(&'a Track),
     AddTrack,
+    Grip(&'a Clip, Grip),
     Clip(&'a Clip),
     Lane,
     Nothing,
@@ -156,6 +193,57 @@ impl Timeline<'_> {
         RULER_H + tracks + ADD_ROW_H
     }
 
+    fn clip_box(&self, clip: &Clip) -> Option<ClipBox> {
+        let index = self.project.tracks.iter().position(|t| t.clips.iter().any(|c| c.id == clip.id))?;
+        Some(ClipBox {
+            left: self.x_of(clip.start as f64),
+            right: self.x_of(clip.end() as f64),
+            top: self.track_top(index) + CLIP_PAD,
+            height: self.height_of(&self.project.tracks[index]) - CLIP_PAD * 2.0,
+        })
+    }
+
+    fn fade_curve_point(&self, clip: &Clip, shape: &ClipBox, edge: Edge, progress: f32) -> Point {
+        let (fade, x) = match edge {
+            Edge::In => {
+                let width = self.x_of((clip.start + clip.fade_in.len) as f64) - shape.left;
+                (clip.fade_in, shape.left + width * progress)
+            }
+            Edge::Out => {
+                let width = shape.right - self.x_of((clip.end() - clip.fade_out.len) as f64);
+                (clip.fade_out, shape.right - width * progress)
+            }
+        };
+        Point::new(x, shape.wave_top() + shape.wave_height() * (1.0 - fade.level(progress)))
+    }
+
+    fn grips(&self, clip: &Clip) -> Vec<(Grip, Point)> {
+        let Some(shape) = self.clip_box(clip) else {
+            return Vec::new();
+        };
+        if self.selected != Some(clip.id)
+            || shape.right - shape.left < MIN_CLIP_PX_FOR_HANDLES
+            || shape.wave_height() < 20.0
+        {
+            return Vec::new();
+        }
+        let fade_in_end = self.fade_curve_point(clip, &shape, Edge::In, 1.0);
+        let fade_out_start = self.fade_curve_point(clip, &shape, Edge::Out, 1.0);
+        let mut grips = Vec::with_capacity(5);
+        if fade_in_end.x - shape.left >= MIN_FADE_PX_FOR_SHAPE_HANDLE {
+            grips.push((Grip::ShapeIn, self.fade_curve_point(clip, &shape, Edge::In, 0.5)));
+        }
+        if shape.right - fade_out_start.x >= MIN_FADE_PX_FOR_SHAPE_HANDLE {
+            grips.push((Grip::ShapeOut, self.fade_curve_point(clip, &shape, Edge::Out, 0.5)));
+        }
+        grips.push((Grip::FadeIn, fade_in_end));
+        grips.push((Grip::FadeOut, fade_out_start));
+        let seen_left = shape.left.max(HEADER_W);
+        let seen_right = shape.right.min(self.width);
+        grips.push((Grip::Gain, Point::new((seen_left + seen_right) / 2.0, shape.top + shape.height - 10.0)));
+        grips
+    }
+
     fn resize_grip_at(&self, p: Point) -> Option<&Track> {
         if p.x >= HEADER_W {
             return None;
@@ -187,6 +275,12 @@ impl Timeline<'_> {
             }
             return Hit::Nothing;
         }
+        if let Some(clip) = self.selected.and_then(|id| self.project.clip(id)) {
+            let reached = self.grips(clip).into_iter().find(|(_, at)| at.distance(p) <= HANDLE_REACH);
+            if let Some((grip, _)) = reached {
+                return Hit::Grip(clip, grip);
+            }
+        }
         let Some(i) = self.track_at(p.y) else {
             return Hit::Lane;
         };
@@ -215,6 +309,15 @@ impl Timeline<'_> {
             scroll: (self.view.scroll + dx as f64 / self.view.zoom).max(0.0),
             scroll_y: (self.view.scroll_y + dy).clamp(0.0, most),
             ..self.view
+        }
+    }
+}
+
+impl Grip {
+    fn pointer(self) -> mouse::Interaction {
+        match self {
+            Grip::FadeIn | Grip::FadeOut => mouse::Interaction::ResizingHorizontally,
+            Grip::ShapeIn | Grip::ShapeOut | Grip::Gain => mouse::Interaction::ResizingVertically,
         }
     }
 }
@@ -258,6 +361,15 @@ impl canvas::Program<Message> for Timeline<'_> {
                     Hit::Mute(track) => Some(Message::ToggleMute(track.id)),
                     Hit::Remove(track) => Some(Message::RemoveTrack(track.id)),
                     Hit::AddTrack => Some(Message::AddTrack),
+                    Hit::Grip(clip, grip) => {
+                        let curve_at_grab = match grip {
+                            Grip::ShapeOut => clip.fade_out.curve,
+                            _ => clip.fade_in.curve,
+                        };
+                        let db_at_grab = (20.0 * clip.gain.max(1e-6).log10()).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
+                        state.drag = Some(Drag::Grip { clip: clip.id, grip, origin: p, curve_at_grab, db_at_grab });
+                        None
+                    }
                     Hit::Clip(clip) => {
                         state.drag = Some(Drag::Clip {
                             id: clip.id,
@@ -300,6 +412,38 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let changed = start != clip.start || track != current.id;
                         (Captured, changed.then_some(Message::MoveClip { clip: *id, track, start }))
                     }
+                    Drag::Grip { clip, grip, origin, curve_at_grab, db_at_grab } => {
+                        let Some(clip) = self.project.clip(*clip) else {
+                            return (Captured, None);
+                        };
+                        let at = self.snap(self.frames_at(p.x), free);
+                        let bent = (*curve_at_grab + (origin.y - p.y) * CURVE_PER_PX).clamp(-1.0, 1.0);
+                        let message = match grip {
+                            Grip::FadeIn => {
+                                let len = at.saturating_sub(clip.start).min(clip.len - clip.fade_out.len);
+                                let fade = Fade { len, ..clip.fade_in };
+                                (fade != clip.fade_in).then_some(Message::SetFade { clip: clip.id, edge: Edge::In, fade })
+                            }
+                            Grip::FadeOut => {
+                                let len = clip.end().saturating_sub(at).min(clip.len - clip.fade_in.len);
+                                let fade = Fade { len, ..clip.fade_out };
+                                (fade != clip.fade_out).then_some(Message::SetFade { clip: clip.id, edge: Edge::Out, fade })
+                            }
+                            Grip::ShapeIn => {
+                                let fade = Fade { curve: bent, ..clip.fade_in };
+                                (fade != clip.fade_in).then_some(Message::SetFade { clip: clip.id, edge: Edge::In, fade })
+                            }
+                            Grip::ShapeOut => {
+                                let fade = Fade { curve: bent, ..clip.fade_out };
+                                (fade != clip.fade_out).then_some(Message::SetFade { clip: clip.id, edge: Edge::Out, fade })
+                            }
+                            Grip::Gain => {
+                                let db = (*db_at_grab + (origin.y - p.y) * GAIN_DB_PER_PX).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
+                                Some(Message::ClipGain(db))
+                            }
+                        };
+                        (Captured, message)
+                    }
                     Drag::Resize { track, top } => {
                         let height = (p.y - *top).clamp(theme::MIN_TRACK_HEIGHT, theme::MAX_TRACK_HEIGHT).round();
                         let current = self.project.track(*track).map(|t| self.height_of(t));
@@ -310,7 +454,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
                 Some(Drag::Range { anchor, moving: false, .. }) => (Captured, Some(Message::RulerClicked(anchor))),
-                Some(Drag::Clip { moving: true, .. }) => (Captured, Some(Message::DragEnd)),
+                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. }) => (Captured, Some(Message::DragEnd)),
                 Some(_) => (Captured, None),
                 None => (Ignored, None),
             },
@@ -404,10 +548,12 @@ impl canvas::Program<Message> for Timeline<'_> {
         match state.drag {
             Some(Drag::Clip { moving: true, .. }) => return mouse::Interaction::Grabbing,
             Some(Drag::Resize { .. }) => return mouse::Interaction::ResizingVertically,
+            Some(Drag::Grip { grip, .. }) => return grip.pointer(),
             _ => {}
         }
         match cursor.position_in(bounds).map(|p| self.hit(p)) {
             Some(Hit::Resize(_)) => mouse::Interaction::ResizingVertically,
+            Some(Hit::Grip(_, grip)) => grip.pointer(),
             Some(Hit::Mute(_) | Hit::Remove(_) | Hit::AddTrack) => mouse::Interaction::Pointer,
             Some(Hit::Clip(_)) => mouse::Interaction::Grab,
             _ => mouse::Interaction::default(),
@@ -505,6 +651,7 @@ impl Timeline<'_> {
             Stroke::default().with_color(theme::mix(p.background, colour, 0.5)).with_width(1.0)
         };
         frame.stroke(&body, outline);
+        self.draw_fades_and_grips(frame, clip, colour);
 
         let title_on_canvas = Rectangle::new(
             Point::new(HEADER_W + shown_left, RULER_H + top),
@@ -555,7 +702,8 @@ impl Timeline<'_> {
             let last = (source_at(to_x).ceil().min(source_end - 1.0)) as usize;
             let samples = &clip.source.frames;
             let point = |i: usize| {
-                let value = ((samples[i][0] + samples[i][1]) * 0.5 * clip.gain).clamp(-1.0, 1.0);
+                let level = clip.gain * clip.fade_level(i as Frames - clip.offset);
+                let value = ((samples[i][0] + samples[i][1]) * 0.5 * level).clamp(-1.0, 1.0);
                 Point::new(
                     clip_left + ((i as f64 - clip.offset as f64) / frames_per_px) as f32,
                     middle - value * reach,
@@ -592,8 +740,9 @@ impl Timeline<'_> {
                 break;
             }
             let (lo, hi) = clip.source.peak(a as usize, (b.ceil() as usize).max(a as usize + 1));
-            let hi = middle - (hi * clip.gain).clamp(-1.0, 1.0) * reach;
-            let lo = middle - (lo * clip.gain).clamp(-1.0, 1.0) * reach;
+            let level = clip.gain * clip.fade_level((a - clip.offset as f64) as Frames);
+            let hi = middle - (hi * level).clamp(-1.0, 1.0) * reach;
+            let lo = middle - (lo * level).clamp(-1.0, 1.0) * reach;
             let thin = (1.0 - (lo - hi)).max(0.0) / 2.0;
             highs.push(Point::new(x, hi - thin));
             lows.push(Point::new(x, lo + thin));
@@ -612,6 +761,34 @@ impl Timeline<'_> {
             b.close();
         });
         frame.fill(&shape, colour);
+    }
+
+    fn draw_fades_and_grips(&self, frame: &mut Frame, clip: &Clip, colour: Color) {
+        let p = self.palette;
+        let Some(shape) = self.clip_box(clip) else {
+            return;
+        };
+        let in_lanes = |at: Point| Point::new(at.x - HEADER_W, at.y - RULER_H);
+        let curve_colour = theme::mix(colour, p.text, 0.55);
+        for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
+            if fade.len == 0 || shape.wave_height() < 8.0 {
+                continue;
+            }
+            let steps = 24;
+            let curve = Path::new(|b| {
+                b.move_to(in_lanes(self.fade_curve_point(clip, &shape, edge, 0.0)));
+                for step in 1..=steps {
+                    b.line_to(in_lanes(self.fade_curve_point(clip, &shape, edge, step as f32 / steps as f32)));
+                }
+            });
+            frame.stroke(&curve, Stroke::default().with_color(curve_colour).with_width(1.25));
+        }
+        for (grip, at) in self.grips(clip) {
+            let radius = if grip == Grip::Gain { HANDLE_RADIUS + 1.0 } else { HANDLE_RADIUS };
+            let dot = Path::circle(in_lanes(at), radius);
+            frame.fill(&dot, p.text);
+            frame.stroke(&dot, Stroke::default().with_color(p.background).with_width(1.5));
+        }
     }
 
     fn draw_ruler(&self, frame: &mut Frame, size: Size) {

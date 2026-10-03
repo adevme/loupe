@@ -10,6 +10,26 @@ pub struct TrackId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ClipId(pub u64);
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fade {
+    pub len: Frames,
+    pub curve: f32,
+}
+
+impl Fade {
+    pub const NONE: Fade = Fade { len: 0, curve: 0.0 };
+
+    pub fn level(&self, progress: f32) -> f32 {
+        progress.clamp(0.0, 1.0).powf(4f32.powf(-self.curve))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    In,
+    Out,
+}
+
 #[derive(Clone, Debug)]
 pub struct Clip {
     pub id: ClipId,
@@ -18,11 +38,25 @@ pub struct Clip {
     pub offset: Frames,
     pub len: Frames,
     pub gain: f32,
+    pub fade_in: Fade,
+    pub fade_out: Fade,
 }
 
 impl Clip {
     pub fn end(&self) -> Frames {
         self.start + self.len
+    }
+
+    pub fn fade_level(&self, frames_into_clip: Frames) -> f32 {
+        let mut level = 1.0;
+        if frames_into_clip < self.fade_in.len {
+            level *= self.fade_in.level(frames_into_clip as f32 / self.fade_in.len as f32);
+        }
+        let frames_left = self.len.saturating_sub(frames_into_clip + 1);
+        if frames_left < self.fade_out.len {
+            level *= self.fade_out.level(frames_left as f32 / self.fade_out.len as f32);
+        }
+        level
     }
 }
 
@@ -54,6 +88,7 @@ pub enum Command {
     SplitClip { clip: ClipId, at: Frames },
     DeleteClip(ClipId),
     SetClipGain { clip: ClipId, gain: f32 },
+    SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetBpm(f64),
 }
 
@@ -126,7 +161,16 @@ impl Project {
                 let t = self.track_index(track)?;
                 let id = ClipId(self.fresh());
                 let len = source.frames.len() as Frames;
-                self.tracks[t].clips.push(Clip { id, source, start, offset: 0, len, gain: 1.0 });
+                self.tracks[t].clips.push(Clip {
+                    id,
+                    source,
+                    start,
+                    offset: 0,
+                    len,
+                    gain: 1.0,
+                    fade_in: Fade::NONE,
+                    fade_out: Fade::NONE,
+                });
                 Ok(Outcome::Clip(id))
             }
             Command::MoveClip { clip, track, start } => {
@@ -154,7 +198,11 @@ impl Project {
                 right.start = at;
                 right.offset += cut;
                 right.len -= cut;
+                right.fade_in = Fade::NONE;
+                right.fade_out.len = right.fade_out.len.min(right.len);
                 left.len = cut;
+                left.fade_out = Fade::NONE;
+                left.fade_in.len = left.fade_in.len.min(left.len);
                 self.tracks[t].clips.insert(i + 1, right);
                 Ok(Outcome::Clip(id))
             }
@@ -166,6 +214,23 @@ impl Project {
             Command::SetClipGain { clip, gain } => {
                 let (t, i) = self.locate(clip)?;
                 self.tracks[t].clips[i].gain = valid_gain(gain)?;
+                Ok(Outcome::Done)
+            }
+            Command::SetClipFade { clip, edge, fade } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                let other = match edge {
+                    Edge::In => target.fade_out.len,
+                    Edge::Out => target.fade_in.len,
+                };
+                let curve_is_valid = fade.curve.is_finite() && (-1.0..=1.0).contains(&fade.curve);
+                if !curve_is_valid || fade.len + other > target.len {
+                    return Err(CommandError::InvalidValue);
+                }
+                match edge {
+                    Edge::In => target.fade_in = fade,
+                    Edge::Out => target.fade_out = fade,
+                }
                 Ok(Outcome::Done)
             }
             Command::SetBpm(bpm) => {

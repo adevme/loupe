@@ -16,15 +16,13 @@ use iced::widget::{
 };
 use iced::{keyboard, window, Alignment, Element, Length, Size, Subscription, Task};
 use loupe_engine::{
-    ClipId, Command, CommandError, Engine, Frames, Outcome, Output, Project, Source, TrackId,
+    ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Outcome, Output, Project, Source, TrackId,
 };
 
 use theme::Palette;
-use timeline::{LoopRange, Timeline, View};
+use timeline::{LoopRange, Timeline, View, MAX_GAIN_DB, MIN_GAIN_DB};
 
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
-const MIN_GAIN_DB: f32 = -24.0;
-const MAX_GAIN_DB: f32 = 12.0;
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 
@@ -74,6 +72,7 @@ pub enum Message {
     Undo,
     Redo,
     ClipGain(f32),
+    SetFade { clip: ClipId, edge: Edge, fade: Fade },
     ClipGainDone,
     AddTrack,
     RemoveTrack(TrackId),
@@ -88,6 +87,7 @@ pub enum Message {
 enum Run {
     Move(ClipId),
     Gain(ClipId),
+    Fade(ClipId, Edge),
 }
 
 struct App {
@@ -242,6 +242,9 @@ impl App {
                     let gain = 10f32.powf(db / 20.0);
                     self.edit(Some(Run::Gain(clip)), Command::SetClipGain { clip, gain });
                 }
+            }
+            Message::SetFade { clip, edge, fade } => {
+                self.edit(Some(Run::Fade(clip, edge)), Command::SetClipFade { clip, edge, fade });
             }
             Message::AddTrack => {
                 let name = format!("Track {}", self.project.tracks.len() + 1);
@@ -445,6 +448,7 @@ impl App {
             selected: self.selected,
             playhead: self.playhead,
             loop_range: self.loop_range,
+            width: self.window.width,
             cache: &self.cache,
         })
         .width(Length::Fill)
