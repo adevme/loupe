@@ -4,6 +4,7 @@ pub mod sandbox;
 pub mod au;
 pub mod changes;
 pub mod clap;
+pub mod context;
 pub mod editor;
 pub mod lv2;
 pub mod rack;

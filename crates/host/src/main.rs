@@ -47,7 +47,7 @@ impl Open {
         match self {
             Open::Vst3(effect) => effect.process_with(audio, side),
             Open::Clap(effect) => effect.process_with(audio, side),
-            Open::Lv2(effect) => effect.process(audio),
+            Open::Lv2(effect) => effect.process_with(audio, side),
             #[cfg(target_os = "macos")]
             Open::Au(effect) => effect.process(audio),
         }

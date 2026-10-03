@@ -32,6 +32,8 @@ pub struct Port {
     pub audio: bool,
     pub input: bool,
     pub default: f32,
+    pub latency: bool,
+    pub sidechain: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -198,6 +200,8 @@ fn ports_in(region: &str) -> Vec<Port> {
                 audio: chunk.contains("AudioPort"),
                 input: chunk.contains("InputPort"),
                 default: number_after(chunk, "lv2:default").unwrap_or(0.0),
+                latency: chunk.contains("lv2:latency") || chunk.contains("reportsLatency"),
+                sidechain: chunk.contains("isSideChain") || chunk.contains("sidechain"),
             });
         }
         break;
@@ -236,7 +240,11 @@ pub struct Effect {
     right: Vec<f32>,
     out_left: Vec<f32>,
     out_right: Vec<f32>,
+    side_left: Vec<f32>,
+    side_right: Vec<f32>,
     controls: Vec<f32>,
+    latency_at: Option<usize>,
+    side_at: Vec<usize>,
     _library: Library,
 }
 
@@ -245,7 +253,7 @@ unsafe impl Send for Effect {}
 impl Effect {
     pub fn start(library: Library, index: usize, rate: f64, block: usize) -> Result<Self, String> {
         let wanted = library.described.get(index).ok_or("that bundle has no such plugin")?.clone();
-        let ins: Vec<_> = wanted.ports.iter().filter(|port| port.audio && port.input).collect();
+        let ins: Vec<_> = wanted.ports.iter().filter(|port| port.audio && port.input && !port.sidechain).collect();
         let outs: Vec<_> = wanted.ports.iter().filter(|port| port.audio && !port.input).collect();
         if wanted.ports.is_empty() {
             return Err("Loupe could not read this plugin's ports".into());
@@ -287,12 +295,25 @@ impl Effect {
                 right: vec![0.0; block],
                 out_left: vec![0.0; block],
                 out_right: vec![0.0; block],
+                side_left: vec![0.0; block],
+                side_right: vec![0.0; block],
                 controls: wanted.ports.iter().map(|port| port.default).collect(),
+                latency_at: wanted.ports.iter().position(|port| port.latency && !port.audio),
+                side_at: wanted
+                    .ports
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, port)| port.audio && port.input && port.sidechain)
+                    .map(|(at, _)| at)
+                    .collect(),
                 _library: library,
             };
             let connect = (*descriptor).connect_port.ok_or("the plugin has no ports to connect")?;
             for (slot, port) in wanted.ports.iter().enumerate() {
-                let data: *mut c_void = if port.audio && port.input {
+                let data: *mut c_void = if port.audio && port.input && port.sidechain {
+                    let which = effect.side_at.iter().position(|other| *other == slot).unwrap_or(0);
+                    if which == 0 { effect.side_left.as_mut_ptr() as *mut c_void } else { effect.side_right.as_mut_ptr() as *mut c_void }
+                } else if port.audio && port.input {
                     let which = ins.iter().position(|other| other.index == port.index).unwrap_or(0);
                     if which == 0 { effect.left.as_mut_ptr() as *mut c_void } else { effect.right.as_mut_ptr() as *mut c_void }
                 } else if port.audio {
@@ -311,10 +332,19 @@ impl Effect {
     }
 
     pub fn process(&mut self, audio: &mut [[f32; 2]]) {
+        self.process_with(audio, &[]);
+    }
+
+    pub fn process_with(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         let frames = audio.len().min(self.left.len());
         for (i, frame) in audio.iter().take(frames).enumerate() {
             self.left[i] = frame[0];
             self.right[i] = frame[1];
+        }
+        for i in 0..frames {
+            let frame = side.get(i).copied().unwrap_or([0.0; 2]);
+            self.side_left[i] = frame[0];
+            self.side_right[i] = frame[1];
         }
         unsafe {
             if let Some(run) = (*self.descriptor).run {
@@ -328,7 +358,10 @@ impl Effect {
     }
 
     pub fn latency(&self) -> usize {
-        0
+        match self.latency_at {
+            Some(slot) => self.controls.get(slot).copied().unwrap_or(0.0).max(0.0) as usize,
+            None => 0,
+        }
     }
 
     pub fn turn(&mut self, knob: usize, value: f32) {

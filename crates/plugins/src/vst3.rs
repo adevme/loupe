@@ -133,6 +133,7 @@ use vst3::Steinberg::{kResultOk, IPluginBaseTrait};
 pub struct Effect {
     processor: ComPtr<IAudioProcessor>,
     component: ComPtr<IComponent>,
+    us: vst3::ComWrapper<crate::context::Us>,
     left: Vec<f32>,
     right: Vec<f32>,
     side_left: Vec<f32>,
@@ -148,8 +149,13 @@ impl Effect {
         let classes = library.classes();
         let class = classes.get(index).ok_or("that plugin has no such part")?;
         let component: ComPtr<IComponent> = unsafe { library.make(&class.id) }?;
+        let us = crate::context::ours();
+        let context = us
+            .as_com_ref::<vst3::Steinberg::FUnknown>()
+            .map(|found| found.as_ptr())
+            .unwrap_or(std::ptr::null_mut());
         unsafe {
-            if component.initialize(std::ptr::null_mut()) != kResultOk {
+            if component.initialize(context) != kResultOk {
                 return Err("the plugin would not start up".into());
             }
             component.setIoMode(IoModes_::kAdvanced as i32);
@@ -176,6 +182,7 @@ impl Effect {
             Ok(Self {
                 processor,
                 component,
+                us,
                 left: vec![0.0; block],
                 right: vec![0.0; block],
                 side_left: vec![0.0; block],
@@ -220,7 +227,12 @@ impl Effect {
                 None
             };
             let Some(controller) = controller.or_else(|| self.component.cast()) else { return out };
-            if controller.initialize(std::ptr::null_mut()) != kResultOk {
+            let context = self
+                .us
+                .as_com_ref::<vst3::Steinberg::FUnknown>()
+                .map(|found| found.as_ptr())
+                .unwrap_or(std::ptr::null_mut());
+            if controller.initialize(context) != kResultOk {
                 return out;
             }
             let count = controller.getParameterCount();
