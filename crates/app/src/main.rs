@@ -12,6 +12,7 @@ mod mixer;
 mod pointer;
 mod pool;
 mod routing;
+mod plugins;
 mod racks;
 mod recording;
 mod selection;
@@ -153,6 +154,13 @@ pub enum Message {
     ToggleCollapsed(loupe_engine::TrackId),
     SetTrackParent { track: TrackId, parent: Option<TrackId> },
     OpenRouting(TrackId),
+    OpenPlugins(TrackId),
+    PluginFilter(String),
+    PluginsFound(Vec<loupe_plugins::Found>),
+    AddPlugin(TrackId, usize),
+    RemovePlugin(TrackId, usize),
+    BypassPlugin(TrackId, usize),
+    ShowPlugin(TrackId, usize),
     OpenMatrix,
     AddSend { from: TrackId, to: TrackId },
     RemoveSend { from: TrackId, to: TrackId },
@@ -258,6 +266,7 @@ pub enum Overlay {
     Export,
     Clip(ClipId),
     Routing(TrackId),
+    Plugins(TrackId),
     Matrix,
 }
 
@@ -297,6 +306,9 @@ struct App {
     engine: Engine,
     racks: Option<Box<dyn Chains>>,
     fx_was: u64,
+    found: Vec<loupe_plugins::Found>,
+    scanning: bool,
+    plugin_filter: String,
     project: Project,
     undo: Vec<Project>,
     redo: Vec<Project>,
@@ -416,6 +428,9 @@ impl App {
             cache: Cache::new(),
             racks: None,
             fx_was: 0,
+            found: Vec::new(),
+            scanning: true,
+            plugin_filter: String::new(),
         };
         let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args_os()
             .skip(1)
@@ -431,7 +446,8 @@ impl App {
             }
             None => app.import(audio),
         };
-        (app, task)
+        let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
+        (app, Task::batch([task, hunt]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -886,6 +902,52 @@ impl App {
                 self.edit(None, Command::SetTrackParent { track, parent });
             }
             Message::OpenRouting(track) => self.overlay = Overlay::Routing(track),
+            Message::OpenPlugins(track) => {
+                self.plugin_filter.clear();
+                self.overlay = Overlay::Plugins(track);
+                return text_input::focus(plugins::FILTER_ID);
+            }
+            Message::PluginFilter(typed) => self.plugin_filter = typed,
+            Message::PluginsFound(found) => {
+                self.found = found;
+                self.scanning = false;
+            }
+            Message::AddPlugin(track, which) => {
+                if let Some(plugin) = self.found.get(which).cloned() {
+                    let fx = loupe_engine::Fx {
+                        path: plugin.path.clone(),
+                        index: plugin.index,
+                        name: plugin.name.clone(),
+                        bypassed: false,
+                        state: Vec::new(),
+                    };
+                    self.overlay = Overlay::None;
+                    self.edit(None, Command::AddFx { track, fx });
+                }
+            }
+            Message::RemovePlugin(track, slot) => {
+                self.edit(None, Command::RemoveFx { track, slot });
+            }
+            Message::ShowPlugin(track, slot) => {
+                if let Some(mut racks) = self.borrow_racks() {
+                    if let Err(why) = racks.show(track, slot) {
+                        self.problem = Some(why);
+                    }
+                    self.racks = Some(racks);
+                    self.hand_racks_over();
+                }
+            }
+            Message::BypassPlugin(track, slot) => {
+                let bypassed = self
+                    .project
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == track)
+                    .and_then(|t| t.fx.get(slot))
+                    .map(|fx| !fx.bypassed)
+                    .unwrap_or(false);
+                self.edit(None, Command::BypassFx { track, slot, bypassed });
+            }
             Message::OpenMatrix => self.overlay = Overlay::Matrix,
             Message::AddSend { from, to } => {
                 self.edit(None, Command::AddSend { from, to });

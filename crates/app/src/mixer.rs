@@ -155,6 +155,7 @@ impl App {
                         ..Default::default()
                     }),
                     text(name).size(12).font(palette.medium),
+                    self.fx_block(id),
                     hrow![
                         vertical_slider(SILENT_DB..=LOUDEST_DB, db, move |db| Message::TrackGain(id, db))
                             .step(0.1)

@@ -31,6 +31,7 @@ impl App {
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
             Overlay::Routing(track) => self.centred(self.routing_sheet(*track)),
+            Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
         }
     }
