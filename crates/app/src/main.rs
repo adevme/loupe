@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backup;
+mod autosaving;
 mod clip_window;
 mod crash;
 mod exporting;
@@ -60,7 +62,7 @@ const EXPORT_PROGRESS_STEPS: u32 = 1000;
 const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-const SETTINGS_PAGE_HEIGHT: f32 = 196.0;
+const SETTINGS_PAGE_HEIGHT: f32 = 330.0;
 
 fn main() -> iced::Result {
     crash::keep_a_record();
@@ -91,7 +93,9 @@ fn main() -> iced::Result {
     if let Some(font) = icon_font {
         loupe = loupe.font(font);
     }
-    loupe.run_with(move || App::new(loaded, settings))
+    let ran = loupe.run_with(move || App::new(loaded, settings));
+    backup::mark_closed();
+    ran
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
@@ -191,6 +195,14 @@ pub enum Message {
     SendSidechain { from: TrackId, to: TrackId, sidechain: bool },
     LevelPressed(mixer::Level),
     OpenClip(ClipId),
+    Autosave,
+    AutosaveDone(u64, Result<PathBuf, String>),
+    AutosaveTyped(String),
+    AutosaveEntered,
+    KeptTyped(String),
+    KeptEntered,
+    Recover,
+    SkipRecovery,
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
     TogglePreview(ClipId),
@@ -295,6 +307,7 @@ pub enum Overlay {
     Knobs(stockwin::Spot, usize),
     Stock,
     Matrix,
+    Recover,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -383,6 +396,17 @@ struct App {
     templates: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     cache: Cache,
+    autosave_minutes: u32,
+    backups_kept: u32,
+    autosave_text: String,
+    kept_text: String,
+    autosave_problem: Option<String>,
+    revision: u64,
+    backed_up: u64,
+    remembered: u64,
+    lost: Vec<backup::Lost>,
+    recovering: Option<Option<PathBuf>>,
+    marked: Option<backup::Place>,
 }
 
 impl App {
@@ -458,6 +482,17 @@ impl App {
             templates: Vec::new(),
             recent: Vec::new(),
             cache: Cache::new(),
+            autosave_minutes: settings.autosave_minutes,
+            backups_kept: settings.backups_kept,
+            autosave_text: settings.autosave_minutes.to_string(),
+            kept_text: settings.backups_kept.to_string(),
+            autosave_problem: None,
+            revision: 0,
+            backed_up: 0,
+            remembered: 0,
+            lost: Vec::new(),
+            recovering: None,
+            marked: None,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -483,6 +518,11 @@ impl App {
             }
             None => app.import(audio),
         };
+        app.lost = backup::find_lost();
+        if !app.lost.is_empty() {
+            app.overlay = Overlay::Recover;
+        }
+        app.keep_safe();
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
         (app, Task::batch([task, hunt]))
     }
@@ -490,6 +530,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         let before = self.screen;
         let task = self.handle(message);
+        self.keep_safe();
         match (before, self.screen) {
             (Screen::Song, Screen::Home) => Task::batch([
                 task,
@@ -1170,7 +1211,14 @@ impl App {
                 self.loading = self.loading.saturating_sub(1);
                 self.opening = None;
                 match result {
-                    Ok(opened) => self.adopt(path, opened, as_template),
+                    Ok(opened) => {
+                        self.adopt(path, opened, as_template);
+                        if let Some(original) = self.recovering.take() {
+                            self.path = original;
+                            self.dirty = true;
+                            self.revision += 1;
+                        }
+                    }
                     Err(why) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         self.problem = Some(format!("Could not open {name}: {why}"));
@@ -1261,6 +1309,47 @@ impl App {
                 }
             }
             Message::FolderReset => self.use_folder(None),
+            Message::Autosave => return self.autosave(),
+            Message::AutosaveDone(revision, result) => match result {
+                Ok(_) => self.backed_up = self.backed_up.max(revision),
+                Err(why) => self.problem = Some(format!("Could not autosave: {why}")),
+            },
+            Message::AutosaveTyped(typed) => {
+                if settings::typed_number(&typed) {
+                    self.autosave_text = typed;
+                    self.autosave_problem = None;
+                }
+            }
+            Message::AutosaveEntered => {
+                match settings::autosave_minutes_from(&self.autosave_text) {
+                    Ok(minutes) => {
+                        self.autosave_minutes = minutes;
+                        self.autosave_text = minutes.to_string();
+                        self.autosave_problem = settings::save("autosave_minutes", &minutes.to_string()).err();
+                    }
+                    Err(why) => self.autosave_problem = Some(why),
+                }
+                return unfocus();
+            }
+            Message::KeptTyped(typed) => {
+                if settings::typed_number(&typed) {
+                    self.kept_text = typed;
+                    self.autosave_problem = None;
+                }
+            }
+            Message::KeptEntered => {
+                match settings::backups_kept_from(&self.kept_text) {
+                    Ok(kept) => {
+                        self.backups_kept = kept;
+                        self.kept_text = kept.to_string();
+                        self.autosave_problem = settings::save("backups_kept", &kept.to_string()).err();
+                    }
+                    Err(why) => self.autosave_problem = Some(why),
+                }
+                return unfocus();
+            }
+            Message::Recover => return self.recover(),
+            Message::SkipRecovery => self.skip_recovery(),
             Message::SettingsTab(tab) => self.settings_tab = tab,
             Message::ThemeChosen(name) => return self.use_theme(name),
             Message::ThemeFontLoaded => self.cache.clear(),
@@ -1291,7 +1380,11 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, ticks, mixer_drag])
+        let autosave = match self.autosave_minutes {
+            0 => Subscription::none(),
+            minutes => iced::time::every(Duration::from_secs(minutes as u64 * 60)).map(|_| Message::Autosave),
+        };
+        Subscription::batch([shortcuts, window, ticks, mixer_drag, autosave])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -1308,6 +1401,7 @@ impl App {
         self.redo.clear();
         self.run = run;
         self.dirty = true;
+        self.revision += 1;
         self.engine.set_project(&self.project);
         self.cache.clear();
     }
@@ -1331,6 +1425,7 @@ impl App {
                 self.problem = None;
                 self.notice = None;
                 self.dirty = true;
+                self.revision += 1;
                 self.engine.set_project(&self.project);
                 self.chains_if_changed();
                 let timeline_looks_the_same = matches!(run, Some(Run::Master | Run::TrackGain(_)));
@@ -1503,6 +1598,7 @@ impl App {
             stockwin::Spot::Clip(clip) => self.project.apply(Command::SetClipFxState { clip, slot, state }),
         };
         self.dirty = true;
+        self.revision += 1;
     }
 
     fn writing_to(&self, target: loupe_engine::Target) -> Option<loupe_engine::Mode> {
@@ -1604,6 +1700,7 @@ impl App {
     fn restored(&mut self) {
         self.run = None;
         self.dirty = true;
+        self.revision += 1;
         self.forget_gone_clips();
         self.bpm = format_bpm(self.project.bpm);
         self.changed();
@@ -2018,7 +2115,7 @@ impl App {
         .spacing(4);
         let page = match current {
             SettingsTab::Display => column![self.theme_picker(), rule(palette), scale].spacing(16),
-            SettingsTab::File => folder,
+            SettingsTab::File => column![folder, rule(palette), self.autosave_settings()].spacing(16),
             SettingsTab::Recording => recording,
         };
         let body = column![tabs, rule(palette), container(page).height(SETTINGS_PAGE_HEIGHT)].spacing(14);

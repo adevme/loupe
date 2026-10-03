@@ -11,6 +11,7 @@ pub fn keep_a_record() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         write_down(info);
+        crate::backup::last_chance();
         default_hook(info);
     }));
 }
