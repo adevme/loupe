@@ -178,6 +178,31 @@ impl Effect {
         }
     }
 
+    pub fn save(&self) -> Result<Vec<u8>, String> {
+        let wrapper = crate::stream::Bytes::empty();
+        let stream = wrapper.as_com_ref::<vst3::Steinberg::IBStream>().ok_or("no stream")?;
+        unsafe {
+            if self.component.getState(stream.as_ptr()) != kResultOk {
+                return Err("the plugin would not hand over its settings".into());
+            }
+        }
+        Ok(wrapper.taken())
+    }
+
+    pub fn restore(&mut self, state: &[u8]) -> Result<(), String> {
+        if state.is_empty() {
+            return Ok(());
+        }
+        let wrapper = crate::stream::Bytes::holding(state.to_vec());
+        let stream = wrapper.as_com_ref::<vst3::Steinberg::IBStream>().ok_or("no stream")?;
+        unsafe {
+            if self.component.setState(stream.as_ptr()) != kResultOk {
+                return Err("the plugin would not take those settings".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn process(&mut self, audio: &mut [[f32; 2]]) {
         let frames = audio.len().min(self.left.len());
         for (i, frame) in audio.iter().take(frames).enumerate() {

@@ -2,7 +2,7 @@ use std::io::{BufReader, Write};
 use std::path::PathBuf;
 
 use loupe_plugins::vst3::{Effect, Library};
-use loupe_plugins::wire::{next_line, Ask, Reply};
+use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Reply};
 
 #[cfg(windows)]
 mod com {
@@ -41,8 +41,36 @@ fn main() {
             let _ = Reply::Trouble(format!("I did not understand {}", line.trim())).write(&mut out);
             continue;
         };
+        if ask == Ask::Process {
+            let mut audio = Vec::new();
+            if read_block(&mut input, &mut audio).is_err() {
+                break;
+            }
+            if let Some(effect) = open.as_mut() {
+                effect.process(&mut audio);
+            }
+            if write_block(&mut out, &audio).is_err() {
+                break;
+            }
+            continue;
+        }
         let reply = match ask {
             Ask::Quit => break,
+            Ask::Process => continue,
+            Ask::Save => match open.as_ref() {
+                Some(effect) => match effect.save() {
+                    Ok(state) => Reply::State(state),
+                    Err(why) => Reply::Trouble(why),
+                },
+                None => Reply::Trouble("no plugin is open".into()),
+            },
+            Ask::Restore(state) => match open.as_mut() {
+                Some(effect) => match effect.restore(&state) {
+                    Ok(()) => Reply::Fine,
+                    Err(why) => Reply::Trouble(why),
+                },
+                None => Reply::Trouble("no plugin is open".into()),
+            },
             Ask::Classes(path) => match Library::open(&PathBuf::from(&path)) {
                 Ok(library) => {
                     let names = library.classes().into_iter().map(|class| class.name).collect();

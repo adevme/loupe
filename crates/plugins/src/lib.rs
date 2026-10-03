@@ -1,6 +1,7 @@
 mod scan;
 pub mod vst3;
 pub mod sandbox;
+pub mod stream;
 pub mod wire;
 
 pub use scan::{folders, scan, Format, Found};
