@@ -7,17 +7,17 @@ use crate::pointer::EndlessDrag;
 use crate::theme::Palette;
 use crate::Message;
 
-const DB_PER_PX: f32 = 0.15;
 const START_ANGLE: f32 = 0.75 * std::f32::consts::PI;
 const SWEEP: f32 = 1.5 * std::f32::consts::PI;
 const DOUBLE_CLICK: Duration = Duration::from_millis(350);
 
 pub struct Knob<'a> {
     pub palette: &'a Palette,
-    pub db: f32,
+    pub value: f32,
     pub lowest: f32,
     pub highest: f32,
     pub resting: f32,
+    pub per_px: f32,
     pub on_turn: fn(f32) -> Message,
 }
 
@@ -48,19 +48,19 @@ impl canvas::Program<Message> for Knob<'_> {
                 if pressed_again {
                     return (Captured, Some((self.on_turn)(self.resting)));
                 }
-                state.pull = Some((EndlessDrag::start(p, true), self.db));
+                state.pull = Some((EndlessDrag::start(p, true), self.value));
                 (Captured, None)
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let at = cursor.position().map(|p| Point::new(p.x - bounds.x, p.y - bounds.y));
-                let (Some((pull, db_at_grab)), Some(p)) = (state.pull.as_mut(), at) else {
+                let (Some((pull, value_at_grab)), Some(p)) = (state.pull.as_mut(), at) else {
                     return (Ignored, None);
                 };
                 let Some(travel_up) = pull.moved(p) else {
                     return (Captured, None);
                 };
-                let db = (*db_at_grab + travel_up * DB_PER_PX).clamp(self.lowest, self.highest);
-                (Captured, (db != self.db).then(|| (self.on_turn)(db)))
+                let value = (*value_at_grab + travel_up * self.per_px).clamp(self.lowest, self.highest);
+                (Captured, (value != self.value).then(|| (self.on_turn)(value)))
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.pull.take() {
                 Some(_) => (Captured, Some(Message::DragEnd)),
@@ -82,7 +82,7 @@ impl canvas::Program<Message> for Knob<'_> {
         let mut frame = Frame::new(renderer, bounds.size());
         let centre = Point::new(bounds.width / 2.0, bounds.height / 2.0);
         let radius = bounds.width.min(bounds.height) / 2.0 - 1.5;
-        let turned = ((self.db - self.lowest) / (self.highest - self.lowest)).clamp(0.0, 1.0);
+        let turned = ((self.value - self.lowest) / (self.highest - self.lowest)).clamp(0.0, 1.0);
         let angle = START_ANGLE + SWEEP * turned;
         let sweep = |until: f32| {
             Path::new(|b| {

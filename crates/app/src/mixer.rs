@@ -15,6 +15,16 @@ const NAME_LENGTH: usize = 9;
 pub const SILENT_DB: f32 = -60.0;
 pub const LOUDEST_DB: f32 = 6.0;
 pub const LEVEL_ENTRY_ID: &str = "level-entry";
+pub const LOUDEST_MASTER_PERCENT: f32 = 125.0;
+
+pub fn percent_text(gain: f32) -> String {
+    format!("{:.0}%", gain * 100.0)
+}
+
+pub fn percent_from_typed(typed: &str) -> Option<f32> {
+    let number = typed.trim().trim_end_matches('%').trim();
+    number.parse::<f32>().ok().filter(|percent| percent.is_finite()).map(|percent| percent.clamp(0.0, LOUDEST_MASTER_PERCENT))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Level {
@@ -71,7 +81,8 @@ impl App {
                 .style(move |_, status| palette.field(status))
                 .into();
         }
-        mouse_area(text(level_text(gain)).size(11.5).font(palette.mono).color(palette.text_dim))
+        let shown = if level == Level::Master { percent_text(gain) } else { level_text(gain) };
+        mouse_area(text(shown).size(11.5).font(palette.mono).color(palette.text_dim))
             .on_press(Message::LevelPressed(level))
             .into()
     }

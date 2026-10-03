@@ -38,6 +38,7 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
 const TOP_BAR_HEIGHT: f32 = 53.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -115,7 +116,7 @@ pub enum Message {
     MixerGrabbed,
     MixerDragged(f32),
     MixerReleased,
-    MasterGain(f32),
+    MasterPercent(f32),
     LevelPressed(mixer::Level),
     OpenClip(ClipId),
     ClipToTrack(ClipId, TrackId),
@@ -597,7 +598,11 @@ impl App {
                         mixer::Level::Clip(clip) => self.project.clip(clip).map(|clip| clip.gain),
                     };
                     if let Some(gain) = gain {
-                        self.entry = mixer::level_text(gain);
+                        self.entry = if level == mixer::Level::Master {
+                            mixer::percent_text(gain)
+                        } else {
+                            mixer::level_text(gain)
+                        };
                         self.editing_level = Some(level);
                         return Task::batch([
                             text_input::focus(mixer::LEVEL_ENTRY_ID),
@@ -607,10 +612,17 @@ impl App {
                 }
             }
             Message::LevelEntered => {
+                if self.editing_level == Some(mixer::Level::Master) {
+                    self.editing_level = None;
+                    if let Some(percent) = mixer::percent_from_typed(&self.entry) {
+                        self.edit(None, Command::SetMasterGain(percent / 100.0));
+                    }
+                    return unfocus();
+                }
                 if let (Some(level), Some(db)) = (self.editing_level.take(), mixer::db_from_typed(&self.entry)) {
                     let fader = mixer::gain_from_db(db.clamp(mixer::SILENT_DB, mixer::LOUDEST_DB));
                     let command = match level {
-                        mixer::Level::Master => Command::SetMasterGain(fader),
+                        mixer::Level::Master => return unfocus(),
                         mixer::Level::Track(track) => Command::SetTrackGain { track, gain: fader },
                         mixer::Level::Clip(clip) => {
                             let gain = 10f32.powf(db.clamp(timeline::MIN_GAIN_DB, timeline::MAX_GAIN_DB) / 20.0);
@@ -621,8 +633,8 @@ impl App {
                 }
                 return unfocus();
             }
-            Message::MasterGain(db) => {
-                self.edit(Some(Run::Master), Command::SetMasterGain(mixer::gain_from_db(db)));
+            Message::MasterPercent(percent) => {
+                self.edit(Some(Run::Master), Command::SetMasterGain(percent / 100.0));
             }
             Message::TogglePool => {
                 self.pool_open = !self.pool_open;
@@ -1018,11 +1030,12 @@ impl App {
             text("Master").size(11).font(palette.medium).color(palette.text_dim),
             canvas(knob::Knob {
                 palette: &self.palette,
-                db: mixer::db_from_gain(self.project.master),
-                lowest: mixer::SILENT_DB,
-                highest: mixer::LOUDEST_DB,
-                resting: 0.0,
-                on_turn: Message::MasterGain,
+                value: self.project.master * 100.0,
+                lowest: 0.0,
+                highest: mixer::LOUDEST_MASTER_PERCENT,
+                resting: 100.0,
+                per_px: MASTER_PERCENT_PER_PX,
+                on_turn: Message::MasterPercent,
             })
             .width(30)
             .height(30),
