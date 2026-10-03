@@ -78,8 +78,12 @@ pub fn folders() -> Vec<(Format, PathBuf)> {
 pub fn scan(places: &[(Format, PathBuf)]) -> Vec<Found> {
     let mut found = Vec::new();
     for (format, place) in places {
+        if *format == Format::Au {
+            continue;
+        }
         look(*format, place, place, &mut found, 0);
     }
+    found.extend(audio_units());
     found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.format.cmp(&b.format)));
     found.dedup_by(|a, b| a.path == b.path && a.index == b.index);
     found
@@ -159,4 +163,24 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "A");
     }
+}
+
+#[cfg(target_os = "macos")]
+fn audio_units() -> Vec<Found> {
+    crate::au::effects()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, _))| Found {
+            name,
+            path: PathBuf::from("audio-units.component"),
+            format: Format::Au,
+            vendor: None,
+            index,
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn audio_units() -> Vec<Found> {
+    Vec::new()
 }

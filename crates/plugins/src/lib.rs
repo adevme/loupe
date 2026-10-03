@@ -5,6 +5,7 @@ pub mod stream;
 pub mod rack;
 pub mod clap;
 pub mod lv2;
+pub mod au;
 pub mod wire;
 
 pub use scan::{folders, scan, Format, Found};
