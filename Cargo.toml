@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/app", "crates/plugins", "crates/host"]
+members = ["crates/engine", "crates/app", "crates/plugins", "crates/host", "crates/stock"]
 
 [profile.release]
 lto = true
@@ -8,4 +8,7 @@ strip = true
 opt-level = 3
 
 [profile.dev.package.loupe-engine]
+opt-level = 3
+
+[profile.dev.package.loupe-stock]
 opt-level = 3
