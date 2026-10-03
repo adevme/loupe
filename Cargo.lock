@@ -1697,8 +1697,6 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba25a18cfa6d5cc160aca7e1b34f73ccdff21680fa8702168c09739767b6c66f"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2234,7 +2232,20 @@ version = "0.1.0"
 dependencies = [
  "clap-sys",
  "libloading 0.8.9",
+ "loupe-stock",
  "vst3",
+]
+
+[[package]]
+name = "loupe-stock"
+version = "0.1.0"
+
+[[package]]
+name = "loupe-stock-ui"
+version = "0.1.0"
+dependencies = [
+ "iced",
+ "loupe-stock",
 ]
 
 [[package]]

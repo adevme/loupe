@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/app", "crates/plugins", "crates/host"]
+members = ["crates/engine", "crates/app", "crates/plugins", "crates/host", "crates/stock", "crates/stock-ui"]
 
 [profile.release]
 lto = true
@@ -9,3 +9,9 @@ opt-level = 3
 
 [profile.dev.package.loupe-engine]
 opt-level = 3
+
+[profile.dev.package.loupe-stock]
+opt-level = 3
+
+[patch.crates-io]
+iced_graphics = { path = "vendor/iced_graphics" }
