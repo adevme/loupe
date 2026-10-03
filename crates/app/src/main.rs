@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clip_window;
+mod exporting;
 mod files;
 mod home;
 mod icons;
@@ -148,6 +149,13 @@ pub enum Message {
     SaveAs,
     SavePicked(Option<PathBuf>),
     SaveElsewhere,
+    OpenExport,
+    ExportSplit(bool),
+    ExportRangeOnly(bool),
+    ExportElsewhere,
+    ExportFolderPicked(Option<PathBuf>),
+    StartExport,
+    Exported(Result<PathBuf, String>),
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -183,6 +191,7 @@ pub enum Overlay {
     ConfirmDiscard(Pending),
     TemplateName,
     SaveName,
+    Export,
     Clip(ClipId),
 }
 
@@ -220,6 +229,11 @@ struct App {
     bpm: String,
     loading: usize,
     problem: Option<String>,
+    notice: Option<String>,
+    export_split: bool,
+    export_range_only: bool,
+    export_elsewhere: Option<PathBuf>,
+    exporting: bool,
     startup_problem: Option<String>,
     scale: f64,
     pending_scale: f64,
@@ -260,6 +274,11 @@ impl App {
             editing_level: None,
             preview: None,
             problem: None,
+            notice: None,
+            export_split: false,
+            export_range_only: false,
+            export_elsewhere: None,
+            exporting: false,
             startup_problem: no_sound.or(loaded.problem).or(no_folder),
             bpm: format_bpm(project.bpm),
             engine,
@@ -741,6 +760,27 @@ impl App {
                 }
             }
             Message::SaveElsewhere => return self.save_elsewhere(),
+            Message::OpenExport => {
+                if !self.project.tracks.is_empty() {
+                    self.overlay = Overlay::Export;
+                }
+            }
+            Message::ExportSplit(split) => self.export_split = split,
+            Message::ExportRangeOnly(range_only) => self.export_range_only = range_only,
+            Message::ExportElsewhere => return self.pick_export_folder(),
+            Message::ExportFolderPicked(folder) => {
+                if folder.is_some() {
+                    self.export_elsewhere = folder;
+                }
+            }
+            Message::StartExport => return self.start_export(),
+            Message::Exported(result) => {
+                self.exporting = false;
+                match result {
+                    Ok(folder) => self.notice = Some(format!("Exported to {}", folder.display())),
+                    Err(why) => self.problem = Some(format!("Could not export: {why}")),
+                }
+            }
             Message::SavePicked(path) => {
                 if let Some(path) = path {
                     self.write_to(path);
@@ -840,6 +880,7 @@ impl App {
                 self.redo.clear();
                 self.run = run;
                 self.problem = None;
+                self.notice = None;
                 self.dirty = true;
                 self.engine.set_project(&self.project);
                 let timeline_looks_the_same = matches!(run, Some(Run::Master | Run::TrackGain(_)));
@@ -1206,6 +1247,10 @@ impl App {
         let palette = self.palette;
         let line = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
             text(problem.as_str()).size(12).color(palette.danger)
+        } else if self.exporting {
+            text("Exporting…").size(12).color(palette.text_dim)
+        } else if let Some(notice) = &self.notice {
+            text(notice.as_str()).size(12).color(palette.text)
         } else if self.loading > 0 {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
             text(format!("Loading {what}…")).size(12).color(palette.text_dim)
@@ -1243,6 +1288,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("s", true, true) => Some(Message::SaveAs),
                 ("o", true, _) => Some(Message::OpenProject),
                 ("w", true, _) => Some(Message::GoHome),
+                ("e", true, _) => Some(Message::OpenExport),
                 ("z", true, false) => Some(Message::Undo),
                 ("z", true, true) | ("y", true, _) => Some(Message::Redo),
                 ("i", true, _) => Some(Message::Import),

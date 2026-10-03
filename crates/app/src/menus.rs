@@ -7,7 +7,7 @@ use loupe_engine::TrackId;
 use crate::{rule, App, Message, Overlay};
 
 const MENU_WIDTH: f32 = 220.0;
-const TALLEST_MENU: f32 = 250.0;
+const TALLEST_MENU: f32 = 290.0;
 const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_AT: Point = Point::new(14.0, 44.0);
 const HELP_MENU_AT: Point = Point::new(72.0, 44.0);
@@ -21,6 +21,7 @@ impl App {
             Overlay::ConfirmDiscard(_) => self.centred(self.discard_sheet()),
             Overlay::TemplateName => self.centred(self.template_sheet()),
             Overlay::SaveName => self.centred(self.save_sheet()),
+            Overlay::Export => self.centred(self.export_sheet()),
             Overlay::Clip(clip) => self.centred(self.clip_sheet(*clip)),
             Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
             Overlay::HelpMenu => self.floating(HELP_MENU_AT, self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
@@ -99,6 +100,7 @@ impl App {
             items.push(self.item("Save", "Ctrl+S", Some(Message::Save)));
             items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
             items.push(self.item("Save as template…", "", Some(Message::SaveAsTemplate)));
+            items.push(self.item("Export…", "Ctrl+E", Some(Message::OpenExport)));
         }
         items.push(rule(self.palette));
         let audio = if self.pool_open { "Hide all audio" } else { "Show all audio" };
