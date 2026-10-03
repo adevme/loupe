@@ -33,16 +33,17 @@ impl Source {
         Self { name: name.into(), path: PathBuf::new(), frames, peaks }
     }
 
+    pub fn missing(path: &Path) -> Self {
+        Self { name: file_name(path), path: path.to_path_buf(), frames: Vec::new(), peaks: build_peaks(&[]) }
+    }
+
     pub fn load(path: &Path, rate: u32) -> Result<Self, String> {
         let (frames, file_rate) = decode(path)?;
         if frames.is_empty() {
             return Err("the file has no audio in it".into());
         }
         let frames = resample(&frames, file_rate, rate);
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Audio".into());
+        let name = file_name(path);
         let peaks = build_peaks(&frames);
         Ok(Self { name, path: path.to_path_buf(), frames, peaks })
     }
@@ -73,6 +74,10 @@ impl Source {
         }
         (lo, hi)
     }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Audio".into())
 }
 
 fn build_peaks(frames: &[[f32; 2]]) -> Vec<Vec<[f32; 2]>> {

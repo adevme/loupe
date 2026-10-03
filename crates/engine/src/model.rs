@@ -86,12 +86,14 @@ pub enum Command {
     RenameTrack { track: TrackId, name: String },
     SetTrackColour { track: TrackId, colour: Option<[u8; 3]> },
     DuplicateTrack(TrackId),
+    AddSource(Arc<Source>),
     SetTrackGain { track: TrackId, gain: f32 },
     SetTrackMuted { track: TrackId, muted: bool },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
     SplitClip { clip: ClipId, at: Frames },
     DeleteClip(ClipId),
+    TrimClip { clip: ClipId, offset: Frames, len: Frames },
     SetClipGain { clip: ClipId, gain: f32 },
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetBpm(f64),
@@ -177,6 +179,10 @@ impl Project {
                 self.tracks.insert(t + 1, copy);
                 Ok(Outcome::Track(id))
             }
+            Command::AddSource(source) => {
+                self.keep(&source);
+                Ok(Outcome::Done)
+            }
             Command::SetTrackGain { track, gain } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].gain = valid_gain(gain)?;
@@ -240,6 +246,20 @@ impl Project {
             Command::DeleteClip(clip) => {
                 let (t, i) = self.locate(clip)?;
                 self.tracks[t].clips.remove(i);
+                Ok(Outcome::Done)
+            }
+            Command::TrimClip { clip, offset, len } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                let available = target.source.frames.len() as Frames;
+                let len = if available == 0 { len } else { len.min(available.saturating_sub(offset)) };
+                if len == 0 {
+                    return Err(CommandError::InvalidValue);
+                }
+                target.offset = offset;
+                target.len = len;
+                target.fade_in.len = target.fade_in.len.min(len);
+                target.fade_out.len = target.fade_out.len.min(len - target.fade_in.len);
                 Ok(Outcome::Done)
             }
             Command::SetClipGain { clip, gain } => {

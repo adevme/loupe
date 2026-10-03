@@ -1,10 +1,10 @@
 use iced::widget::{
     button, center, column, container, horizontal_space, mouse_area, opaque, row, text, text_input, Space,
 };
-use iced::{Alignment, Element, Length, Point};
+use iced::{Alignment, Color, Element, Length, Point};
 use loupe_engine::TrackId;
 
-use crate::{App, Message, Overlay};
+use crate::{rule, App, Message, Overlay};
 
 const MENU_WIDTH: f32 = 220.0;
 const TALLEST_MENU: f32 = 190.0;
@@ -17,6 +17,7 @@ impl App {
         match &self.overlay {
             Overlay::None => Space::new(0, 0).into(),
             Overlay::Settings => self.centred(self.settings_sheet()),
+            Overlay::ConfirmDiscard => self.centred(self.discard_sheet()),
             Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
@@ -66,8 +67,16 @@ impl App {
     }
 
     fn file_menu(&self) -> Element<'_, Message> {
+        let has_song = !self.project.tracks.is_empty();
+        let mut items = vec![self.item("Open project…", "Ctrl+O", Some(Message::OpenProject))];
+        if has_song {
+            items.push(self.item("Save", "Ctrl+S", Some(Message::Save)));
+            items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
+        }
+        items.push(rule(self.palette));
         let audio = if self.pool_open { "Hide all audio" } else { "Show all audio" };
-        self.menu(vec![self.item(audio, "", Some(Message::TogglePool))])
+        items.push(self.item(audio, "", Some(Message::TogglePool)));
+        self.menu(items)
     }
 
     fn track_menu(&self, track: TrackId) -> Element<'_, Message> {
@@ -122,6 +131,36 @@ impl App {
         ])
     }
 
+    fn discard_sheet(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let choices = row![
+            horizontal_space(),
+            button(text("Cancel").size(13).font(palette.medium))
+                .padding([7, 14])
+                .style(move |_, status| palette.outlined(status))
+                .on_press(Message::CloseOverlay),
+            button(text("Discard and open").size(13).font(palette.medium).color(Color::WHITE))
+                .padding([7, 14])
+                .style(move |_, status| palette.destructive(status))
+                .on_press(Message::DiscardAndOpen),
+        ]
+        .spacing(10);
+        container(
+            column![
+                text("Open another project?").size(16).font(palette.semibold),
+                text("This song has changes that are not saved. Opening another project discards them.")
+                    .size(13)
+                    .color(palette.text_dim),
+                choices,
+            ]
+            .spacing(14),
+        )
+        .padding(20)
+        .width(Length::Fill)
+        .max_width(460)
+        .style(move |_| palette.sheet())
+        .into()
+    }
 }
 
 pub fn colour_from_hex(typed: &str) -> Option<[u8; 3]> {

@@ -236,6 +236,19 @@ impl Palette {
         button::Style { background: Some(colour.into()), border, ..Default::default() }
     }
 
+    pub fn destructive(&self, status: button::Status) -> button::Style {
+        let background = match status {
+            button::Status::Hovered | button::Status::Pressed => mix(self.danger, Color::BLACK, 0.12),
+            _ => mix(self.danger, Color::BLACK, 0.25),
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color: Color::WHITE,
+            border: Border::default().rounded(6),
+            ..Default::default()
+        }
+    }
+
     pub fn mute(&self, muted: bool, status: button::Status) -> button::Style {
         let (background, text_color) = match (muted, status) {
             (true, _) => (self.danger, self.on_accent),

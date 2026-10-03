@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod files;
 mod icons;
 mod menus;
 mod mixer;
@@ -39,7 +40,7 @@ fn main() -> iced::Result {
     let loaded = Palette::load(settings.theme.as_deref());
     let scale = settings.scale;
     let ui_font = loaded.palette.ui;
-    iced::application("Loupe", App::update, App::view)
+    iced::application(App::title, App::update, App::view)
         .subscription(App::subscription)
         .theme(|app: &App| app.palette.iced())
         .scale_factor(|app: &App| app.scale)
@@ -106,6 +107,13 @@ pub enum Message {
     TrackGain(TrackId, f32),
     TogglePool,
     PlaceSource(usize),
+    OpenProject,
+    DiscardAndOpen,
+    ProjectPicked(Option<PathBuf>),
+    ProjectRead(PathBuf, Result<files::Opened, String>),
+    Save,
+    SaveAs,
+    SavePicked(Option<PathBuf>),
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -129,6 +137,7 @@ pub enum Overlay {
     TrackMenu { track: TrackId, at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
+    ConfirmDiscard,
 }
 
 struct App {
@@ -157,6 +166,8 @@ struct App {
     entry: String,
     mixer_open: bool,
     pool_open: bool,
+    path: Option<PathBuf>,
+    dirty: bool,
     cache: Cache,
 }
 
@@ -193,9 +204,18 @@ impl App {
             entry: String::new(),
             mixer_open: false,
             pool_open: false,
+            path: None,
+            dirty: false,
             cache: Cache::new(),
         };
-        let task = app.import(std::env::args_os().skip(1).map(PathBuf::from).collect());
+        let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args_os()
+            .skip(1)
+            .map(PathBuf::from)
+            .partition(|path| path.extension().is_some_and(|extension| extension == files::EXTENSION));
+        let task = match projects.into_iter().next() {
+            Some(project) => app.read_project(project),
+            None => app.import(audio),
+        };
         (app, task)
     }
 
@@ -417,6 +437,40 @@ impl App {
                     self.place(source);
                 }
             }
+            Message::OpenProject => return self.ask_to_open(),
+            Message::DiscardAndOpen => return self.pick_project(),
+            Message::ProjectPicked(path) => {
+                if let Some(path) = path {
+                    return self.read_project(path);
+                }
+            }
+            Message::ProjectRead(path, result) => {
+                self.loading = self.loading.saturating_sub(1);
+                match result {
+                    Ok(opened) => self.adopt(path, opened),
+                    Err(why) => {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        self.problem = Some(format!("Could not open {name}: {why}"));
+                    }
+                }
+            }
+            Message::Save => {
+                self.overlay = Overlay::None;
+                if !self.project.tracks.is_empty() {
+                    return self.save();
+                }
+            }
+            Message::SaveAs => {
+                self.overlay = Overlay::None;
+                if !self.project.tracks.is_empty() {
+                    return self.save_as();
+                }
+            }
+            Message::SavePicked(path) => {
+                if let Some(path) = path {
+                    self.write_to(path);
+                }
+            }
             Message::ScaleDragged(scale) => {
                 self.pending_scale = scale;
                 self.scale_text = format_scale(scale);
@@ -473,6 +527,7 @@ impl App {
                 self.redo.clear();
                 self.run = run;
                 self.problem = None;
+                self.dirty = true;
                 self.changed();
                 Some(outcome)
             }
@@ -490,6 +545,7 @@ impl App {
 
     fn restored(&mut self) {
         self.run = None;
+        self.dirty = true;
         if self.selected.is_some_and(|clip| self.project.clip(clip).is_none()) {
             self.selected = None;
         }
@@ -839,6 +895,9 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
+                ("s", true, false) => Some(Message::Save),
+                ("s", true, true) => Some(Message::SaveAs),
+                ("o", true, _) => Some(Message::OpenProject),
                 ("z", true, false) => Some(Message::Undo),
                 ("z", true, true) | ("y", true, _) => Some(Message::Redo),
                 ("i", true, _) => Some(Message::Import),
