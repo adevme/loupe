@@ -47,6 +47,8 @@ fn main() -> iced::Result {
     let settings = Settings::load();
     let loaded = Palette::load(settings.theme.as_deref());
     let ui_font = loaded.palette.ui;
+    let opens_a_song = std::env::args_os().len() > 1;
+    let first_size = if opens_a_song { START_SIZE } else { scaled(HOME_SIZE, settings.scale) };
     iced::application(App::title, App::update, App::view)
         .subscription(App::subscription)
         .theme(|app: &App| app.palette.iced())
@@ -60,7 +62,7 @@ fn main() -> iced::Result {
         .default_font(ui_font)
         .antialiasing(true)
         .window(window::Settings {
-            size: START_SIZE,
+            size: first_size,
             min_size: Some(Size::new(820.0, 420.0)),
             ..window::Settings::default()
         })
@@ -68,6 +70,7 @@ fn main() -> iced::Result {
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
+const HOME_SIZE: Size = Size::new(940.0, 600.0);
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -150,6 +153,7 @@ pub enum Message {
     ScaleTyped(String),
     ScaleEntered,
     ScaleReset,
+    LeftSong { maximized: bool },
     PickFolder,
     FolderPicked(Option<PathBuf>),
     FolderReset,
@@ -231,6 +235,8 @@ struct App {
     path: Option<PathBuf>,
     dirty: bool,
     screen: Screen,
+    song_size: Size,
+    song_maximized: bool,
     templates: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     cache: Cache,
@@ -282,6 +288,8 @@ impl App {
             path: None,
             dirty: false,
             screen: Screen::Song,
+            song_size: START_SIZE,
+            song_maximized: false,
             templates: Vec::new(),
             recent: Vec::new(),
             cache: Cache::new(),
@@ -294,6 +302,7 @@ impl App {
             Some(project) => app.read_project(project, false),
             None if audio.is_empty() => {
                 app.screen = Screen::Home;
+                app.window = Size::new(HOME_SIZE.width, HOME_SIZE.height);
                 app.refresh_home();
                 Task::none()
             }
@@ -303,6 +312,31 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let before = self.screen;
+        let task = self.handle(message);
+        match (before, self.screen) {
+            (Screen::Song, Screen::Home) => Task::batch([
+                task,
+                window::get_latest()
+                    .and_then(window::get_maximized)
+                    .map(|maximized| Message::LeftSong { maximized }),
+            ]),
+            (Screen::Home, Screen::Song) => {
+                let (size, maximized) = (self.song_size, self.song_maximized);
+                let fit = window::get_latest().and_then(move |id| {
+                    if maximized {
+                        window::maximize(id, true)
+                    } else {
+                        window::resize(id, size)
+                    }
+                });
+                Task::batch([task, fit])
+            }
+            _ => task,
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         let belongs_to_the_song = matches!(
             message,
             Message::TogglePlay
@@ -730,6 +764,15 @@ impl App {
                 return unfocus();
             }
             Message::ScaleReset => self.apply_scale(1.0),
+            Message::LeftSong { maximized } => {
+                self.song_maximized = maximized;
+                if !maximized {
+                    self.song_size = scaled(self.window, self.scale);
+                }
+                let home = scaled(HOME_SIZE, self.scale);
+                return window::get_latest()
+                    .and_then(move |id| Task::batch([window::maximize(id, false), window::resize(id, home)]));
+            }
             Message::PickFolder => {
                 let start_in = settings::home_folder(self.folder.as_deref());
                 return Task::perform(
@@ -1218,6 +1261,10 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         }
         _ => None,
     }
+}
+
+fn scaled(size: Size, scale: f64) -> Size {
+    Size::new(size.width * scale as f32, size.height * scale as f32)
 }
 
 fn format_scale(scale: f64) -> String {
