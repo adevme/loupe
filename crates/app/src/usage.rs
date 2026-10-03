@@ -210,6 +210,7 @@ mod tests {
             metronome: false,
             count_in_bars: 0,
             snap: true,
+            audio: loupe_engine::Device::default(),
         };
         let (usage, told) = Usage::begin(&fresh);
         assert!(told, "the notice should be shown on the first run");

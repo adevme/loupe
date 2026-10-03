@@ -35,6 +35,12 @@ pub struct Opened {
     not_found: Vec<String>,
 }
 
+impl Opened {
+    pub(crate) fn build(&self, rate: u32) -> (Project, Vec<(TrackId, f32)>) {
+        self.saved.build(&self.sources, rate)
+    }
+}
+
 impl App {
     pub(crate) fn title(&self) -> String {
         if self.screen == Screen::Home {
@@ -259,7 +265,11 @@ impl App {
 
 fn read_file(path: &Path, rate: u32) -> Result<Opened, String> {
     let text = std::fs::read_to_string(path).map_err(|why| why.to_string())?;
-    let saved = SavedProject::parse(&text)?;
+    read_text(&text, rate)
+}
+
+pub(crate) fn read_text(text: &str, rate: u32) -> Result<Opened, String> {
+    let saved = SavedProject::parse(text)?;
     let mut files: Vec<&PathBuf> = Vec::new();
     for audio in &saved.sources {
         if !files.contains(&audio) {

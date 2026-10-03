@@ -9,3 +9,6 @@ midir = "0.10"
 loupe-stretch = { path = "../stretch" }
 rtrb = "0.3"
 symphonia = { version = "0.5", features = ["aac", "aiff", "isomp4", "mp3", "wav", "pcm", "ogg", "vorbis", "flac"] }
+
+[target.'cfg(windows)'.dependencies]
+cpal = { version = "0.15", features = ["asio"] }

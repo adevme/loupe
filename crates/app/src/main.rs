@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backup;
+mod audio_settings;
 mod autosaving;
 mod clip_window;
 mod clipboard;
@@ -47,7 +48,7 @@ use iced::widget::{
 use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
 use loupe_engine::{
     Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChoice, Instrument, Note, Outcome,
-    Output, Project, Source, TrackId,
+    Output, Device, Project, Source, TrackId,
 };
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
@@ -251,6 +252,11 @@ pub enum Message {
     StretchClip { clip: ClipId, start: Frames, len: Frames },
     Stretched { source: Arc<Source>, stretch: f64, made: Option<Arc<Source>> },
     ToggleSnap,
+    AudioDriverChosen(audio_settings::Driver),
+    AudioOutputChosen(String),
+    AudioRateChosen(audio_settings::Rate),
+    AudioBufferChosen(audio_settings::Buffer),
+    Reopened(Result<files::Opened, String>),
     Slice { cuts: Vec<(TrackId, Frames)> },
     TrackGain(TrackId, f32),
     TogglePool,
@@ -296,17 +302,19 @@ pub enum SettingsTab {
     Display,
     File,
     Recording,
+    Audio,
     Privacy,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 4] = [Self::Display, Self::File, Self::Recording, Self::Privacy];
+    const ALL: [Self; 5] = [Self::Display, Self::File, Self::Recording, Self::Audio, Self::Privacy];
 
     fn label(self) -> &'static str {
         match self {
             Self::Display => "Display",
             Self::File => "File",
             Self::Recording => "Recording",
+            Self::Audio => "Audio",
             Self::Privacy => "Privacy",
         }
     }
@@ -467,13 +475,16 @@ struct App {
     snap: bool,
     stretches: stretching::Stretches,
     modifiers: keyboard::Modifiers,
+    audio: loupe_engine::Device,
+    audio_lists: audio_settings::Lists,
+    silent: bool,
 }
 
 impl App {
     fn new(loaded: theme::Loaded, settings: Settings) -> (Self, Task<Message>) {
         let scale = settings.scale;
         let silent = std::env::var("LOUPE_AUDIO").as_deref() == Ok("silent");
-        let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device });
+        let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device(settings.audio.clone()) });
         let project = Project::new(engine.rate());
         engine.set_project(&project);
         engine.set_metronome(settings.metronome);
@@ -571,6 +582,9 @@ impl App {
             snap: settings.snap,
             stretches: stretching::Stretches::default(),
             modifiers: keyboard::Modifiers::default(),
+            audio: settings.audio.clone(),
+            audio_lists: audio_settings::Lists::default(),
+            silent,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -1535,7 +1549,31 @@ impl App {
                 Ok(setup) => return self.run_setup(setup),
                 Err(why) => self.update_state = versions::UpdateState::Failed(format!("Could not download the update: {why}.")),
             },
-            Message::SettingsTab(tab) => self.settings_tab = tab,
+            Message::SettingsTab(tab) => {
+                self.settings_tab = tab;
+                if tab == SettingsTab::Audio {
+                    self.refresh_audio_lists();
+                }
+            }
+            Message::AudioDriverChosen(driver) => {
+                let chosen = Device { driver: Some(driver.0), output: None, ..self.audio.clone() };
+                if chosen.driver.as_deref() == Some("ASIO") && chosen != self.audio {
+                    self.audio = chosen;
+                    let _ = settings::save("audio_driver", "ASIO");
+                    let _ = settings::forget("audio_output");
+                    self.refresh_audio_lists();
+                    self.notice = Some("Now pick your ASIO device under Output.".into());
+                    return Task::none();
+                }
+                return self.choose_audio(chosen);
+            }
+            Message::AudioOutputChosen(name) => {
+                let output = (name != audio_settings::SYSTEM_OUTPUT).then_some(name);
+                return self.choose_audio(Device { output, ..self.audio.clone() });
+            }
+            Message::AudioRateChosen(rate) => return self.choose_audio(Device { rate: rate.0, ..self.audio.clone() }),
+            Message::AudioBufferChosen(buffer) => return self.choose_audio(Device { buffer: buffer.size, ..self.audio.clone() }),
+            Message::Reopened(result) => self.reopened(result),
             Message::ToggleMetronome => {
                 self.metronome = !self.metronome;
                 self.engine.set_metronome(self.metronome);
@@ -2343,6 +2381,7 @@ impl App {
             SettingsTab::Display => column![self.theme_picker(), rule(palette), scale].spacing(16),
             SettingsTab::File => column![folder, rule(palette), self.autosave_settings()].spacing(16),
             SettingsTab::Recording => recording,
+            SettingsTab::Audio => column![self.audio_settings()],
             SettingsTab::Privacy => column![self.privacy_settings()],
         };
         let body = column![tabs, rule(palette), container(page).height(SETTINGS_PAGE_HEIGHT)].spacing(14);
