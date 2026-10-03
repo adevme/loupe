@@ -9,6 +9,7 @@ mod icons;
 mod knob;
 mod menus;
 mod mixer;
+mod piano_roll;
 mod pointer;
 mod pool;
 mod routing;
@@ -39,8 +40,8 @@ use iced::widget::{
 };
 use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
 use loupe_engine::{
-    Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChoice, Outcome, Output, Project,
-    Source, TrackId,
+    Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChoice, Instrument, Note, Outcome,
+    Output, Project, Source, TrackId,
 };
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
@@ -184,6 +185,16 @@ pub enum Message {
     SendSidechain { from: TrackId, to: TrackId, sidechain: bool },
     LevelPressed(mixer::Level),
     OpenClip(ClipId),
+    NewNotesClip(TrackId),
+    UseInstrument(TrackId, Instrument),
+    RollPlaced { clip: ClipId, notes: Vec<Note>, key: u8 },
+    RollEdit { clip: ClipId, notes: Vec<Note> },
+    RollSound { key: u8, on: bool },
+    RollSlide { from: Option<u8>, to: u8 },
+    RollDone { remember_beats: Option<f64> },
+    RollView(piano_roll::RollView),
+    TypedKey { key: u8, down: bool },
+    Both(Box<Message>, Box<Message>),
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
     TogglePreview(ClipId),
@@ -264,6 +275,7 @@ enum Run {
     Paint,
     Trim(ClipId),
     Send(TrackId, TrackId),
+    Notes(ClipId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -286,6 +298,7 @@ pub enum Overlay {
     ClipPlugins(ClipId),
     Stock,
     Matrix,
+    Roll(ClipId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -372,6 +385,9 @@ struct App {
     templates: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     cache: Cache,
+    roll_view: piano_roll::RollView,
+    roll_beats: f64,
+    typing: HashSet<u8>,
 }
 
 impl App {
@@ -447,6 +463,9 @@ impl App {
             templates: Vec::new(),
             recent: Vec::new(),
             cache: Cache::new(),
+            roll_view: piano_roll::RollView::default(),
+            roll_beats: 1.0,
+            typing: HashSet::new(),
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -727,6 +746,10 @@ impl App {
                 self.scale_text = format_scale(self.scale);
             }
             Message::CloseOverlay => {
+                if matches!(self.overlay, Overlay::Roll(_)) {
+                    self.engine.silence_notes();
+                    self.typing.clear();
+                }
                 if self.overlay == Overlay::None {
                     self.choose(None);
                 }
@@ -737,7 +760,48 @@ impl App {
             }
             Message::OpenClip(clip) => {
                 self.choose([clip]);
-                self.overlay = Overlay::Clip(clip);
+                if self.project.clip(clip).is_some_and(|found| found.is_notes()) {
+                    self.open_roll(clip);
+                } else {
+                    self.overlay = Overlay::Clip(clip);
+                }
+            }
+            Message::NewNotesClip(track) => self.new_notes_clip(track),
+            Message::UseInstrument(track, instrument) => {
+                self.overlay = Overlay::None;
+                self.edit(None, Command::SetInstrument { track, instrument });
+            }
+            Message::RollPlaced { clip, notes, key } => {
+                self.edit(Some(Run::Notes(clip)), Command::SetNotes { clip, notes });
+                self.sound(key, true);
+            }
+            Message::RollEdit { clip, notes } => {
+                self.edit(Some(Run::Notes(clip)), Command::SetNotes { clip, notes });
+            }
+            Message::RollSound { key, on } => self.sound(key, on),
+            Message::RollSlide { from, to } => {
+                if let Some(from) = from {
+                    self.sound(from, false);
+                }
+                self.sound(to, true);
+            }
+            Message::RollDone { remember_beats } => {
+                self.run = None;
+                if let Some(beats) = remember_beats {
+                    self.roll_beats = beats;
+                }
+            }
+            Message::RollView(view) => self.roll_view = view,
+            Message::TypedKey { key, down } => {
+                let fresh = if down { self.typing.insert(key) } else { self.typing.remove(&key) };
+                if fresh {
+                    self.sound(key, down);
+                }
+            }
+            Message::Both(first, second) => {
+                let first = self.handle(*first);
+                let second = self.handle(*second);
+                return Task::batch([first, second]);
             }
             Message::ClipToTrack(clip, track) => {
                 if let Some(start) = self.project.clip(clip).map(|clip| clip.start) {
@@ -857,6 +921,7 @@ impl App {
                 let gain = mixer::gain_from_db(db);
                 self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
             }
+            Message::SetTool(_) if matches!(self.overlay, Overlay::Roll(_)) => {}
             Message::SetTool(tool) => {
                 self.tool = tool;
                 self.cache.clear();
@@ -1231,7 +1296,20 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, ticks, mixer_drag])
+        let typing = if matches!(self.overlay, Overlay::Roll(_)) {
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), modifiers, .. }) if !modifiers.command() => {
+                    piano_roll::typed_key(c.as_str()).map(|key| Message::TypedKey { key, down: true })
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyReleased { key: keyboard::Key::Character(c), .. }) => {
+                    piano_roll::typed_key(c.as_str()).map(|key| Message::TypedKey { key, down: false })
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([shortcuts, window, ticks, mixer_drag, typing])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
