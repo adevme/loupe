@@ -3,11 +3,66 @@ use std::fs;
 use iced::widget::{button, container, slider, text_input};
 use iced::{font, Background, Border, Color, Font, Theme};
 
+use crate::icons;
 use crate::settings::{config_dir, entries};
 
-pub const ICONS: Font = Font::with_name("lucide");
 pub const MIN_TRACK_HEIGHT: f32 = 40.0;
 pub const MAX_TRACK_HEIGHT: f32 = 400.0;
+pub const BAR_SLOTS: usize = 24;
+const POSTSCRIPT_OUTLINES: &[u8] = b"OTTO";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayheadCap {
+    Triangle,
+    Square,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArmShape {
+    Dot,
+    Square,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarItem {
+    ToStart,
+    Play,
+    Record,
+    Position,
+    Clock,
+    Tempo,
+    Master,
+    History,
+    Mixer,
+    Settings,
+    Import,
+    Gap,
+    Space,
+    End,
+}
+
+const BAR_NAMES: [(&str, BarItem); 13] = [
+    ("to_start", BarItem::ToStart),
+    ("play", BarItem::Play),
+    ("record", BarItem::Record),
+    ("position", BarItem::Position),
+    ("clock", BarItem::Clock),
+    ("tempo", BarItem::Tempo),
+    ("master", BarItem::Master),
+    ("history", BarItem::History),
+    ("mixer", BarItem::Mixer),
+    ("settings", BarItem::Settings),
+    ("import", BarItem::Import),
+    ("gap", BarItem::Gap),
+    ("space", BarItem::Space),
+];
 
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -32,6 +87,29 @@ pub struct Palette {
     pub semibold: Font,
     pub mono: Font,
     pub track_height: f32,
+    pub header_width: f32,
+    pub ruler_height: f32,
+    pub scrollbar_height: f32,
+    pub top_bar_height: f32,
+    pub clip_title_height: f32,
+    pub clip_padding: f32,
+    pub meter_thickness: f32,
+    pub clip_title_size: f32,
+    pub track_title_size: f32,
+    pub ruler_text_size: f32,
+    pub corner: f32,
+    pub solid_corner: f32,
+    pub sheet_corner: f32,
+    pub clip_corner: f32,
+    pub border_width: f32,
+    pub playhead_width: f32,
+    pub handle_radius: f32,
+    pub fade_flag_size: f32,
+    pub playhead_cap: PlayheadCap,
+    pub arm_shape: ArmShape,
+    pub headers: Side,
+    pub all_audio: Side,
+    pub top_bar: [BarItem; BAR_SLOTS],
 }
 
 const NEUTRAL: Palette = Palette {
@@ -65,6 +143,54 @@ const NEUTRAL: Palette = Palette {
     semibold: Font { weight: font::Weight::Semibold, ..Font::with_name("Inter") },
     mono: Font::with_name("JetBrains Mono"),
     track_height: 92.0,
+    header_width: 200.0,
+    ruler_height: 30.0,
+    scrollbar_height: 18.0,
+    top_bar_height: 52.0,
+    clip_title_height: 21.0,
+    clip_padding: 5.0,
+    meter_thickness: 3.0,
+    clip_title_size: 13.0,
+    track_title_size: 13.0,
+    ruler_text_size: 11.0,
+    corner: 6.0,
+    solid_corner: 16.0,
+    sheet_corner: 10.0,
+    clip_corner: 5.0,
+    border_width: 1.0,
+    playhead_width: 1.0,
+    handle_radius: 4.5,
+    fade_flag_size: 10.0,
+    playhead_cap: PlayheadCap::Triangle,
+    arm_shape: ArmShape::Dot,
+    headers: Side::Left,
+    all_audio: Side::Right,
+    top_bar: [
+        BarItem::ToStart,
+        BarItem::Play,
+        BarItem::Record,
+        BarItem::Space,
+        BarItem::Position,
+        BarItem::Clock,
+        BarItem::Tempo,
+        BarItem::Space,
+        BarItem::Master,
+        BarItem::Gap,
+        BarItem::History,
+        BarItem::Mixer,
+        BarItem::Settings,
+        BarItem::Import,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+        BarItem::End,
+    ],
 };
 
 const COLOUR_KEYS: [&str; 15] = [
@@ -85,39 +211,101 @@ const COLOUR_KEYS: [&str; 15] = [
     "meter_high",
 ];
 
+const SIZE_KEYS: [(&str, f32, f32); 10] = [
+    ("track_height", MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT),
+    ("header_width", 140.0, 480.0),
+    ("ruler_height", 18.0, 64.0),
+    ("scrollbar_height", 10.0, 40.0),
+    ("top_bar_height", 40.0, 96.0),
+    ("clip_title_height", 14.0, 40.0),
+    ("clip_padding", 0.0, 16.0),
+    ("clip_title_size", 8.0, 24.0),
+    ("track_title_size", 8.0, 24.0),
+    ("ruler_text_size", 8.0, 24.0),
+];
+
+const SHAPE_KEYS: [(&str, f32, f32); 9] = [
+    ("corner", 0.0, 16.0),
+    ("solid_corner", 0.0, 16.0),
+    ("sheet_corner", 0.0, 24.0),
+    ("clip_corner", 0.0, 16.0),
+    ("border_width", 0.0, 3.0),
+    ("playhead_width", 1.0, 4.0),
+    ("handle_radius", 3.0, 9.0),
+    ("fade_flag_size", 6.0, 18.0),
+    ("meter_thickness", 1.0, 12.0),
+];
+
 pub struct Loaded {
     pub palette: Palette,
     pub problem: Option<String>,
+    pub icon_font: Option<Vec<u8>>,
 }
 
 impl Palette {
     pub fn load(chosen: Option<&str>) -> Loaded {
+        let plain = |problem| Loaded { palette: NEUTRAL, problem, icon_font: None };
         let Some(dir) = config_dir() else {
-            return Loaded { palette: NEUTRAL, problem: None };
+            return plain(None);
         };
         let themes = dir.join("themes");
         let _ = fs::create_dir_all(&themes);
         let _ = fs::write(themes.join("default.theme"), NEUTRAL.to_text());
         let Some(name) = chosen else {
-            return Loaded { palette: NEUTRAL, problem: None };
+            return plain(None);
         };
         let path = themes.join(format!("{name}.theme"));
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(_) => {
-                let problem = format!("Theme \"{name}\" is not at {}", path.display());
-                return Loaded { palette: NEUTRAL, problem: Some(problem) };
-            }
+        let Ok(text) = fs::read_to_string(&path) else {
+            return plain(Some(format!("Theme \"{name}\" is not at {}", path.display())));
         };
         let mut palette = NEUTRAL;
         let mut problem = None;
+        let mut icon_file = None;
+        let mut icon_family = None;
+        let mut glyphs = Vec::new();
         for (line, key, value) in entries(&text) {
-            if let Err(why) = palette.set(key, value) {
+            let read = match (key, key.strip_prefix("icon_")) {
+                ("icon_file", _) => {
+                    icon_file = Some(value);
+                    Ok(())
+                }
+                ("icon_family", _) => {
+                    icon_family = Some(value);
+                    Ok(())
+                }
+                (_, Some(icon)) => icons::code(icon, value).map(|glyph| glyphs.push((icon.to_string(), glyph))),
+                _ => palette.set(key, value),
+            };
+            if let Err(why) = read {
                 problem = Some(format!("Theme \"{name}\" line {line}: {why}"));
                 break;
             }
         }
-        Loaded { palette, problem }
+        let icon_font = match (icon_file, icon_family) {
+            (Some(file), Some(_)) => match fs::read(themes.join(file)) {
+                Ok(bytes) if bytes.starts_with(POSTSCRIPT_OUTLINES) => {
+                    problem.get_or_insert(format!(
+                        "Theme \"{name}\": icon file {file} has PostScript outlines, which Loupe cannot draw. Use a TrueType (.ttf) font"
+                    ));
+                    None
+                }
+                Ok(bytes) => Some(bytes),
+                Err(why) => {
+                    problem.get_or_insert(format!("Theme \"{name}\": icon file {file}: {why}"));
+                    None
+                }
+            },
+            (Some(_), None) => {
+                problem.get_or_insert(format!("Theme \"{name}\": icon_file needs icon_family, the name inside the font"));
+                None
+            }
+            _ => None,
+        };
+        let family = icon_font.as_ref().and(icon_family).map(leak);
+        if icon_font.is_some() || icon_file.is_none() {
+            icons::choose(family, glyphs);
+        }
+        Loaded { palette, problem, icon_font }
     }
 
     fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
@@ -128,6 +316,15 @@ impl Palette {
             self.tracks[index - 1] = colour(value)?;
             return Ok(());
         }
+        let range = SIZE_KEYS.iter().chain(&SHAPE_KEYS).find(|(name, ..)| *name == key);
+        if let Some((_, lowest, highest)) = range {
+            let number: f32 = value.parse().map_err(|_| format!("\"{value}\" is not a number"))?;
+            if !(*lowest..=*highest).contains(&number) {
+                return Err(format!("{key} goes from {lowest} to {highest}"));
+            }
+            *self.number_slot(key).expect("every listed number has a slot") = number;
+            return Ok(());
+        }
         match key {
             "font" => {
                 let family = leak(value);
@@ -136,13 +333,24 @@ impl Palette {
                 self.semibold = Font { weight: font::Weight::Semibold, ..Font::with_name(family) };
             }
             "mono" => self.mono = Font::with_name(leak(value)),
-            "track_height" => {
-                let height: f32 = value.parse().map_err(|_| format!("\"{value}\" is not a number"))?;
-                if !(MIN_TRACK_HEIGHT..=MAX_TRACK_HEIGHT).contains(&height) {
-                    return Err(format!("track_height goes from {MIN_TRACK_HEIGHT} to {MAX_TRACK_HEIGHT}"));
+            "headers" => self.headers = side(value)?,
+            "all_audio" => self.all_audio = side(value)?,
+            "playhead_cap" => {
+                self.playhead_cap = match value {
+                    "triangle" => PlayheadCap::Triangle,
+                    "square" => PlayheadCap::Square,
+                    "none" => PlayheadCap::None,
+                    _ => return Err(format!("playhead_cap is triangle, square or none, not \"{value}\"")),
                 }
-                self.track_height = height;
             }
+            "arm_shape" => {
+                self.arm_shape = match value {
+                    "dot" => ArmShape::Dot,
+                    "square" => ArmShape::Square,
+                    _ => return Err(format!("arm_shape is dot or square, not \"{value}\"")),
+                }
+            }
+            "top_bar" => self.top_bar = bar(value)?,
             _ => {
                 let slot = self.colour_slot(key).ok_or_else(|| format!("\"{key}\" is not a theme key"))?;
                 *slot = colour(value)?;
@@ -172,11 +380,38 @@ impl Palette {
         })
     }
 
+    fn number_slot(&mut self, key: &str) -> Option<&mut f32> {
+        Some(match key {
+            "track_height" => &mut self.track_height,
+            "header_width" => &mut self.header_width,
+            "ruler_height" => &mut self.ruler_height,
+            "scrollbar_height" => &mut self.scrollbar_height,
+            "top_bar_height" => &mut self.top_bar_height,
+            "clip_title_height" => &mut self.clip_title_height,
+            "clip_padding" => &mut self.clip_padding,
+            "clip_title_size" => &mut self.clip_title_size,
+            "track_title_size" => &mut self.track_title_size,
+            "ruler_text_size" => &mut self.ruler_text_size,
+            "corner" => &mut self.corner,
+            "solid_corner" => &mut self.solid_corner,
+            "sheet_corner" => &mut self.sheet_corner,
+            "clip_corner" => &mut self.clip_corner,
+            "border_width" => &mut self.border_width,
+            "playhead_width" => &mut self.playhead_width,
+            "handle_radius" => &mut self.handle_radius,
+            "fade_flag_size" => &mut self.fade_flag_size,
+            "meter_thickness" => &mut self.meter_thickness,
+            _ => return None,
+        })
+    }
+
     fn to_text(&self) -> String {
         let mut copy = *self;
         let mut out = String::from(
-            "# A Loupe theme: one key per line, colours as #rrggbb.\n\
-             # Copy this file, change what you like, then put `theme = <file name>` in the settings file next to the themes folder.\n\n",
+            "# A Loupe theme: one key per line.\n\
+             # Copy this file, change what you like, then put `theme = <file name>` in the settings file next to the themes folder.\n\
+             # This file is written again each time Loupe starts, so edit your copy, not this one.\n\n\
+             # Colours, as #rrggbb.\n",
         );
         for key in COLOUR_KEYS {
             let value = *copy.colour_slot(key).expect("every listed key has a slot");
@@ -185,12 +420,45 @@ impl Palette {
         for (i, track) in self.tracks.iter().enumerate() {
             out.push_str(&format!("track_{} = {}\n", i + 1, hex(*track)));
         }
-        out.push_str(&format!("font = {}\nmono = {}\ntrack_height = {}\n", family(self.ui), family(self.mono), self.track_height));
+        out.push_str(&format!("\n# Fonts, by family name.\nfont = {}\nmono = {}\n", family(self.ui), family(self.mono)));
+        for (title, keys) in [("Sizes", SIZE_KEYS.as_slice()), ("Shapes", SHAPE_KEYS.as_slice())] {
+            out.push_str(&format!("\n# {title}, in pixels. Each line shows the allowed range.\n"));
+            for (key, lowest, highest) in keys {
+                let value = *copy.number_slot(key).expect("every listed number has a slot");
+                out.push_str(&format!("{key} = {value}\n#   {lowest} to {highest}\n"));
+            }
+        }
+        out.push_str("playhead_cap = triangle\n#   triangle, square or none\narm_shape = dot\n#   dot or square\n");
+        out.push_str(
+            "\n# Layout.\n\
+             headers = left\n#   left or right: the side the track names sit on\n\
+             all_audio = right\n#   left or right: the side the All audio panel opens on\n",
+        );
+        let arrangement: Vec<&str> = self.top_bar.iter().filter_map(|item| bar_name(*item)).collect();
+        out.push_str(&format!(
+            "top_bar = {}\n#   what follows File and Help in the top bar, in order. Leave a name out to hide it.\n\
+             #   gap pushes what follows to the far side, space is a small gap.\n",
+            arrangement.join(" ")
+        ));
+        out.push_str(
+            "\n# Icons. Each icon is a character in the icon font, written as its hex code.\n\
+             # To use your own font, put a TrueType (.ttf) file in this folder and name it here:\n\
+             #   icon_file = my-icons.ttf\n\
+             #   icon_family = My Icons\n\
+             # Icons you do not list keep the built in drawing.\n",
+        );
+        for (name, glyph) in icons::BUILT_IN {
+            out.push_str(&format!("# icon_{name} = {:x}\n", glyph as u32));
+        }
         out
     }
 
     pub fn track(&self, index: usize) -> Color {
         self.tracks[index % self.tracks.len()]
+    }
+
+    pub fn top_bar_items(&self) -> impl Iterator<Item = BarItem> + '_ {
+        self.top_bar.iter().copied().take_while(|item| *item != BarItem::End)
     }
 
     pub fn iced(&self) -> Theme {
@@ -206,6 +474,10 @@ impl Palette {
         )
     }
 
+    fn inner_corner(&self) -> f32 {
+        (self.corner - 1.0).max(0.0)
+    }
+
     pub fn backdrop(&self) -> container::Style {
         container::Style { background: Some(alpha(Color::BLACK, 0.55).into()), ..Default::default() }
     }
@@ -213,7 +485,7 @@ impl Palette {
     pub fn sheet(&self) -> container::Style {
         container::Style {
             background: Some(self.panel.into()),
-            border: Border { color: self.line, width: 1.0, radius: 10.0.into() },
+            border: Border { color: self.line, width: self.border_width, radius: self.sheet_corner.into() },
             ..Default::default()
         }
     }
@@ -221,7 +493,7 @@ impl Palette {
     pub fn menu(&self) -> container::Style {
         container::Style {
             background: Some(self.panel.into()),
-            border: Border { color: self.hover, width: 1.0, radius: 8.0.into() },
+            border: Border { color: self.hover, width: self.border_width, radius: (self.corner + 2.0).into() },
             shadow: iced::Shadow {
                 color: alpha(Color::BLACK, 0.4),
                 offset: iced::Vector::new(0.0, 6.0),
@@ -237,13 +509,13 @@ impl Palette {
             button::Status::Hovered | button::Status::Pressed => (Some(self.hover.into()), self.text),
             button::Status::Disabled => (None, self.text_faint),
         };
-        button::Style { background, text_color, border: Border::default().rounded(5), ..Default::default() }
+        button::Style { background, text_color, border: Border::default().rounded(self.inner_corner()), ..Default::default() }
     }
 
     pub fn swatch(&self, colour: Color, status: button::Status) -> button::Style {
         let border = match status {
-            button::Status::Hovered | button::Status::Pressed => Border { color: self.text, width: 2.0, radius: 5.0.into() },
-            _ => Border { color: self.line, width: 1.0, radius: 5.0.into() },
+            button::Status::Hovered | button::Status::Pressed => Border { color: self.text, width: 2.0, radius: self.inner_corner().into() },
+            _ => Border { color: self.line, width: 1.0, radius: self.inner_corner().into() },
         };
         button::Style { background: Some(colour.into()), border, ..Default::default() }
     }
@@ -256,7 +528,7 @@ impl Palette {
         button::Style {
             background: Some(background.into()),
             text_color: Color::WHITE,
-            border: Border::default().rounded(6),
+            border: Border::default().rounded(self.corner),
             ..Default::default()
         }
     }
@@ -270,7 +542,7 @@ impl Palette {
         button::Style {
             background: Some(background.into()),
             text_color,
-            border: Border::default().rounded(5),
+            border: Border::default().rounded(self.inner_corner()),
             ..Default::default()
         }
     }
@@ -278,7 +550,7 @@ impl Palette {
     pub fn strip(&self) -> container::Style {
         container::Style {
             background: Some(self.background.into()),
-            border: Border { color: self.line, width: 1.0, radius: 6.0.into() },
+            border: Border { color: self.line, width: self.border_width, radius: self.corner.into() },
             ..Default::default()
         }
     }
@@ -288,7 +560,7 @@ impl Palette {
             button::Style {
                 background: Some(self.hover.into()),
                 text_color: self.text,
-                border: Border::default().rounded(6),
+                border: Border::default().rounded(self.corner),
                 ..Default::default()
             }
         } else {
@@ -298,21 +570,21 @@ impl Palette {
 
     pub fn record(&self, on: bool, status: button::Status) -> button::Style {
         if on {
-            button::Style { background: Some(self.danger.into()), border: Border::default().rounded(6), ..Default::default() }
+            button::Style { background: Some(self.danger.into()), border: Border::default().rounded(self.corner), ..Default::default() }
         } else {
             self.ghost(status)
         }
     }
 
     pub fn record_mark(&self, on: bool) -> container::Style {
-        let (colour, corner) = if on { (self.on_accent, 2) } else { (self.danger, 6) };
+        let (colour, corner) = if on { (self.on_accent, 2.0) } else { (self.danger, 6.0) };
         container::Style { background: Some(colour.into()), border: Border::default().rounded(corner), ..Default::default() }
     }
 
     pub fn title_bar(&self) -> container::Style {
         container::Style {
             background: Some(self.raised.into()),
-            border: Border { radius: iced::border::top(9), ..Border::default() },
+            border: Border { radius: iced::border::top((self.sheet_corner - 1.0).max(0.0)), ..Border::default() },
             ..Default::default()
         }
     }
@@ -332,7 +604,7 @@ impl Palette {
             button::Status::Pressed => (Some(self.hover.into()), self.text),
             button::Status::Disabled => (None, self.text_faint),
         };
-        button::Style { background, text_color, border: Border::default().rounded(6), ..Default::default() }
+        button::Style { background, text_color, border: Border::default().rounded(self.corner), ..Default::default() }
     }
 
     pub fn outlined(&self, status: button::Status) -> button::Style {
@@ -344,7 +616,7 @@ impl Palette {
         button::Style {
             background: Some(background.into()),
             text_color,
-            border: Border { color: self.line, width: 1.0, radius: 6.0.into() },
+            border: Border { color: self.line, width: self.border_width, radius: self.corner.into() },
             ..Default::default()
         }
     }
@@ -357,7 +629,7 @@ impl Palette {
         button::Style {
             background: Some(background.into()),
             text_color: self.on_accent,
-            border: Border::default().rounded(16),
+            border: Border::default().rounded(self.solid_corner),
             ..Default::default()
         }
     }
@@ -370,7 +642,7 @@ impl Palette {
         };
         text_input::Style {
             background: Background::Color(self.background),
-            border: Border { color: border, width: 1.0, radius: 6.0.into() },
+            border: Border { color: border, width: self.border_width.max(1.0), radius: self.corner.into() },
             icon: self.text_dim,
             placeholder: self.text_faint,
             value: self.text,
@@ -435,4 +707,88 @@ fn family(font: Font) -> &'static str {
 
 fn leak(value: &str) -> &'static str {
     Box::leak(value.to_string().into_boxed_str())
+}
+
+fn side(value: &str) -> Result<Side, String> {
+    match value {
+        "left" => Ok(Side::Left),
+        "right" => Ok(Side::Right),
+        _ => Err(format!("\"{value}\" is not a side; use left or right")),
+    }
+}
+
+fn bar_name(item: BarItem) -> Option<&'static str> {
+    BAR_NAMES.iter().find(|(_, known)| *known == item).map(|(name, _)| *name)
+}
+
+fn bar(value: &str) -> Result<[BarItem; BAR_SLOTS], String> {
+    let mut items = [BarItem::End; BAR_SLOTS];
+    let mut filled = 0;
+    for word in value.split_whitespace() {
+        let known: Vec<&str> = BAR_NAMES.iter().map(|(name, _)| *name).collect();
+        let item = BAR_NAMES
+            .iter()
+            .find(|(name, _)| *name == word)
+            .map(|(_, item)| *item)
+            .ok_or_else(|| format!("\"{word}\" is not a top bar item; the items are {}", known.join(", ")))?;
+        let repeats = !matches!(item, BarItem::Gap | BarItem::Space);
+        if repeats && items[..filled].contains(&item) {
+            return Err(format!("{word} is in top_bar twice"));
+        }
+        if filled == BAR_SLOTS {
+            return Err(format!("top_bar holds at most {BAR_SLOTS} items"));
+        }
+        items[filled] = item;
+        filled += 1;
+    }
+    Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_written_reference_theme_reads_back_as_the_default() {
+        let mut read = NEUTRAL;
+        read.top_bar = [BarItem::End; BAR_SLOTS];
+        read.header_width = 300.0;
+        for (_, key, value) in entries(&NEUTRAL.to_text()) {
+            read.set(key, value).unwrap_or_else(|why| panic!("{key}: {why}"));
+        }
+        assert_eq!(read.top_bar, NEUTRAL.top_bar);
+        assert_eq!(read.header_width, NEUTRAL.header_width);
+        assert_eq!(read.headers, Side::Left);
+    }
+
+    #[test]
+    fn sizes_outside_their_range_are_refused_with_the_range() {
+        let mut theme = NEUTRAL;
+        assert_eq!(theme.set("header_width", "90"), Err("header_width goes from 140 to 480".into()));
+        assert_eq!(theme.set("corner", "soft"), Err("\"soft\" is not a number".into()));
+        assert!(theme.set("corner", "0").is_ok());
+        assert_eq!(theme.corner, 0.0);
+    }
+
+    #[test]
+    fn the_top_bar_takes_an_order_and_leaves_out_what_is_not_named() {
+        let mut theme = NEUTRAL;
+        theme.set("top_bar", "import gap play record").unwrap();
+        let shown: Vec<BarItem> = theme.top_bar_items().collect();
+        assert_eq!(shown, [BarItem::Import, BarItem::Gap, BarItem::Play, BarItem::Record]);
+        assert!(theme.set("top_bar", "play play").unwrap_err().contains("twice"));
+        assert!(theme.set("top_bar", "play volume").unwrap_err().contains("not a top bar item"));
+        assert!(theme.set("top_bar", "space gap space gap").is_ok());
+    }
+
+    #[test]
+    fn layout_and_shape_choices_name_their_options_when_wrong() {
+        let mut theme = NEUTRAL;
+        theme.set("headers", "right").unwrap();
+        theme.set("playhead_cap", "none").unwrap();
+        theme.set("arm_shape", "square").unwrap();
+        assert_eq!((theme.headers, theme.playhead_cap, theme.arm_shape), (Side::Right, PlayheadCap::None, ArmShape::Square));
+        assert!(theme.set("headers", "top").unwrap_err().contains("left or right"));
+        assert!(theme.set("wobble", "1").unwrap_err().contains("not a theme key"));
+    }
 }
