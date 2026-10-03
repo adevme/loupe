@@ -68,6 +68,15 @@ pub struct Send {
     pub pre_fader: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fx {
+    pub path: std::path::PathBuf,
+    pub index: usize,
+    pub name: String,
+    pub bypassed: bool,
+    pub state: Vec<u8>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Track {
     pub id: TrackId,
@@ -79,6 +88,7 @@ pub struct Track {
     pub parent: Option<TrackId>,
     pub collapsed: bool,
     pub sends: Vec<Send>,
+    pub fx: Vec<Fx>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +129,11 @@ pub enum Command {
     RemoveSend { from: TrackId, to: TrackId },
     SetSendGain { from: TrackId, to: TrackId, gain: f32 },
     SetSendPreFader { from: TrackId, to: TrackId, pre_fader: bool },
+    AddFx { track: TrackId, fx: Fx },
+    RemoveFx { track: TrackId, slot: usize },
+    MoveFx { track: TrackId, slot: usize, to: usize },
+    BypassFx { track: TrackId, slot: usize, bypassed: bool },
+    SetFxState { track: TrackId, slot: usize, state: Vec<u8> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,7 +183,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -375,6 +390,41 @@ impl Project {
                 let f = self.track_index(from)?;
                 let send = self.tracks[f].sends.iter_mut().find(|send| send.to == to).ok_or(CommandError::NoSuchTrack)?;
                 send.pre_fader = pre_fader;
+                Ok(Outcome::Done)
+            }
+            Command::AddFx { track, fx } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].fx.push(fx);
+                Ok(Outcome::Done)
+            }
+            Command::RemoveFx { track, slot } => {
+                let t = self.track_index(track)?;
+                if slot >= self.tracks[t].fx.len() {
+                    return Err(CommandError::InvalidValue);
+                }
+                self.tracks[t].fx.remove(slot);
+                Ok(Outcome::Done)
+            }
+            Command::MoveFx { track, slot, to } => {
+                let t = self.track_index(track)?;
+                let chain = &mut self.tracks[t].fx;
+                if slot >= chain.len() || to >= chain.len() {
+                    return Err(CommandError::InvalidValue);
+                }
+                let moved = chain.remove(slot);
+                chain.insert(to, moved);
+                Ok(Outcome::Done)
+            }
+            Command::BypassFx { track, slot, bypassed } => {
+                let t = self.track_index(track)?;
+                let fx = self.tracks[t].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.bypassed = bypassed;
+                Ok(Outcome::Done)
+            }
+            Command::SetFxState { track, slot, state } => {
+                let t = self.track_index(track)?;
+                let fx = self.tracks[t].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.state = state;
                 Ok(Outcome::Done)
             }
             Command::SetBpm(bpm) => {

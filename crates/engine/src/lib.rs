@@ -14,7 +14,7 @@ pub use export::{export, next_version_folder, render_to_wav, ExportPlan};
 pub use file::{SavedClip, SavedProject, SavedTrack};
 pub use input::{input_devices, Input, InputChoice, Take};
 pub use model::{
-    Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Outcome, Project, Track, TrackId,
+    Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Fx, Outcome, Project, Send, Track, TrackId,
 };
 pub use render::{mix_tracks, render, scale, Mixdown};
 pub use source::Source;
