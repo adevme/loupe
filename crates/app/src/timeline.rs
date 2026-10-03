@@ -19,7 +19,7 @@ const POINTER_LEASH_PX: f32 = 40.0;
 const POINTER_HOME_SLACK_PX: f32 = 1.5;
 const ADD_ROW_H: f32 = 40.0;
 const CLIP_PAD: f32 = 5.0;
-const CLIP_TITLE_H: f32 = 19.0;
+const CLIP_TITLE_H: f32 = 21.0;
 const MIN_GRID_PX: f64 = 14.0;
 const DRAG_THRESHOLD: f32 = 4.0;
 const RESIZE_GRIP: f32 = 5.0;
@@ -804,7 +804,7 @@ impl Timeline<'_> {
                         title_on_canvas.y - visible.y + CLIP_TITLE_H / 2.0,
                     ),
                     color: p.text,
-                    size: 11.5.into(),
+                    size: 13.0.into(),
                     font: p.medium,
                     vertical_alignment: alignment::Vertical::Center,
                     ..Text::default()
