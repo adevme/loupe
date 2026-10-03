@@ -26,6 +26,7 @@ pub struct Settings {
     pub last_version: Option<String>,
     pub metronome: bool,
     pub count_in_bars: u32,
+    pub snap: bool,
 }
 
 impl Settings {
@@ -47,6 +48,7 @@ impl Settings {
             last_version: value_of("last_version").map(str::to_string),
             metronome: value_of("metronome") == Some("on"),
             count_in_bars: value_of("count_in").and_then(count_in_from).unwrap_or(0),
+            snap: value_of("snap") != Some("off"),
         }
     }
 }

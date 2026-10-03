@@ -44,9 +44,42 @@ pub struct Clip {
     pub fade_out: Fade,
     pub fx: Vec<Fx>,
     pub notes: Option<Arc<Vec<Note>>>,
+    pub stretch: f64,
+    pub stretched: Option<Arc<Source>>,
 }
 
 impl Clip {
+    pub fn is_stretched(&self) -> bool {
+        self.stretch != 1.0
+    }
+
+    pub fn waiting_for_stretch(&self) -> bool {
+        self.is_stretched() && self.stretched.is_none() && self.notes.is_none()
+    }
+
+    pub fn audio(&self) -> &[[f32; 2]] {
+        match (&self.stretched, self.is_stretched()) {
+            (_, false) => &self.source.frames,
+            (Some(stretched), true) => &stretched.frames,
+            (None, true) => &[],
+        }
+    }
+
+    pub fn audio_len(&self) -> Frames {
+        loupe_stretch::stretched_len(self.source.frames.len(), self.stretch) as Frames
+    }
+
+    pub fn peak(&self, from: usize, to: usize) -> (f32, f32) {
+        match (&self.stretched, self.is_stretched()) {
+            (_, false) => self.source.peak(from, to),
+            (Some(stretched), true) => stretched.peak(from, to),
+            (None, true) => {
+                let back = |at: usize| (at as f64 / self.stretch) as usize;
+                self.source.peak(back(from), back(to).max(back(from) + 1))
+            }
+        }
+    }
+
     pub fn end(&self) -> Frames {
         self.start + self.len
     }
@@ -131,6 +164,8 @@ pub enum Command {
     SetClipGain { clip: ClipId, gain: f32 },
     SetClipMuted { clip: ClipId, muted: bool },
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
+    SetStretch { clip: ClipId, stretch: f64 },
+    FillStretch { source: Arc<Source>, stretch: f64, stretched: Arc<Source> },
     SetBpm(f64),
     SetMasterGain(f32),
     ToggleMasterMute,
@@ -330,6 +365,8 @@ impl Project {
                     fade_in: Fade::NONE,
                     fade_out: Fade::NONE,
                     notes: None,
+                    stretch: 1.0,
+                    stretched: None,
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -362,6 +399,8 @@ impl Project {
                     fade_in: Fade::NONE,
                     fade_out: Fade::NONE,
                     notes: Some(Arc::new(tidy(notes))),
+                    stretch: 1.0,
+                    stretched: None,
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -420,7 +459,7 @@ impl Project {
             Command::TrimClip { clip, offset, len } => {
                 let (t, i) = self.locate(clip)?;
                 let target = &mut self.tracks[t].clips[i];
-                let available = target.source.frames.len() as Frames;
+                let available = if target.source.frames.is_empty() { 0 } else { target.audio_len() };
                 let len = if available == 0 { len } else { len.min(available.saturating_sub(offset)) };
                 if len == 0 {
                     return Err(CommandError::InvalidValue);
@@ -429,6 +468,32 @@ impl Project {
                 target.len = len;
                 target.fade_in.len = target.fade_in.len.min(len);
                 target.fade_out.len = target.fade_out.len.min(len - target.fade_in.len);
+                Ok(Outcome::Done)
+            }
+            Command::SetStretch { clip, stretch } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                if target.notes.is_some() || !stretch.is_finite() || !(loupe_stretch::SHORTEST..=loupe_stretch::LONGEST).contains(&stretch) {
+                    return Err(CommandError::InvalidValue);
+                }
+                let scale = stretch / target.stretch;
+                let len = ((target.len as f64 * scale).round() as Frames).max(1);
+                target.offset = (target.offset as f64 * scale).round() as Frames;
+                target.len = len;
+                target.fade_in.len = ((target.fade_in.len as f64 * scale).round() as Frames).min(len);
+                target.fade_out.len = ((target.fade_out.len as f64 * scale).round() as Frames).min(len - target.fade_in.len);
+                if stretch != target.stretch {
+                    target.stretch = stretch;
+                    target.stretched = None;
+                }
+                Ok(Outcome::Done)
+            }
+            Command::FillStretch { source, stretch, stretched } => {
+                for track in &mut self.tracks {
+                    for clip in track.clips.iter_mut().filter(|clip| clip.stretch == stretch && Arc::ptr_eq(&clip.source, &source)) {
+                        clip.stretched = Some(stretched.clone());
+                    }
+                }
                 Ok(Outcome::Done)
             }
             Command::SetClipGain { clip, gain } => {
@@ -787,6 +852,28 @@ mod tests {
         assert!(p.sources.iter().any(|s| Arc::ptr_eq(s, &placed.source)));
         copied.len = 0;
         assert_eq!(p.apply(Command::PasteClip { track, clip: copied }), Err(CommandError::InvalidValue));
+    }
+
+    #[test]
+    fn stretching_scales_the_clip_and_waits_for_the_stretched_audio() {
+        let (mut p, _, clip) = project_with_clip(1000);
+        p.apply(Command::TrimClip { clip, offset: 100, len: 800 }).unwrap();
+        p.apply(Command::SetStretch { clip, stretch: 2.0 }).unwrap();
+        let c = p.clip(clip).unwrap();
+        assert_eq!((c.offset, c.len, c.audio_len()), (200, 1600, 2000));
+        assert!(c.waiting_for_stretch() && c.audio().is_empty());
+        let source = c.source.clone();
+        let stretched = Arc::new(Source::from_frames("ramp", vec![[0.2, 0.2]; 2000]));
+        p.apply(Command::FillStretch { source: source.clone(), stretch: 3.0, stretched: stretched.clone() }).unwrap();
+        assert!(p.clip(clip).unwrap().waiting_for_stretch(), "a different stretch is not filled");
+        p.apply(Command::FillStretch { source, stretch: 2.0, stretched }).unwrap();
+        assert_eq!(p.clip(clip).unwrap().audio().len(), 2000);
+        p.apply(Command::SetStretch { clip, stretch: 1.0 }).unwrap();
+        let c = p.clip(clip).unwrap();
+        assert_eq!((c.offset, c.len, c.audio().len()), (100, 800, 1000));
+        for bad in [0.0, -1.0, f64::NAN, 100.0] {
+            assert_eq!(p.apply(Command::SetStretch { clip, stretch: bad }), Err(CommandError::InvalidValue));
+        }
     }
 
     #[test]

@@ -1,0 +1,8 @@
+[package]
+name = "loupe-stretch"
+version.workspace = true
+edition = "2021"
+license = "GPL-2.0-or-later"
+
+[build-dependencies]
+cc = "1"

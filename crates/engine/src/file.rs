@@ -67,6 +67,7 @@ pub struct SavedClip {
     pub fade_in: Fade,
     pub fade_out: Fade,
     pub notes: Option<(String, Vec<Note>)>,
+    pub stretch: f64,
 }
 
 impl SavedProject {
@@ -150,6 +151,7 @@ impl SavedProject {
                             fade_in: clip.fade_in,
                             fade_out: clip.fade_out,
                             notes: clip.notes.as_ref().map(|notes| (clip.source.name.clone(), notes.to_vec())),
+                            stretch: clip.stretch,
                             fx: clip
                                 .fx
                                 .iter()
@@ -198,7 +200,7 @@ impl SavedProject {
                     None => format!("clip source={}", clip.source),
                 };
                 out.push_str(&format!(
-                    "{opening} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}{}\n",
+                    "{opening} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}{}{}\n",
                     clip.start,
                     clip.offset,
                     clip.len,
@@ -208,6 +210,7 @@ impl SavedProject {
                     clip.fade_in.curve,
                     clip.fade_out.len,
                     clip.fade_out.curve,
+                    if clip.stretch == 1.0 { String::new() } else { format!(" stretch={}", clip.stretch) },
                     clip.notes.as_ref().map_or(String::new(), |(name, _)| format!(" name={name}"))
                 ));
                 for note in clip.notes.iter().flat_map(|(_, notes)| notes) {
@@ -362,6 +365,10 @@ impl SavedProject {
                         fade_out: fade_from(need("fade_out")?).ok_or_else(|| bad("the fade out is not readable"))?,
                         fx: Vec::new(),
                         notes: (kind == "notes").then(|| (name.to_string(), Vec::new())),
+                        stretch: match fields.get("stretch") {
+                            Some(text) => text.parse::<f64>().ok().filter(|s| s.is_finite() && *s > 0.0).ok_or_else(|| bad("the stretch is not readable"))?,
+                            None => 1.0,
+                        },
                     };
                     if clip.notes.is_none() && clip.source >= saved.sources.len() {
                         return Err(bad("the clip points at audio the file does not list"));
@@ -419,6 +426,9 @@ impl SavedProject {
                 let Ok(Outcome::Clip(id)) = project.apply(placed) else {
                     continue;
                 };
+                if clip.stretch != 1.0 {
+                    let _ = project.apply(Command::SetStretch { clip: id, stretch: clip.stretch });
+                }
                 let trimmed = Command::TrimClip { clip: id, offset: rescale(clip.offset), len: rescale(clip.len) };
                 let _ = project.apply(trimmed);
                 let _ = project.apply(Command::SetClipGain { clip: id, gain: clip.gain });
@@ -669,6 +679,23 @@ mod routing_round_trip {
     use super::*;
     use crate::model::{Command, Outcome};
     use crate::source::Source;
+
+    #[test]
+    fn a_stretched_clip_survives_a_save_and_open() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Loop".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("loop", vec![[0.1, 0.1]; 1_000]));
+        let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track, source: source.clone(), start: 0 }) else { panic!() };
+        p.apply(Command::SetStretch { clip, stretch: 1.5 }).unwrap();
+        p.apply(Command::TrimClip { clip, offset: 300, len: 900 }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        assert!(text.contains(" stretch=1.5"));
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[source], 48_000);
+        let clip = &back.tracks[0].clips[0];
+        assert_eq!((clip.stretch, clip.offset, clip.len), (1.5, 300, 900));
+        assert!(clip.waiting_for_stretch());
+        assert!(SavedProject::parse(&text.replace("stretch=1.5", "stretch=fast")).is_err());
+    }
 
     #[test]
     fn folders_and_sends_survive_a_save_and_open() {

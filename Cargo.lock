@@ -2301,6 +2301,7 @@ name = "loupe-engine"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "loupe-stretch",
  "midir",
  "rtrb",
  "symphonia",
@@ -2340,6 +2341,13 @@ version = "0.1.0"
 dependencies = [
  "iced",
  "loupe-stock",
+]
+
+[[package]]
+name = "loupe-stretch"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

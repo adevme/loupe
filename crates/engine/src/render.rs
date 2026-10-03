@@ -276,7 +276,7 @@ fn lay_clips(
         }
         let from = clip.start.max(pos);
         let to = clip.end().min(end);
-        let source = &clip.source.frames;
+        let source = clip.audio();
         let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
         let count = match clip.notes {
             Some(_) => (to - from) as usize,
