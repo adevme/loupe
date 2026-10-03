@@ -23,6 +23,8 @@ const MIN_GRID_PX: f64 = 14.0;
 const DRAG_THRESHOLD: f32 = 4.0;
 const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
+const HEADER_TINT: f32 = 0.42;
+const MUTED_HEADER_TINT: f32 = 0.16;
 const TOOL_BUTTON: f32 = 26.0;
 const TOOL_GAP: f32 = 6.0;
 const TOOLS_LEFT: f32 = 12.0;
@@ -1220,7 +1222,12 @@ impl Timeline<'_> {
             if top > size.height || top + height < 0.0 {
                 continue;
             }
-            frame.fill_rectangle(Point::new(0.0, top), Size::new(3.0, height - 1.0), self.colour_of(i));
+            let tint = if track.muted { MUTED_HEADER_TINT } else { HEADER_TINT };
+            frame.fill_rectangle(
+                Point::new(0.0, top),
+                Size::new(size.width, height - 1.0),
+                theme::mix(p.panel, self.colour_of(i), tint),
+            );
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
             frame.fill_text(Text {
                 content: shorten(&track.name, if height >= ROOMY_HEADER_H { 20 } else { 14 }),
@@ -1236,7 +1243,7 @@ impl Timeline<'_> {
             frame.fill_text(Text {
                 content: icons::glyph("x").to_string(),
                 position: Point::new(remove.center_x(), remove.center_y() - LANES_TOP),
-                color: p.text_faint,
+                color: p.text_dim,
                 size: 14.0.into(),
                 font: theme::ICONS,
                 horizontal_alignment: alignment::Horizontal::Center,
