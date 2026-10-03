@@ -165,6 +165,9 @@ pub enum Message {
     BypassPlugin(TrackId, usize),
     WheelOverFader(mixer::Level, iced::mouse::ScrollDelta),
     ShowPlugin(TrackId, usize),
+    FxGrab(TrackId, usize),
+    FxOver(usize),
+    FxDrop,
     StockTurned(loupe_stock_ui::Change),
     StockTold(loupe_stock_ui::EqMessage),
     OpenMatrix,
@@ -316,6 +319,7 @@ struct App {
     fx_was: u64,
     peeks: racks::Peeks,
     stock: Option<stockwin::Window>,
+    fx_drag: Option<(TrackId, usize, usize)>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
     plugin_filter: String,
@@ -440,6 +444,7 @@ impl App {
             fx_was: 0,
             peeks: racks::Peeks::default(),
             stock: None,
+            fx_drag: None,
             found: Vec::new(),
             scanning: true,
             plugin_filter: String::new(),
@@ -968,6 +973,21 @@ impl App {
                 self.edit(None, Command::RemoveFx { track, slot });
             }
             Message::ShowPlugin(track, slot) => self.open_plugin_window(track, slot),
+            Message::FxGrab(track, slot) => self.fx_drag = Some((track, slot, slot)),
+            Message::FxOver(slot) => {
+                if let Some((_, _, over)) = self.fx_drag.as_mut() {
+                    *over = slot;
+                }
+            }
+            Message::FxDrop => {
+                if let Some((track, from, to)) = self.fx_drag.take() {
+                    if from == to {
+                        self.open_plugin_window(track, from);
+                    } else {
+                        self.edit(None, Command::MoveFx { track, slot: from, to });
+                    }
+                }
+            }
             Message::StockTurned(change) => {
                 let changes = self.stock.as_mut().map(|window| window.turned(change)).unwrap_or_default();
                 self.plugin_changed(changes);

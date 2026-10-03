@@ -1,5 +1,5 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
 use iced::{Alignment, Element, Length};
 
 use loupe_engine::TrackId;
@@ -26,13 +26,19 @@ impl App {
         for (slot, fx) in found.fx.iter().enumerate() {
             let short = shorten(&fx.name);
             let on = !fx.bypassed;
+            let dragged = self.fx_drag.map(|(held, from, _)| held == track && from == slot).unwrap_or(false);
+            let landing = self.fx_drag.map(|(held, _, over)| held == track && over == slot).unwrap_or(false);
+            let name = container(text(short).size(10.5).wrapping(iced::widget::text::Wrapping::None))
+                .padding(iced::Padding { top: 1.0, right: 3.0, bottom: 1.0, left: 3.0 })
+                .width(Length::Fill)
+                .style(move |_| crate::plugins::slot_look(palette, on, dragged, landing));
             rows = rows.push(
                 row![
-                    button(text(short).size(10.5).wrapping(iced::widget::text::Wrapping::None))
-                        .padding([1, 3])
-                        .width(Length::Fill)
-                        .style(move |_, status| palette.toggled(on, status))
-                        .on_press(Message::ShowPlugin(track, slot)),
+                    mouse_area(name)
+                        .on_press(Message::FxGrab(track, slot))
+                        .on_move(move |_| Message::FxOver(slot))
+                        .on_release(Message::FxDrop)
+                        .interaction(iced::mouse::Interaction::Grab),
                     button(text("b").size(10.5))
                         .padding([1, 3])
                         .style(move |_, status| palette.toggled(!on, status))
@@ -131,5 +137,19 @@ mod tests {
         assert_eq!(shorten("Loupe EQ"), "Loupe EQ");
         assert_eq!(shorten("Valhalla Supermassive"), "Supermas\u{2026}");
         assert_eq!(shorten("Pro-Q 4"), "Pro-Q 4");
+    }
+}
+
+pub fn slot_look(palette: crate::theme::Palette, on: bool, dragged: bool, landing: bool) -> iced::widget::container::Style {
+    let shown = palette.toggled(on, iced::widget::button::Status::Active);
+    let mut border = shown.border;
+    if landing {
+        border = border.width(1.0).color(palette.accent);
+    }
+    iced::widget::container::Style {
+        background: if dragged { Some(palette.accent.scale_alpha(0.35).into()) } else { shown.background },
+        text_color: Some(shown.text_color),
+        border,
+        ..Default::default()
     }
 }
