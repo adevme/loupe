@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{PoisonError, RwLock};
 
 use iced::Font;
 
@@ -28,14 +28,16 @@ struct Chosen {
     glyphs: Vec<(String, char)>,
 }
 
-static CHOSEN: OnceLock<Chosen> = OnceLock::new();
+static CHOSEN: RwLock<Option<Chosen>> = RwLock::new(None);
 
 pub fn choose(family: Option<&'static str>, glyphs: Vec<(String, char)>) {
-    let _ = CHOSEN.set(Chosen { family: family.unwrap_or(BUILT_IN_FAMILY), glyphs });
+    let chosen = Chosen { family: family.unwrap_or(BUILT_IN_FAMILY), glyphs };
+    *CHOSEN.write().unwrap_or_else(PoisonError::into_inner) = Some(chosen);
 }
 
 fn themed(name: &str) -> Option<(char, &'static str)> {
-    let chosen = CHOSEN.get()?;
+    let chosen = CHOSEN.read().unwrap_or_else(PoisonError::into_inner);
+    let chosen = chosen.as_ref()?;
     chosen.glyphs.iter().find(|(known, _)| known == name).map(|(_, glyph)| (*glyph, chosen.family))
 }
 

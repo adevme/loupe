@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use iced::widget::{button, container, slider, text_input};
 use iced::{font, Background, Border, Color, Font, Theme};
@@ -10,6 +11,8 @@ pub const MIN_TRACK_HEIGHT: f32 = 40.0;
 pub const MAX_TRACK_HEIGHT: f32 = 400.0;
 pub const BAR_SLOTS: usize = 24;
 const POSTSCRIPT_OUTLINES: &[u8] = b"OTTO";
+const THEME_EXTENSION: &str = "theme";
+pub const REFERENCE_FILE: &str = "default.theme";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -244,17 +247,19 @@ pub struct Loaded {
 
 impl Palette {
     pub fn load(chosen: Option<&str>) -> Loaded {
-        let plain = |problem| Loaded { palette: NEUTRAL, problem, icon_font: None };
-        let Some(dir) = config_dir() else {
+        let plain = |problem| {
+            icons::choose(None, Vec::new());
+            Loaded { palette: NEUTRAL, problem, icon_font: None }
+        };
+        let Some(themes) = folder() else {
             return plain(None);
         };
-        let themes = dir.join("themes");
         let _ = fs::create_dir_all(&themes);
-        let _ = fs::write(themes.join("default.theme"), NEUTRAL.to_text());
+        let _ = fs::write(themes.join(REFERENCE_FILE), NEUTRAL.to_text());
         let Some(name) = chosen else {
             return plain(None);
         };
-        let path = themes.join(format!("{name}.theme"));
+        let path = themes.join(format!("{name}.{THEME_EXTENSION}"));
         let Ok(text) = fs::read_to_string(&path) else {
             return plain(Some(format!("Theme \"{name}\" is not at {}", path.display())));
         };
@@ -302,9 +307,8 @@ impl Palette {
             _ => None,
         };
         let family = icon_font.as_ref().and(icon_family).map(leak);
-        if icon_font.is_some() || icon_file.is_none() {
-            icons::choose(family, glyphs);
-        }
+        let font_is_missing = icon_file.is_some() && icon_font.is_none();
+        icons::choose(family, if font_is_missing { Vec::new() } else { glyphs });
         Loaded { palette, problem, icon_font }
     }
 
@@ -451,6 +455,15 @@ impl Palette {
             out.push_str(&format!("# icon_{name} = {:x}\n", glyph as u32));
         }
         out
+    }
+
+    pub fn fonts(&self) -> (Font, Font) {
+        (self.ui, self.mono)
+    }
+
+    pub fn with_fonts_of(mut self, other: &Palette) -> Self {
+        (self.ui, self.medium, self.semibold, self.mono) = (other.ui, other.medium, other.semibold, other.mono);
+        self
     }
 
     pub fn track(&self, index: usize) -> Color {
@@ -707,6 +720,26 @@ fn family(font: Font) -> &'static str {
 
 fn leak(value: &str) -> &'static str {
     Box::leak(value.to_string().into_boxed_str())
+}
+
+pub fn folder() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("themes"))
+}
+
+pub fn available() -> Vec<String> {
+    let Some(themes) = folder() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = fs::read_dir(themes)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == THEME_EXTENSION))
+        .filter(|path| path.file_name().is_some_and(|name| name != REFERENCE_FILE))
+        .filter_map(|path| path.file_stem().map(|name| name.to_string_lossy().into_owned()))
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names
 }
 
 fn side(value: &str) -> Result<Side, String> {

@@ -16,6 +16,7 @@ mod selection;
 mod settings;
 mod spinner;
 mod theme;
+mod theming;
 mod timeline;
 
 use std::collections::{HashMap, HashSet};
@@ -53,7 +54,7 @@ const EXPORT_PROGRESS_STEPS: u32 = 1000;
 const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-const SETTINGS_PAGE_HEIGHT: f32 = 96.0;
+const SETTINGS_PAGE_HEIGHT: f32 = 196.0;
 
 fn main() -> iced::Result {
     crash::keep_a_record();
@@ -193,6 +194,9 @@ pub enum Message {
     FolderPicked(Option<PathBuf>),
     FolderReset,
     SettingsTab(SettingsTab),
+    ThemeChosen(String),
+    ThemeFontLoaded,
+    ShowThemes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -269,6 +273,9 @@ struct App {
     input: Option<Input>,
     input_level: f32,
     input_name: Option<String>,
+    theme_name: Option<String>,
+    theme_names: Vec<String>,
+    theme_problem: Option<String>,
     input_names: Vec<String>,
     practice_input: bool,
     engine: Engine,
@@ -339,6 +346,9 @@ impl App {
             input: None,
             input_level: 0.0,
             input_name: settings.input.clone(),
+            theme_name: settings.theme.clone(),
+            theme_names: Vec::new(),
+            theme_problem: loaded.problem,
             input_names: Vec::new(),
             practice_input: silent,
             problem: None,
@@ -348,7 +358,7 @@ impl App {
             export_elsewhere: None,
             exporting: false,
             export_progress: Arc::new(AtomicU32::new(0)),
-            startup_problem: no_sound.or(loaded.problem).or(no_folder),
+            startup_problem: no_sound.or(no_folder),
             bpm: format_bpm(project.bpm),
             engine,
             project,
@@ -641,6 +651,7 @@ impl App {
             Message::Resized(size) => self.window = size,
             Message::OpenSettings => {
                 self.input_names = loupe_engine::input_devices();
+                self.theme_names = theme::available();
                 self.overlay = Overlay::Settings;
                 self.pending_scale = self.scale;
                 self.scale_text = format_scale(self.scale);
@@ -970,6 +981,9 @@ impl App {
             }
             Message::FolderReset => self.use_folder(None),
             Message::SettingsTab(tab) => self.settings_tab = tab,
+            Message::ThemeChosen(name) => return self.use_theme(name),
+            Message::ThemeFontLoaded => self.cache.clear(),
+            Message::ShowThemes => self.show_themes_folder(),
         }
         Task::none()
     }
@@ -1456,7 +1470,7 @@ impl App {
         }))
         .spacing(4);
         let page = match current {
-            SettingsTab::Display => scale,
+            SettingsTab::Display => column![self.theme_picker(), rule(palette), scale].spacing(16),
             SettingsTab::File => folder,
             SettingsTab::Recording => recording,
         };
@@ -1466,7 +1480,7 @@ impl App {
 
     fn status(&self) -> Option<Element<'_, Message>> {
         let palette = self.palette;
-        let line: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
+        let line: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()).or(self.theme_problem.as_ref()) {
             text(problem.as_str()).size(12).color(palette.danger).into()
         } else if self.exporting {
             let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
