@@ -4,6 +4,11 @@ use std::path::{Path, PathBuf};
 pub const MIN_SCALE: f64 = 0.5;
 pub const MAX_SCALE: f64 = 3.0;
 const SETTINGS_FILE: &str = "settings";
+pub const AUTOSAVE_MINUTES: std::ops::RangeInclusive<u32> = 0..=60;
+pub const DEFAULT_AUTOSAVE_MINUTES: u32 = 2;
+pub const BACKUPS_KEPT: std::ops::RangeInclusive<u32> = 1..=100;
+pub const DEFAULT_BACKUPS_KEPT: u32 = 20;
+const LONGEST_NUMBER: usize = 3;
 
 pub struct Settings {
     pub theme: Option<String>,
@@ -12,6 +17,8 @@ pub struct Settings {
     pub folder: Option<PathBuf>,
     pub mixer_open: bool,
     pub input: Option<String>,
+    pub autosave_minutes: u32,
+    pub backups_kept: u32,
 }
 
 impl Settings {
@@ -25,8 +32,32 @@ impl Settings {
             folder: value_of("folder").map(PathBuf::from),
             mixer_open: value_of("mixer") == Some("open"),
             input: value_of("input").map(str::to_string),
+            autosave_minutes: value_of("autosave_minutes").and_then(|text| autosave_minutes_from(text).ok()).unwrap_or(DEFAULT_AUTOSAVE_MINUTES),
+            backups_kept: value_of("backups_kept").and_then(|text| backups_kept_from(text).ok()).unwrap_or(DEFAULT_BACKUPS_KEPT),
         }
     }
+}
+
+pub fn typed_number(text: &str) -> bool {
+    text.len() <= LONGEST_NUMBER && text.chars().all(|c| c.is_ascii_digit())
+}
+
+fn whole_in(text: &str, range: &std::ops::RangeInclusive<u32>) -> Option<u32> {
+    let text = text.trim();
+    if text.is_empty() || !text.chars().all(|c| c.is_ascii_digit()) || text.len() > LONGEST_NUMBER {
+        return None;
+    }
+    text.parse::<u32>().ok().filter(|number| range.contains(number))
+}
+
+pub fn autosave_minutes_from(text: &str) -> Result<u32, String> {
+    whole_in(text, &AUTOSAVE_MINUTES).ok_or_else(|| {
+        format!("Use a whole number of minutes from {} to {}. 0 turns autosave off.", AUTOSAVE_MINUTES.start(), AUTOSAVE_MINUTES.end())
+    })
+}
+
+pub fn backups_kept_from(text: &str) -> Result<u32, String> {
+    whole_in(text, &BACKUPS_KEPT).ok_or_else(|| format!("Keep from {} to {} backups.", BACKUPS_KEPT.start(), BACKUPS_KEPT.end()))
 }
 
 pub const HOME_FOLDER: &str = "Loupe";
@@ -169,4 +200,25 @@ pub fn templates(chosen: Option<&Path>) -> Vec<PathBuf> {
         .collect();
     found.sort();
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autosave_settings_only_take_sane_whole_numbers() {
+        assert_eq!(autosave_minutes_from("2"), Ok(2));
+        assert_eq!(autosave_minutes_from(" 0 "), Ok(0));
+        assert_eq!(autosave_minutes_from("60"), Ok(60));
+        for bad in ["61", "-1", "1.5", "", "two", "999", "0x2", "1e1", "+3"] {
+            assert!(autosave_minutes_from(bad).is_err(), "{bad} was accepted");
+        }
+        assert_eq!(backups_kept_from("1"), Ok(1));
+        assert_eq!(backups_kept_from("100"), Ok(100));
+        for bad in ["0", "101", "", "-5", "ten", "20.0"] {
+            assert!(backups_kept_from(bad).is_err(), "{bad} was accepted");
+        }
+        assert!(typed_number("12") && typed_number("") && !typed_number("1a") && !typed_number("1234"));
+    }
 }

@@ -36,6 +36,7 @@ impl App {
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
+            Overlay::Recover => self.recover_layer(),
         }
     }
 

@@ -20,3 +20,4 @@ pub use model::{
 pub use envelope::{Envelope, Mode, Point, Shape, Target, Writer};
 pub use render::{mix_tracks, render, render_through, scale, Chains, Mixdown};
 pub use source::Source;
+pub use wav::repair_takes;
