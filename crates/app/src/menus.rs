@@ -32,6 +32,7 @@ impl App {
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
             Overlay::Routing(track) => self.centred(self.routing_sheet(*track)),
             Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
+            Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
         }

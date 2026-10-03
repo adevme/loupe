@@ -165,6 +165,10 @@ pub enum Message {
     BypassPlugin(TrackId, usize),
     WheelOverFader(mixer::Level, iced::mouse::ScrollDelta),
     ShowPlugin(TrackId, usize),
+    OpenClipPlugins(ClipId),
+    AddClipPlugin(ClipId, usize),
+    RemoveClipPlugin(ClipId, usize),
+    BypassClipPlugin(ClipId, usize),
     FxGrab(TrackId, usize),
     FxOver(usize),
     FxDrop,
@@ -277,6 +281,7 @@ pub enum Overlay {
     Clip(ClipId),
     Routing(TrackId),
     Plugins(TrackId),
+    ClipPlugins(ClipId),
     Stock,
     Matrix,
 }
@@ -973,6 +978,36 @@ impl App {
                 self.edit(None, Command::RemoveFx { track, slot });
             }
             Message::ShowPlugin(track, slot) => self.open_plugin_window(track, slot),
+            Message::OpenClipPlugins(clip) => {
+                self.plugin_filter.clear();
+                self.overlay = Overlay::ClipPlugins(clip);
+                return text_input::focus(plugins::FILTER_ID);
+            }
+            Message::AddClipPlugin(clip, which) => {
+                if let Some(plugin) = self.found.get(which).cloned() {
+                    let fx = loupe_engine::Fx {
+                        path: plugin.path.clone(),
+                        index: plugin.index,
+                        name: plugin.name.clone(),
+                        bypassed: false,
+                        state: Vec::new(),
+                    };
+                    self.overlay = Overlay::Clip(clip);
+                    self.edit(None, Command::AddClipFx { clip, fx });
+                }
+            }
+            Message::RemoveClipPlugin(clip, slot) => {
+                self.edit(None, Command::RemoveClipFx { clip, slot });
+            }
+            Message::BypassClipPlugin(clip, slot) => {
+                let bypassed = self
+                    .project
+                    .clip(clip)
+                    .and_then(|found| found.fx.get(slot))
+                    .map(|fx| !fx.bypassed)
+                    .unwrap_or(false);
+                self.edit(None, Command::BypassClipFx { clip, slot, bypassed });
+            }
             Message::FxGrab(track, slot) => self.fx_drag = Some((track, slot, slot)),
             Message::FxOver(slot) => {
                 if let Some((_, _, over)) = self.fx_drag.as_mut() {
@@ -1243,14 +1278,20 @@ impl App {
     }
 
     pub(crate) fn gather_fx_state(&mut self) {
-        if self.project.tracks.iter().all(|track| track.fx.is_empty()) {
+        let bare = self.project.tracks.iter().all(|track| track.fx.is_empty())
+            && self.project.tracks.iter().flat_map(|track| track.clips.iter()).all(|clip| clip.fx.is_empty());
+        if bare {
             return;
         }
         let Some(mut racks) = self.borrow_racks() else { return };
         let found = racks.harvest();
+        let on_clips = racks.harvest_clips();
         self.racks = Some(racks);
         for (track, slot, state) in found {
             let _ = self.project.apply(Command::SetFxState { track, slot, state });
+        }
+        for (clip, slot, state) in on_clips {
+            let _ = self.project.apply(Command::SetClipFxState { clip, slot, state });
         }
         self.hand_racks_over();
     }
@@ -1339,6 +1380,17 @@ impl App {
             }
             track.id.hash(&mut hasher);
             for fx in &track.fx {
+                fx.path.hash(&mut hasher);
+                fx.index.hash(&mut hasher);
+                fx.bypassed.hash(&mut hasher);
+            }
+        }
+        for clip in self.project.tracks.iter().flat_map(|track| track.clips.iter()) {
+            if clip.fx.is_empty() {
+                continue;
+            }
+            clip.id.hash(&mut hasher);
+            for fx in &clip.fx {
                 fx.path.hash(&mut hasher);
                 fx.index.hash(&mut hasher);
                 fx.bypassed.hash(&mut hasher);

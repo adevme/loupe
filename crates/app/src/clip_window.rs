@@ -111,7 +111,12 @@ impl App {
         ]
         .spacing(12);
 
-        let body = column![fields, rule(palette), preview].spacing(16);
+        let chain = column![
+            text("Plugins on this clip").size(12.5).color(palette.text_dim),
+            self.clip_fx_block(id),
+        ]
+        .spacing(8);
+        let body = column![fields, rule(palette), chain, rule(palette), preview].spacing(16);
         self.window(clip.source.name.clone(), body.into(), 520.0)
     }
 

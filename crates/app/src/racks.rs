@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use loupe_engine::{Chains, Project, TrackId};
+use loupe_engine::{Chains, ClipId, Project, TrackId};
 use loupe_plugins::rack::{Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_stock::{History, Scopes};
@@ -20,13 +20,14 @@ pub struct Racks {
     rate: u32,
     block: usize,
     chains: HashMap<TrackId, Rack>,
+    clips: HashMap<ClipId, Rack>,
     scratch: Vec<[f32; 2]>,
     peeks: Peeks,
 }
 
 impl Racks {
     pub fn new(rate: u32, block: usize, peeks: Peeks) -> Self {
-        Self { host: host_beside_us(), rate, block, chains: HashMap::new(), scratch: Vec::new(), peeks }
+        Self { host: host_beside_us(), rate, block, chains: HashMap::new(), clips: HashMap::new(), scratch: Vec::new(), peeks }
     }
 
     fn settle(&mut self, project: &Project) -> Vec<String> {
@@ -53,6 +54,32 @@ impl Racks {
                 .entry(track.id)
                 .or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
             troubles.extend(rack.reconcile(&want));
+        }
+        let alive: Vec<ClipId> = project.tracks.iter().flat_map(|track| track.clips.iter().map(|clip| clip.id)).collect();
+        self.clips.retain(|id, _| alive.contains(id));
+        for track in &project.tracks {
+            for clip in &track.clips {
+                if clip.fx.is_empty() {
+                    self.clips.remove(&clip.id);
+                    continue;
+                }
+                let want: Vec<_> = clip
+                    .fx
+                    .iter()
+                    .map(|fx| Wanted {
+                        path: fx.path.clone(),
+                        index: fx.index,
+                        name: fx.name.clone(),
+                        bypassed: fx.bypassed,
+                        state: fx.state.clone(),
+                    })
+                    .collect();
+                let rack = self
+                    .clips
+                    .entry(clip.id)
+                    .or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
+                troubles.extend(rack.reconcile(&want));
+            }
         }
         self.publish();
         troubles
@@ -107,6 +134,34 @@ impl Chains for Racks {
 
     fn latency(&self, track: TrackId) -> usize {
         self.chains.get(&track).map(|rack| rack.latency()).unwrap_or(0)
+    }
+
+    fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
+        let Some(rack) = self.clips.get_mut(&clip) else { return };
+        if rack.is_empty() {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.extend_from_slice(audio);
+        rack.process(&mut self.scratch);
+        let shared = self.scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+    }
+
+    fn clip_latency(&self, clip: ClipId) -> usize {
+        self.clips.get(&clip).map(|rack| rack.latency()).unwrap_or(0)
+    }
+
+    fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {
+        let mut out = Vec::new();
+        for (id, rack) in self.clips.iter_mut() {
+            for slot in 0..rack.len() {
+                if let Some(state) = rack.save(slot) {
+                    out.push((*id, slot, state));
+                }
+            }
+        }
+        out
     }
 
     fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {

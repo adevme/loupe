@@ -36,6 +36,19 @@ pub trait Chains: Send {
         let _ = track;
         0
     }
+
+    fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
+        let _ = (clip, audio);
+    }
+
+    fn clip_latency(&self, clip: ClipId) -> usize {
+        let _ = clip;
+        0
+    }
+
+    fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {
+        Vec::new()
+    }
 }
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
@@ -60,6 +73,7 @@ pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
 pub struct Mixdown {
     buffers: Vec<Vec<[f32; 2]>>,
     sides: Vec<Vec<[f32; 2]>>,
+    apart: Vec<[f32; 2]>,
     pre: Vec<[f32; 2]>,
     order: Vec<TrackId>,
     index: Vec<usize>,
@@ -123,7 +137,7 @@ pub fn mix_tracks_metered(
         scratch.sides[index][..len].fill([0.0; 2]);
         let buffer = &mut scratch.buffers[index][..len];
         buffer.fill([0.0; 2]);
-        lay_clips(track, pos + ahead[index], buffer, only);
+        lay_clips(track, pos + ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
     }
     for step in 0..scratch.order.len() {
         let index = scratch.index[step];
@@ -185,9 +199,21 @@ pub fn mix_tracks_metered(
     }
 }
 
-fn lay_clips(track: &Track, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
-    let end = pos + out.len() as Frames;
+fn lay_clips(
+    track: &Track,
+    pos: Frames,
+    out: &mut [[f32; 2]],
+    only: Option<ClipId>,
+    mut chains: Option<&mut (dyn Chains + '_)>,
+    apart: &mut Vec<[f32; 2]>,
+) {
     for clip in &track.clips {
+        let ahead = match chains.as_deref() {
+            Some(racks) if !clip.fx.is_empty() => racks.clip_latency(clip.id) as Frames,
+            _ => 0,
+        };
+        let pos = pos + ahead;
+        let end = pos + out.len() as Frames;
         let silenced = match only {
             Some(chosen) => clip.id != chosen || clip.muted,
             None => clip.muted,
@@ -201,7 +227,15 @@ fn lay_clips(track: &Track, pos: Frames, out: &mut [[f32; 2]], only: Option<Clip
         let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
         let count = ((to - from) as usize).min(source.len() - source_from);
         let gain = clip.gain;
-        let target = &mut out[(from - pos) as usize..][..count];
+        let own = !clip.fx.is_empty() && chains.is_some();
+        if own {
+            apart.clear();
+            apart.resize(out.len(), [0.0; 2]);
+        }
+        let target = match own {
+            true => &mut apart[(from - pos) as usize..][..count],
+            false => &mut out[(from - pos) as usize..][..count],
+        };
         let audio = &source[source_from..][..count];
         let first = from - clip.start;
         let fade_in_frames = (clip.fade_in.len.saturating_sub(first) as usize).min(count);
@@ -216,6 +250,15 @@ fn lay_clips(track: &Track, pos: Frames, out: &mut [[f32; 2]], only: Option<Clip
             clip,
             first + fade_out_from as Frames,
         );
+        if own {
+            if let Some(racks) = chains.as_deref_mut() {
+                racks.process_clip(clip.id, apart);
+            }
+            for (into, from) in out.iter_mut().zip(apart.iter()) {
+                into[0] += from[0];
+                into[1] += from[1];
+            }
+        }
     }
 }
 
@@ -284,6 +327,50 @@ mod tests {
         assert_eq!(out[51], [1.0, -1.0]);
         assert_eq!(out[149], [99.0, -99.0]);
         assert_eq!(out[150], [0.0, 0.0]);
+    }
+
+    struct ClipDoubler {
+        on: ClipId,
+        ran: usize,
+    }
+
+    impl Chains for ClipDoubler {
+        fn process(&mut self, _track: TrackId, _audio: &mut [[f32; 2]]) {}
+
+        fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
+            if clip != self.on {
+                return;
+            }
+            self.ran += 1;
+            for frame in audio.iter_mut() {
+                frame[0] *= 2.0;
+                frame[1] *= 2.0;
+            }
+        }
+    }
+
+    #[test]
+    fn a_clip_can_carry_its_own_chain() {
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        let loud = clip(&mut p, one, counting(200), 0);
+        let plain = clip(&mut p, one, counting(200), 300);
+        let fx = crate::model::Fx {
+            path: std::path::PathBuf::from("x.vst3"),
+            index: 0,
+            name: "x".into(),
+            bypassed: false,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddClipFx { clip: loud, fx }).unwrap();
+        let mut racks = ClipDoubler { on: loud, ran: 0 };
+        let mut out = vec![[0.0; 2]; 600];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(racks.ran, 1, "the clip chain did not run once");
+        assert_eq!(out[50], [100.0, -100.0], "the clip with a chain was not doubled");
+        assert_eq!(out[350], [50.0, -50.0], "the clip without a chain changed");
+        let _ = plain;
     }
 
     struct Ducker {

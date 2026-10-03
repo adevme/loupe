@@ -42,6 +42,7 @@ pub struct SavedFx {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedClip {
+    pub fx: Vec<SavedFx>,
     pub source: usize,
     pub start: Frames,
     pub offset: Frames,
@@ -104,6 +105,17 @@ impl SavedProject {
                             muted: clip.muted,
                             fade_in: clip.fade_in,
                             fade_out: clip.fade_out,
+                            fx: clip
+                                .fx
+                                .iter()
+                                .map(|fx| SavedFx {
+                                    path: fx.path.clone(),
+                                    index: fx.index,
+                                    name: fx.name.clone(),
+                                    bypassed: fx.bypassed,
+                                    state: fx.state.clone(),
+                                })
+                                .collect(),
                         })
                         .collect(),
                 })
@@ -149,6 +161,11 @@ impl SavedProject {
                     clip.fade_out.len,
                     clip.fade_out.curve
                 ));
+                for fx in &clip.fx {
+                    out.push_str(&format!("clipfxpath {}\n", fx.path.display()));
+                    let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
+                    out.push_str(&format!("clipfx index={} bypass={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.name));
+                }
             }
         }
         out
@@ -194,8 +211,8 @@ impl SavedProject {
                     let gain = number_in(&fields, "gain").unwrap_or(1.0);
                     track.sends.push((to, gain, fields.get("pre") == Some(&"1"), fields.get("side") == Some(&"1")));
                 }
-                "fxpath" => held = Some(PathBuf::from(rest)),
-                "fx" => {
+                "fxpath" | "clipfxpath" => held = Some(PathBuf::from(rest)),
+                "clipfx" | "fx" => {
                     let (fields, name) = rest.split_once("name=").ok_or_else(|| bad("the plugin has no name"))?;
                     let fields = fields_of(fields);
                     let path = held.take().ok_or_else(|| bad("the plugin has no file"))?;
@@ -210,7 +227,12 @@ impl SavedProject {
                         bypassed: fields.get("bypass") == Some(&"1"),
                         state,
                     };
-                    saved.tracks.last_mut().ok_or_else(|| bad("a plugin before any track"))?.fx.push(fx);
+                    let track = saved.tracks.last_mut().ok_or_else(|| bad("a plugin before any track"))?;
+                    if kind == "clipfx" {
+                        track.clips.last_mut().ok_or_else(|| bad("a clip plugin before any clip"))?.fx.push(fx);
+                    } else {
+                        track.fx.push(fx);
+                    }
                 }
                 "clip" => {
                     let fields = fields_of(rest);
@@ -225,6 +247,7 @@ impl SavedProject {
                         muted: fields.get("muted") == Some(&"1"),
                         fade_in: fade_from(need("fade_in")?).ok_or_else(|| bad("the fade in is not readable"))?,
                         fade_out: fade_from(need("fade_out")?).ok_or_else(|| bad("the fade out is not readable"))?,
+                        fx: Vec::new(),
                     };
                     if clip.source >= saved.sources.len() {
                         return Err(bad("the clip points at audio the file does not list"));
@@ -277,6 +300,16 @@ impl SavedProject {
                 for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
                     let fade = Fade { len: rescale(fade.len), curve: fade.curve };
                     let _ = project.apply(Command::SetClipFade { clip: id, edge, fade });
+                }
+                for fx in &clip.fx {
+                    let added = crate::model::Fx {
+                        path: fx.path.clone(),
+                        index: fx.index,
+                        name: fx.name.clone(),
+                        bypassed: fx.bypassed,
+                        state: fx.state.clone(),
+                    };
+                    let _ = project.apply(Command::AddClipFx { clip: id, fx: added });
                 }
             }
         }

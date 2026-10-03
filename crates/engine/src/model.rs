@@ -41,6 +41,7 @@ pub struct Clip {
     pub muted: bool,
     pub fade_in: Fade,
     pub fade_out: Fade,
+    pub fx: Vec<Fx>,
 }
 
 impl Clip {
@@ -131,6 +132,11 @@ pub enum Command {
     SetSendGain { from: TrackId, to: TrackId, gain: f32 },
     SetSendPreFader { from: TrackId, to: TrackId, pre_fader: bool },
     SetSendSidechain { from: TrackId, to: TrackId, sidechain: bool },
+    AddClipFx { clip: ClipId, fx: Fx },
+    RemoveClipFx { clip: ClipId, slot: usize },
+    MoveClipFx { clip: ClipId, slot: usize, to: usize },
+    BypassClipFx { clip: ClipId, slot: usize, bypassed: bool },
+    SetClipFxState { clip: ClipId, slot: usize, state: Vec<u8> },
     AddFx { track: TrackId, fx: Fx },
     RemoveFx { track: TrackId, slot: usize },
     MoveFx { track: TrackId, slot: usize, to: usize },
@@ -252,6 +258,7 @@ impl Project {
                     len,
                     gain: 1.0,
                     muted: false,
+                    fx: Vec::new(),
                     fade_in: Fade::NONE,
                     fade_out: Fade::NONE,
                 });
@@ -398,6 +405,42 @@ impl Project {
                 let f = self.track_index(from)?;
                 let send = self.tracks[f].sends.iter_mut().find(|send| send.to == to).ok_or(CommandError::NoSuchTrack)?;
                 send.sidechain = sidechain;
+                Ok(Outcome::Done)
+            }
+            Command::AddClipFx { clip, fx } => {
+                let (t, i) = self.locate(clip)?;
+                self.tracks[t].clips[i].fx.push(fx);
+                Ok(Outcome::Done)
+            }
+            Command::RemoveClipFx { clip, slot } => {
+                let (t, i) = self.locate(clip)?;
+                let chain = &mut self.tracks[t].clips[i].fx;
+                if slot >= chain.len() {
+                    return Err(CommandError::InvalidValue);
+                }
+                chain.remove(slot);
+                Ok(Outcome::Done)
+            }
+            Command::MoveClipFx { clip, slot, to } => {
+                let (t, i) = self.locate(clip)?;
+                let chain = &mut self.tracks[t].clips[i].fx;
+                if slot >= chain.len() || to >= chain.len() {
+                    return Err(CommandError::InvalidValue);
+                }
+                let moved = chain.remove(slot);
+                chain.insert(to, moved);
+                Ok(Outcome::Done)
+            }
+            Command::BypassClipFx { clip, slot, bypassed } => {
+                let (t, i) = self.locate(clip)?;
+                let fx = self.tracks[t].clips[i].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.bypassed = bypassed;
+                Ok(Outcome::Done)
+            }
+            Command::SetClipFxState { clip, slot, state } => {
+                let (t, i) = self.locate(clip)?;
+                let fx = self.tracks[t].clips[i].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.state = state;
                 Ok(Outcome::Done)
             }
             Command::AddFx { track, fx } => {

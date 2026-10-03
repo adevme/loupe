@@ -2,7 +2,7 @@ use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
 use iced::{Alignment, Element, Length};
 
-use loupe_engine::TrackId;
+use loupe_engine::{ClipId, TrackId};
 use loupe_plugins::Found;
 
 use crate::{App, Message};
@@ -63,11 +63,16 @@ impl App {
     }
 
     pub(crate) fn plugin_sheet(&self, track: TrackId) -> Element<'_, Message> {
-        let palette = self.palette;
         let Some(found) = self.project.tracks.iter().find(|t| t.id == track) else {
             return text("This track is gone.").size(13).into();
         };
-        let heading = text(format!("Plugins for {}", found.name)).size(14).font(palette.semibold);
+        let heading = format!("Plugins for {}", found.name);
+        return self.picker(heading, &move |which| Message::AddPlugin(track, which));
+    }
+
+    pub(crate) fn picker(&self, heading: String, chose: &dyn Fn(usize) -> Message) -> Element<'_, Message> {
+        let palette = self.palette;
+        let heading = text(heading).size(14).font(palette.semibold);
         let search = text_input("Search", &self.plugin_filter)
             .id(FILTER_ID)
             .on_input(Message::PluginFilter)
@@ -91,7 +96,7 @@ impl App {
                     .padding([5, 10])
                     .width(Length::Fill)
                     .style(move |_, status| palette.ghost(status))
-                    .on_press(Message::AddPlugin(track, index)),
+                    .on_press(chose(index)),
             );
         }
         let body: Element<'_, Message> = if self.scanning {
@@ -151,5 +156,51 @@ pub fn slot_look(palette: crate::theme::Palette, on: bool, dragged: bool, landin
         text_color: Some(shown.text_color),
         border,
         ..Default::default()
+    }
+}
+
+impl App {
+    pub(crate) fn clip_fx_block(&self, clip: ClipId) -> Element<'_, Message> {
+        let palette = self.palette;
+        let Some(found) = self.project.clip(clip) else {
+            return Space::new(Length::Fill, 0).into();
+        };
+        let mut rows = column![].spacing(3);
+        for (slot, fx) in found.fx.iter().enumerate() {
+            let on = !fx.bypassed;
+            rows = rows.push(
+                row![
+                    text(fx.name.clone()).size(12.5).width(Length::Fill),
+                    button(text(if on { "On" } else { "Bypassed" }).size(11.5))
+                        .padding([2, 8])
+                        .style(move |_, status| palette.toggled(on, status))
+                        .on_press(Message::BypassClipPlugin(clip, slot)),
+                    button(text("Remove").size(11.5))
+                        .padding([2, 8])
+                        .style(move |_, status| palette.outlined(status))
+                        .on_press(Message::RemoveClipPlugin(clip, slot)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        if found.fx.is_empty() {
+            rows = rows.push(text("None yet.").size(12.5).color(palette.text_dim));
+        }
+        let add = button(text("Add a plugin").size(12.5))
+            .padding([4, 10])
+            .style(move |_, status| palette.outlined(status))
+            .on_press(Message::OpenClipPlugins(clip));
+        column![rows, add].spacing(8).width(Length::Fill).into()
+    }
+}
+
+impl App {
+    pub(crate) fn clip_plugin_sheet(&self, clip: ClipId) -> Element<'_, Message> {
+        let Some(found) = self.project.clip(clip) else {
+            return text("This clip is gone.").size(13).into();
+        };
+        let name = found.source.name.clone();
+        self.picker(format!("Plugins for {name}"), &move |which| Message::AddClipPlugin(clip, which))
     }
 }
