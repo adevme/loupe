@@ -1,11 +1,12 @@
 mod scan;
 pub mod vst3;
 pub mod sandbox;
-pub mod stream;
-pub mod rack;
-pub mod clap;
-pub mod lv2;
 pub mod au;
+pub mod clap;
+pub mod editor;
+pub mod lv2;
+pub mod rack;
+pub mod stream;
 pub mod wire;
 
 pub use scan::{folders, scan, Format, Found};

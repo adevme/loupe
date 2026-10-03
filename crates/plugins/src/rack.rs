@@ -111,6 +111,29 @@ impl Rack {
         }
     }
 
+    pub fn show(&mut self, slot: usize) -> Result<(), String> {
+        self.tell(slot, Ask::Show)
+    }
+
+    pub fn hide(&mut self, slot: usize) -> Result<(), String> {
+        self.tell(slot, Ask::Hide)
+    }
+
+    fn tell(&mut self, slot: usize, ask: Ask) -> Result<(), String> {
+        let found = self.slots.get_mut(slot).ok_or("there is no such slot")?;
+        let host = found.host.as_mut().ok_or("that plugin is not loaded")?;
+        match host.ask(ask) {
+            Ok(Reply::Fine) => Ok(()),
+            Ok(Reply::Trouble(why)) => Err(why),
+            Ok(other) => Err(format!("the plugin host answered out of turn: {other:?}")),
+            Err(why) => {
+                found.trouble = Some(why.clone());
+                found.host = None;
+                Err(why)
+            }
+        }
+    }
+
     pub fn save(&mut self, slot: usize) -> Option<Vec<u8>> {
         let found = self.slots.get_mut(slot)?;
         let host = found.host.as_mut()?;

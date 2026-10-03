@@ -68,6 +68,13 @@ impl Chains for Racks {
         self.problems()
     }
 
+    fn show(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
+        match self.chains.get_mut(&track) {
+            Some(rack) => rack.show(slot),
+            None => Err("that track has no plugins".into()),
+        }
+    }
+
     fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
         let mut out = Vec::new();
         for (id, rack) in self.chains.iter_mut() {

@@ -1,8 +1,10 @@
-use std::io::{BufReader, Write};
-use std::path::PathBuf;
+mod window;
 
-use loupe_plugins::vst3::{Effect, Library};
+use std::io::{BufReader, Write};
+use std::path::{Path, PathBuf};
+
 use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Reply};
+use loupe_plugins::{clap, lv2, vst3};
 
 #[cfg(windows)]
 mod com {
@@ -31,32 +33,176 @@ mod com {
     pub fn stop() {}
 }
 
+enum Open {
+    Vst3(vst3::Effect),
+    #[cfg(target_os = "macos")]
+    Au(loupe_plugins::au::Effect),
+    Clap(clap::Effect),
+    Lv2(lv2::Effect),
+}
+
+impl Open {
+    fn process(&mut self, audio: &mut [[f32; 2]]) {
+        match self {
+            Open::Vst3(effect) => effect.process(audio),
+            Open::Clap(effect) => effect.process(audio),
+            Open::Lv2(effect) => effect.process(audio),
+            #[cfg(target_os = "macos")]
+            Open::Au(effect) => effect.process(audio),
+        }
+    }
+
+    fn save(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Open::Vst3(effect) => effect.save(),
+            Open::Clap(effect) => effect.save(),
+            Open::Lv2(effect) => effect.save(),
+            #[cfg(target_os = "macos")]
+            Open::Au(effect) => effect.save(),
+        }
+    }
+
+    fn restore(&mut self, state: &[u8]) -> Result<(), String> {
+        match self {
+            Open::Vst3(effect) => effect.restore(state),
+            Open::Clap(effect) => effect.restore(state),
+            Open::Lv2(effect) => effect.restore(state),
+            #[cfg(target_os = "macos")]
+            Open::Au(effect) => effect.restore(state),
+        }
+    }
+}
+
+fn kind_of(path: &Path) -> &'static str {
+    match path.extension().and_then(|end| end.to_str()).unwrap_or("").to_lowercase().as_str() {
+        "clap" => "clap",
+        "lv2" => "lv2",
+        "component" => "au",
+        _ => "vst3",
+    }
+}
+
+fn names_in(path: &Path) -> Result<Vec<String>, String> {
+    match kind_of(path) {
+        "clap" => clap::Library::open(path).map(|library| library.classes().into_iter().map(|class| class.name).collect()),
+        "lv2" => lv2::Library::open(path).map(|library| library.classes().into_iter().map(|class| class.name).collect()),
+        "au" => au_names(),
+        _ => vst3::Library::open(path).map(|library| library.classes().into_iter().map(|class| class.name).collect()),
+    }
+}
+
+fn open_one(path: &Path, index: usize, rate: f64, block: usize) -> Result<Open, String> {
+    match kind_of(path) {
+        "clap" => clap::Library::open(path).and_then(|library| clap::Effect::start(library, index, rate, block)).map(Open::Clap),
+        "lv2" => lv2::Library::open(path).and_then(|library| lv2::Effect::start(library, index, rate, block)).map(Open::Lv2),
+        "au" => au_open(path, index, rate, block),
+        _ => vst3::Library::open(path).and_then(|library| vst3::Effect::start(library, index, rate, block)).map(Open::Vst3),
+    }
+}
+
+enum Came {
+    Ask(Ask),
+    Audio(Vec<[f32; 2]>),
+    Mumble(String),
+    Done,
+}
+
 fn main() {
     com::start();
-    let mut input = BufReader::new(std::io::stdin());
-    let mut out = std::io::stdout();
-    let mut open: Option<Effect> = None;
-    while let Some(line) = next_line(&mut input) {
-        let Some(ask) = Ask::read(&line) else {
-            let _ = Reply::Trouble(format!("I did not understand {}", line.trim())).write(&mut out);
-            continue;
-        };
-        if ask == Ask::Process {
-            let mut audio = Vec::new();
-            if read_block(&mut input, &mut audio).is_err() {
-                break;
+    let (sends, came) = std::sync::mpsc::channel::<Came>();
+    std::thread::spawn(move || {
+        let mut input = BufReader::new(std::io::stdin());
+        while let Some(line) = next_line(&mut input) {
+            let Some(ask) = Ask::read(&line) else {
+                if sends.send(Came::Mumble(line.trim().to_string())).is_err() {
+                    return;
+                }
+                continue;
+            };
+            let process = ask == Ask::Process;
+            if sends.send(Came::Ask(ask)).is_err() {
+                return;
             }
-            if let Some(effect) = open.as_mut() {
-                effect.process(&mut audio);
+            if process {
+                let mut audio = Vec::new();
+                if read_block(&mut input, &mut audio).is_err() {
+                    break;
+                }
+                if sends.send(Came::Audio(audio)).is_err() {
+                    return;
+                }
             }
-            if write_block(&mut out, &audio).is_err() {
-                break;
-            }
-            continue;
         }
+        let _ = sends.send(Came::Done);
+    });
+
+    let mut out = std::io::stdout();
+    let mut open: Option<Open> = None;
+    let mut editor: Option<(loupe_plugins::editor::Editor, window::Window)> = None;
+    'living: loop {
+        if let Some((_, pane)) = editor.as_ref() {
+            pane.pump();
+        }
+        let next = if editor.is_some() {
+            match came.recv_timeout(std::time::Duration::from_millis(8)) {
+                Ok(next) => next,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            }
+        } else {
+            match came.recv() {
+                Ok(next) => next,
+                Err(_) => break,
+            }
+        };
+        let ask = match next {
+            Came::Ask(ask) => ask,
+            Came::Audio(_) => continue,
+            Came::Mumble(line) => {
+                let _ = Reply::Trouble(format!("I did not understand {line}")).write(&mut out);
+                continue;
+            }
+            Came::Done => break,
+        };
         let reply = match ask {
+            Ask::Process => {
+                let mut audio = match came.recv() {
+                    Ok(Came::Audio(audio)) => audio,
+                    _ => break 'living,
+                };
+                if let Some(effect) = open.as_mut() {
+                    effect.process(&mut audio);
+                }
+                if write_block(&mut out, &audio).is_err() {
+                    break;
+                }
+                continue;
+            }
             Ask::Quit => break,
-            Ask::Process => continue,
+            Ask::Show => match show(open.as_ref(), &mut editor) {
+                Ok(()) => Reply::Fine,
+                Err(why) => Reply::Trouble(why),
+            },
+            Ask::Hide => {
+                if let Some((_, pane)) = editor.as_ref() {
+                    pane.hide();
+                }
+                Reply::Fine
+            }
+            Ask::Classes(path) => match names_in(&PathBuf::from(&path)) {
+                Ok(names) => Reply::Classes(names),
+                Err(why) => Reply::Trouble(why),
+            },
+            Ask::Load { path, index, rate, block } => {
+                editor = None;
+                match open_one(&PathBuf::from(&path), index, rate as f64, block) {
+                    Ok(effect) => {
+                        open = Some(effect);
+                        Reply::Loaded { inputs: 2, outputs: 2 }
+                    }
+                    Err(why) => Reply::Trouble(why),
+                }
+            }
             Ask::Save => match open.as_ref() {
                 Some(effect) => match effect.save() {
                     Ok(state) => Reply::State(state),
@@ -71,26 +217,59 @@ fn main() {
                 },
                 None => Reply::Trouble("no plugin is open".into()),
             },
-            Ask::Classes(path) => match Library::open(&PathBuf::from(&path)) {
-                Ok(library) => {
-                    let names = library.classes().into_iter().map(|class| class.name).collect();
-                    Reply::Classes(names)
-                }
-                Err(why) => Reply::Trouble(why),
-            },
-            Ask::Load { path, index, rate, block } => match Library::open(&PathBuf::from(&path))
-                .and_then(|library| Effect::start(library, index, rate as f64, block))
-            {
-                Ok(effect) => {
-                    open = Some(effect);
-                    Reply::Loaded { inputs: 2, outputs: 2 }
-                }
-                Err(why) => Reply::Trouble(why),
-            },
         };
         let _ = reply.write(&mut out);
     }
+    drop(editor);
     drop(open);
     let _ = out.flush();
     com::stop();
+}
+
+fn show(
+    open: Option<&Open>,
+    editor: &mut Option<(loupe_plugins::editor::Editor, window::Window)>,
+) -> Result<(), String> {
+    if let Some((_, pane)) = editor.as_ref() {
+        pane.show();
+        return Ok(());
+    }
+    let Some(Open::Vst3(effect)) = open else {
+        return Err("only VST3 plugins have a window so far".into());
+    };
+    let made = effect.editor()?;
+    let kind = loupe_plugins::editor::platform_kind();
+    if !made.fits(kind) {
+        return Err("this plugin has no window for this computer".into());
+    }
+    let (width, height) = made.size();
+    let pane = window::Window::open("Plugin", width, height)?;
+    made.attach(pane.inner(), kind)?;
+    pane.show();
+    *editor = Some((made, pane));
+    Ok(())
+}
+
+
+#[cfg(target_os = "macos")]
+fn au_names() -> Result<Vec<String>, String> {
+    loupe_plugins::au::Library::open(Path::new(""))
+        .map(|library| library.classes().into_iter().map(|class| class.name).collect())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn au_names() -> Result<Vec<String>, String> {
+    Err("Audio Units only run on a Mac".into())
+}
+
+#[cfg(target_os = "macos")]
+fn au_open(_path: &Path, index: usize, rate: f64, block: usize) -> Result<Open, String> {
+    loupe_plugins::au::Library::open(Path::new(""))
+        .and_then(|library| loupe_plugins::au::Effect::start(library, index, rate, block))
+        .map(Open::Au)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn au_open(_path: &Path, _index: usize, _rate: f64, _block: usize) -> Result<Open, String> {
+    Err("Audio Units only run on a Mac".into())
 }

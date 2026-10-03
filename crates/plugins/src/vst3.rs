@@ -178,6 +178,21 @@ impl Effect {
         }
     }
 
+    pub fn editor(&self) -> Result<crate::editor::Editor, String> {
+        use vst3::Steinberg::Vst::IEditController;
+        unsafe {
+            let mut cid = [0i8; 16];
+            if self.component.getControllerClassId(&mut cid) == kResultOk {
+                let id = cid.map(|c| c as u8);
+                if let Ok(controller) = self._library.make::<IEditController>(&id) {
+                    return crate::editor::Editor::from(controller);
+                }
+            }
+            let controller: ComPtr<IEditController> = self.component.cast().ok_or("this plugin has no window")?;
+            crate::editor::Editor::from(controller)
+        }
+    }
+
     pub fn save(&self) -> Result<Vec<u8>, String> {
         let wrapper = crate::stream::Bytes::empty();
         let stream = wrapper.as_com_ref::<vst3::Steinberg::IBStream>().ok_or("no stream")?;
