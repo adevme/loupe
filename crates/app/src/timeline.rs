@@ -4,6 +4,7 @@ use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, Theme};
 use loupe_engine::{Clip, ClipId, Edge, Fade, Frames, Project, Track, TrackId};
 
+use crate::pointer::Anchor;
 use crate::theme::{self, Palette};
 use crate::{icons, Message};
 
@@ -13,6 +14,9 @@ const RULER_H: f32 = 30.0;
 const LANES_TOP: f32 = SCROLLBAR_H + RULER_H;
 const MIN_THUMB_PX: f32 = 28.0;
 const SONG_SPAN_HEADROOM: f64 = 1.2;
+const SHORTEST_SPAN_SECONDS: f64 = 30.0;
+const POINTER_LEASH_PX: f32 = 40.0;
+const POINTER_HOME_SLACK_PX: f32 = 1.5;
 const ADD_ROW_H: f32 = 40.0;
 const CLIP_PAD: f32 = 5.0;
 const CLIP_TITLE_H: f32 = 19.0;
@@ -70,7 +74,17 @@ enum Drag {
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Resize { track: TrackId, top: f32 },
     Scroll { grab_x: f32, span: f64 },
-    Grip { clip: ClipId, grip: Grip, origin: Point, curve_at_grab: f32, db_at_grab: f32 },
+    Grip {
+        clip: ClipId,
+        grip: Grip,
+        origin: Point,
+        last: Point,
+        travel_up: f32,
+        awaiting_return: bool,
+        anchor: Option<Anchor>,
+        curve_at_grab: f32,
+        db_at_grab: f32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -211,8 +225,12 @@ impl Timeline<'_> {
 
     fn scrollbar_span(&self) -> f64 {
         let song = self.project.length() as f64 / self.rate();
-        let seen_until = self.view.scroll + self.lanes_width() as f64 / self.view.zoom;
-        (song * SONG_SPAN_HEADROOM).max(seen_until).max(1.0)
+        (song * SONG_SPAN_HEADROOM).max(SHORTEST_SPAN_SECONDS)
+    }
+
+    fn within_span(&self, scroll: f64, zoom: f64) -> f64 {
+        let seen = self.lanes_width() as f64 / zoom;
+        scroll.clamp(0.0, (self.scrollbar_span() - seen).max(0.0))
     }
 
     fn thumb(&self, span: f64) -> (f32, f32) {
@@ -225,7 +243,7 @@ impl Timeline<'_> {
 
     fn scrolled_to_thumb_left(&self, left: f32, span: f64) -> View {
         let scroll = ((left - HEADER_W) / self.lanes_width()) as f64 * span;
-        View { scroll: scroll.max(0.0), ..self.view }
+        View { scroll: self.within_span(scroll, self.view.zoom), ..self.view }
     }
 
     fn clip_box(&self, clip: &Clip) -> Option<ClipBox> {
@@ -339,13 +357,13 @@ impl Timeline<'_> {
         let anchor = (anchor_x - HEADER_W).max(0.0) as f64;
         let time = self.view.scroll + anchor / self.view.zoom;
         let zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, View::max_zoom(self.project.rate));
-        View { zoom, scroll: (time - anchor / zoom).max(0.0), ..self.view }
+        View { zoom, scroll: self.within_span(time - anchor / zoom, zoom), ..self.view }
     }
 
     fn scrolled(&self, dx: f32, dy: f32, bounds: Rectangle) -> View {
         let most = (self.content_height() - bounds.height).max(0.0);
         View {
-            scroll: (self.view.scroll + dx as f64 / self.view.zoom).max(0.0),
+            scroll: self.within_span(self.view.scroll + dx as f64 / self.view.zoom, self.view.zoom),
             scroll_y: (self.view.scroll_y + dy).clamp(0.0, most),
             ..self.view
         }
@@ -353,6 +371,10 @@ impl Timeline<'_> {
 }
 
 impl Grip {
+    fn moves_sideways(self) -> bool {
+        matches!(self, Grip::FadeIn | Grip::FadeOut)
+    }
+
     fn pointer(self) -> mouse::Interaction {
         match self {
             Grip::FadeIn | Grip::FadeOut => mouse::Interaction::ResizingHorizontally,
@@ -415,7 +437,18 @@ impl canvas::Program<Message> for Timeline<'_> {
                             _ => clip.fade_in.curve,
                         };
                         let db_at_grab = (20.0 * clip.gain.max(1e-6).log10()).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-                        state.drag = Some(Drag::Grip { clip: clip.id, grip, origin: p, curve_at_grab, db_at_grab });
+                        let anchor = if grip.moves_sideways() { None } else { Anchor::here() };
+                        state.drag = Some(Drag::Grip {
+                            clip: clip.id,
+                            grip,
+                            origin: p,
+                            last: p,
+                            travel_up: 0.0,
+                            awaiting_return: false,
+                            anchor,
+                            curve_at_grab,
+                            db_at_grab,
+                        });
                         None
                     }
                     Hit::Clip(clip) => {
@@ -460,12 +493,22 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let changed = start != clip.start || track != current.id;
                         (Captured, changed.then_some(Message::MoveClip { clip: *id, track, start }))
                     }
-                    Drag::Grip { clip, grip, origin, curve_at_grab, db_at_grab } => {
+                    Drag::Grip { clip, grip, origin, last, travel_up, awaiting_return, anchor, curve_at_grab, db_at_grab } => {
                         let Some(clip) = self.project.clip(*clip) else {
                             return (Captured, None);
                         };
+                        if *awaiting_return && p.distance(*origin) <= POINTER_HOME_SLACK_PX {
+                            *awaiting_return = false;
+                            *last = p;
+                            return (Captured, None);
+                        }
+                        *travel_up += last.y - p.y;
+                        *last = p;
+                        if p.distance(*origin) > POINTER_LEASH_PX && !*awaiting_return {
+                            *awaiting_return = anchor.as_ref().is_some_and(Anchor::bring_pointer_back);
+                        }
                         let at = self.snap(self.frames_at(p.x), free);
-                        let bent = (*curve_at_grab + (origin.y - p.y) * CURVE_PER_PX).clamp(-1.0, 1.0);
+                        let bent = (*curve_at_grab + *travel_up * CURVE_PER_PX).clamp(-1.0, 1.0);
                         let message = match grip {
                             Grip::FadeIn => {
                                 let len = at.saturating_sub(clip.start).min(clip.len - clip.fade_out.len);
@@ -486,7 +529,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                                 (fade != clip.fade_out).then_some(Message::SetFade { clip: clip.id, edge: Edge::Out, fade })
                             }
                             Grip::Gain => {
-                                let db = (*db_at_grab + (origin.y - p.y) * GAIN_DB_PER_PX).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
+                                let db = (*db_at_grab + *travel_up * GAIN_DB_PER_PX).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
                                 Some(Message::ClipGain(db))
                             }
                         };

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod icons;
+mod pointer;
 mod settings;
 mod theme;
 mod timeline;
