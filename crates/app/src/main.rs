@@ -53,6 +53,7 @@ const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
 const TOP_BAR_HEIGHT: f32 = 53.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const SETTINGS_PAGE_HEIGHT: f32 = 96.0;
 
 fn main() -> iced::Result {
     crash::keep_a_record();
@@ -185,6 +186,27 @@ pub enum Message {
     PickFolder,
     FolderPicked(Option<PathBuf>),
     FolderReset,
+    SettingsTab(SettingsTab),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Display,
+    File,
+    Recording,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 3] = [Self::Display, Self::File, Self::Recording];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Display => "Display",
+            Self::File => "File",
+            Self::Recording => "Recording",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -268,6 +290,7 @@ struct App {
     pending_scale: f64,
     scale_text: String,
     overlay: Overlay,
+    settings_tab: SettingsTab,
     entry: String,
     entry_problem: Option<String>,
     mixer_open: bool,
@@ -336,6 +359,7 @@ impl App {
             pending_scale: scale,
             scale_text: format_scale(scale),
             overlay: Overlay::None,
+            settings_tab: SettingsTab::default(),
             entry: String::new(),
             entry_problem: None,
             mixer_open: settings.mixer_open,
@@ -910,6 +934,7 @@ impl App {
                 }
             }
             Message::FolderReset => self.use_folder(None),
+            Message::SettingsTab(tab) => self.settings_tab = tab,
         }
         Task::none()
     }
@@ -1372,7 +1397,21 @@ impl App {
         ]
         .spacing(8);
 
-        let body = column![scale, rule(palette), folder, rule(palette), recording].spacing(16);
+        let current = self.settings_tab;
+        let tabs = row(SettingsTab::ALL.map(|tab| {
+            button(text(tab.label()).size(13).font(palette.medium))
+                .padding([6, 12])
+                .style(move |_, status| palette.toggled(tab == current, status))
+                .on_press(Message::SettingsTab(tab))
+                .into()
+        }))
+        .spacing(4);
+        let page = match current {
+            SettingsTab::Display => scale,
+            SettingsTab::File => folder,
+            SettingsTab::Recording => recording,
+        };
+        let body = column![tabs, rule(palette), container(page).height(SETTINGS_PAGE_HEIGHT)].spacing(14);
         self.window("Settings".to_string(), body.into(), 560.0)
     }
 
