@@ -1,6 +1,6 @@
 <p align="center"><img src="crates/app/assets/text-logo.png" alt="Loupe" width="300"></p>
 
-A digital audio workstation.
+<p align="center">A digital audio workstation.</p>
 
 ## What it runs on
 
