@@ -97,6 +97,14 @@ impl App {
                 label("Gain"),
                 self.level_readout(Level::Clip(id), clip.gain),
                 text("dB").size(11.5).color(palette.text_faint),
+                {
+                    let target = loupe_engine::Target::ClipGain(id);
+                    let on = self.project.envelope(target).is_some();
+                    button(text(if on { "Stop automating" } else { "Automate" }).size(11.5))
+                        .padding([3, 8])
+                        .style(move |_, status| palette.toggled(on, status))
+                        .on_press(if on { Message::RemoveEnvelope(target) } else { Message::AddEnvelope(target) })
+                },
             ]
             .spacing(6)
             .align_y(Alignment::Center),

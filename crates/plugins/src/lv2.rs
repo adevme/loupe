@@ -331,6 +331,12 @@ impl Effect {
         0
     }
 
+    pub fn turn(&mut self, knob: usize, value: f32) {
+        if let Some(slot) = self.controls.get_mut(knob) {
+            *slot = value;
+        }
+    }
+
     pub fn save(&self) -> Result<Vec<u8>, String> {
         let mut out = Vec::with_capacity(self.controls.len() * 4);
         for value in &self.controls {

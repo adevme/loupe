@@ -138,6 +138,8 @@ pub struct Effect {
     side_left: Vec<f32>,
     side_right: Vec<f32>,
     pub side_bus: bool,
+    turns: vst3::ComWrapper<crate::changes::Turns>,
+    ids: Vec<u32>,
     _library: Library,
 }
 
@@ -179,6 +181,8 @@ impl Effect {
                 side_left: vec![0.0; block],
                 side_right: vec![0.0; block],
                 side_bus: ins > 1,
+                turns: crate::changes::Turns::empty(),
+                ids: Vec::new(),
                 _library: library,
             })
         }
@@ -201,6 +205,45 @@ impl Effect {
 
     pub fn latency(&self) -> usize {
         unsafe { self.processor.getLatencySamples() as usize }
+    }
+
+    pub fn knobs(&mut self) -> Vec<String> {
+        use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait};
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        unsafe {
+            let mut cid = [0i8; 16];
+            let controller: Option<ComPtr<IEditController>> = if self.component.getControllerClassId(&mut cid) == kResultOk {
+                let id = cid.map(|c| c as u8);
+                self._library.make::<IEditController>(&id).ok()
+            } else {
+                None
+            };
+            let Some(controller) = controller.or_else(|| self.component.cast()) else { return out };
+            if controller.initialize(std::ptr::null_mut()) != kResultOk {
+                return out;
+            }
+            let count = controller.getParameterCount();
+            for index in 0..count.min(512) {
+                let mut about: vst3::Steinberg::Vst::ParameterInfo = std::mem::zeroed();
+                if controller.getParameterInfo(index, &mut about) != kResultOk {
+                    continue;
+                }
+                let raw: Vec<u16> = about.title.iter().take_while(|unit| **unit != 0).copied().collect();
+                out.push(String::from_utf16_lossy(&raw));
+                seen.push(about.id);
+            }
+        }
+        self.ids = seen;
+        out
+    }
+
+    pub fn turn(&mut self, knob: usize, value: f32) {
+        if self.ids.is_empty() {
+            let _ = self.knobs();
+        }
+        let Some(id) = self.ids.get(knob).copied() else { return };
+        self.turns.set(id, value.clamp(0.0, 1.0) as f64);
     }
 
     pub fn save(&self) -> Result<Vec<u8>, String> {
@@ -268,7 +311,7 @@ impl Effect {
                 numOutputs: 1,
                 inputs: both.as_mut_ptr(),
                 outputs: &mut bus,
-                inputParameterChanges: std::ptr::null_mut(),
+                inputParameterChanges: crate::changes::as_pointer(&self.turns),
                 outputParameterChanges: std::ptr::null_mut(),
                 inputEvents: std::ptr::null_mut(),
                 outputEvents: std::ptr::null_mut(),
@@ -280,6 +323,7 @@ impl Effect {
             frame[0] = self.left[i];
             frame[1] = self.right[i];
         }
+        self.turns.clear();
     }
 }
 

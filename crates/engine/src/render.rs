@@ -54,6 +54,14 @@ pub trait Chains: Send {
         let _ = (clip, slot, knob, value);
     }
 
+    fn automate(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
+        let _ = (track, slot, knob, value);
+    }
+
+    fn automate_clip(&mut self, clip: ClipId, slot: usize, knob: usize, value: f32) {
+        let _ = (clip, slot, knob, value);
+    }
+
     fn show_clip(&mut self, clip: ClipId, slot: usize) -> Result<(), String> {
         let _ = (clip, slot);
         Err("plugin windows are not wired up".into())
@@ -394,6 +402,45 @@ mod tests {
         assert!(quiet < 0.05, "it started at {quiet}");
         assert!((middling - 0.5).abs() < 0.1, "halfway it read {middling}");
         assert!((loud - 1.0).abs() < 0.01, "at the end it read {loud}");
+    }
+
+    struct Knobs {
+        seen: Vec<(usize, f32)>,
+    }
+
+    impl Chains for Knobs {
+        fn process(&mut self, _track: TrackId, _audio: &mut [[f32; 2]]) {}
+
+        fn automate(&mut self, _track: TrackId, _slot: usize, knob: usize, value: f32) {
+            self.seen.push((knob, value));
+        }
+    }
+
+    #[test]
+    fn a_plugin_knob_envelope_reaches_the_plugin() {
+        use crate::envelope::{Point, Shape, Target};
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        let fx = crate::model::Fx {
+            path: std::path::PathBuf::from("x.vst3"),
+            index: 0,
+            name: "x".into(),
+            bypassed: false,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddFx { track: one, fx }).unwrap();
+        let target = Target::TrackFx { track: one, slot: 0, knob: 2 };
+        p.apply(Command::AddEnvelope { target }).unwrap();
+        p.apply(Command::ClearPoints { target, from: 0, to: Frames::MAX }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 0, value: 0.0, shape: Shape::Linear } }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 1000, value: 1.0, shape: Shape::Linear } }).unwrap();
+        let mut racks = Knobs { seen: Vec::new() };
+        let mut out = vec![[0.0; 2]; 16];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 500, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(racks.seen.len(), 1, "the knob was not turned");
+        assert_eq!(racks.seen[0].0, 2, "the wrong knob moved");
+        assert!((racks.seen[0].1 - 0.5).abs() < 1e-6, "it was turned to {}", racks.seen[0].1);
     }
 
     #[test]
@@ -958,8 +1005,8 @@ fn turn_knobs(project: &Project, at: Frames, racks: &mut (dyn Chains + '_)) {
     for shape in &project.envelopes {
         let Some(value) = shape.value_at(at) else { continue };
         match shape.target {
-            crate::envelope::Target::TrackFx { track, slot, knob } => racks.tweak(track, slot, knob, value),
-            crate::envelope::Target::ClipFx { clip, slot, knob } => racks.tweak_clip(clip, slot, knob, value),
+            crate::envelope::Target::TrackFx { track, slot, knob } => racks.automate(track, slot, knob, value),
+            crate::envelope::Target::ClipFx { clip, slot, knob } => racks.automate_clip(clip, slot, knob, value),
             _ => {}
         }
     }

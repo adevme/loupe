@@ -2,6 +2,7 @@ mod scan;
 pub mod vst3;
 pub mod sandbox;
 pub mod au;
+pub mod changes;
 pub mod clap;
 pub mod editor;
 pub mod lv2;

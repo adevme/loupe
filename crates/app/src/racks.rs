@@ -11,6 +11,7 @@ use loupe_stock::{History, Scopes};
 pub struct Peek {
     pub scopes: Option<Arc<Scopes>>,
     pub history: Option<Arc<History>>,
+    pub knobs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -91,23 +92,31 @@ impl Racks {
         troubles
     }
 
-    fn publish(&self) {
+    fn publish(&mut self) {
+        let mut found: Vec<(Spot, Peek)> = Vec::new();
+        for (id, rack) in self.chains.iter_mut() {
+            for slot in 0..rack.len() {
+                let knobs = rack.knobs(slot);
+                let (scopes, history) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history()),
+                    None => (None, None),
+                };
+                found.push((Spot::Track(*id, slot), Peek { scopes, history, knobs }));
+            }
+        }
+        for (id, rack) in self.clips.iter_mut() {
+            for slot in 0..rack.len() {
+                let knobs = rack.knobs(slot);
+                let (scopes, history) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history()),
+                    None => (None, None),
+                };
+                found.push((Spot::Clip(*id, slot), Peek { scopes, history, knobs }));
+            }
+        }
         let Ok(mut held) = self.peeks.lock() else { return };
         held.clear();
-        for (id, rack) in &self.chains {
-            for slot in 0..rack.len() {
-                if let Some(made) = rack.built_at(slot) {
-                    held.insert(Spot::Track(*id, slot), Peek { scopes: made.scopes(), history: made.history() });
-                }
-            }
-        }
-        for (id, rack) in &self.clips {
-            for slot in 0..rack.len() {
-                if let Some(made) = rack.built_at(slot) {
-                    held.insert(Spot::Clip(*id, slot), Peek { scopes: made.scopes(), history: made.history() });
-                }
-            }
-        }
+        held.extend(found);
     }
 
     fn problems(&self) -> Vec<(TrackId, String, String)> {
@@ -175,6 +184,18 @@ impl Chains for Racks {
         match self.clips.get_mut(&clip) {
             Some(rack) => rack.show(slot),
             None => Err("that clip has no plugins".into()),
+        }
+    }
+
+    fn automate(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
+        if let Some(rack) = self.chains.get_mut(&track) {
+            rack.automate(slot, knob, value);
+        }
+    }
+
+    fn automate_clip(&mut self, clip: ClipId, slot: usize, knob: usize, value: f32) {
+        if let Some(rack) = self.clips.get_mut(&clip) {
+            rack.automate(slot, knob, value);
         }
     }
 

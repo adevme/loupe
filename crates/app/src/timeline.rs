@@ -98,6 +98,7 @@ pub struct Timeline<'a> {
     pub input_level: f32,
     pub opening: bool,
     pub width: f32,
+    pub knobs: &'a HashMap<(u64, usize, usize, bool), String>,
     pub cache: &'a Cache,
 }
 
@@ -1298,7 +1299,7 @@ impl Timeline<'_> {
                     .and_then(|t| t.fx.get(slot))
                     .map(|fx| fx.name.clone())
                     .unwrap_or_default();
-                format!("{name} knob {knob}")
+                format!("{name}: {}", self.knob_name(track.0, slot, knob, false))
             }
             Target::ClipGain(_) => "Clip gain".into(),
             Target::ClipFx { clip, slot, knob } => {
@@ -1308,8 +1309,15 @@ impl Timeline<'_> {
                     .and_then(|found| found.fx.get(slot))
                     .map(|fx| fx.name.clone())
                     .unwrap_or_default();
-                format!("Clip {name} knob {knob}")
+                format!("Clip {name}: {}", self.knob_name(clip.0, slot, knob, true))
             }
+        }
+    }
+
+    fn knob_name(&self, owner: u64, slot: usize, knob: usize, on_clip: bool) -> String {
+        match self.knobs.get(&(owner, slot, knob, on_clip)) {
+            Some(found) => found.clone(),
+            None => format!("knob {knob}"),
         }
     }
 

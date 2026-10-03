@@ -57,6 +57,14 @@ impl App {
                         .size(14)
                         .text_size(12)
                         .on_toggle(move |sidechain| Message::SendSidechain { from, to, sidechain }),
+                    {
+                        let target = loupe_engine::Target::SendGain { from, to };
+                        let on = self.project.envelope(target).is_some();
+                        button(text(if on { "Stop automating" } else { "Automate" }).size(12))
+                            .padding([3, 8])
+                            .style(move |_, status| palette.toggled(on, status))
+                            .on_press(if on { Message::RemoveEnvelope(target) } else { Message::AddEnvelope(target) })
+                    },
                     button(text("Remove").size(12))
                         .padding([3, 8])
                         .style(move |_, status| palette.outlined(status))

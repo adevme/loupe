@@ -111,8 +111,41 @@ impl Rack {
     }
 
     pub fn tweak(&mut self, slot: usize, knob: usize, value: f32) {
-        if let Some(made) = self.slots.get_mut(slot).and_then(|found| found.built.as_mut()) {
+        let Some(found) = self.slots.get_mut(slot) else { return };
+        if let Some(made) = found.built.as_mut() {
             made.set(knob, value);
+            return;
+        }
+        let Some(host) = found.host.as_mut() else { return };
+        if let Err(why) = host.ask(Ask::Turn { knob, value }) {
+            found.trouble = Some(why);
+            found.host = None;
+        }
+    }
+
+    pub fn automate(&mut self, slot: usize, knob: usize, value: f32) {
+        let Some(found) = self.slots.get_mut(slot) else { return };
+        if let Some(made) = found.built.as_mut() {
+            let Some(param) = made.params().get(knob).copied() else { return };
+            made.set(knob, param.from_position(value));
+            return;
+        }
+        let Some(host) = found.host.as_mut() else { return };
+        if let Err(why) = host.ask(Ask::Turn { knob, value }) {
+            found.trouble = Some(why);
+            found.host = None;
+        }
+    }
+
+    pub fn knobs(&mut self, slot: usize) -> Vec<String> {
+        let Some(found) = self.slots.get_mut(slot) else { return Vec::new() };
+        if let Some(made) = found.built.as_ref() {
+            return made.params().iter().map(|param| param.name.to_string()).collect();
+        }
+        let Some(host) = found.host.as_mut() else { return Vec::new() };
+        match host.ask(Ask::Knobs) {
+            Ok(Reply::Knobs(names)) => names,
+            _ => Vec::new(),
         }
     }
 

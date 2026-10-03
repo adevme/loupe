@@ -43,6 +43,10 @@ impl App {
                         .padding([1, 3])
                         .style(move |_, status| palette.toggled(!on, status))
                         .on_press(Message::BypassPlugin(track, slot)),
+                    button(text("a").size(10.5))
+                        .padding([1, 3])
+                        .style(move |_, status| palette.ghost(status))
+                        .on_press(Message::OpenKnobs(crate::stockwin::Spot::Track(track), slot)),
                     button(text("x").size(10.5))
                         .padding([1, 4])
                         .style(move |_, status| palette.ghost(status))
@@ -187,6 +191,10 @@ impl App {
                         .padding([2, 8])
                         .style(move |_, status| palette.toggled(on, status))
                         .on_press(Message::BypassClipPlugin(clip, slot)),
+                    button(text("Automate").size(11.5))
+                        .padding([2, 8])
+                        .style(move |_, status| palette.outlined(status))
+                        .on_press(Message::OpenKnobs(crate::stockwin::Spot::Clip(clip), slot)),
                     button(text("Remove").size(11.5))
                         .padding([2, 8])
                         .style(move |_, status| palette.outlined(status))
@@ -214,5 +222,69 @@ impl App {
         };
         let name = found.source.name.clone();
         self.picker(format!("Plugins for {name}"), &move |which| Message::AddClipPlugin(clip, which))
+    }
+}
+
+impl App {
+    pub(crate) fn knob_sheet(&self, spot: crate::stockwin::Spot, slot: usize) -> Element<'_, Message> {
+        let palette = self.palette;
+        let (name, where_) = match spot {
+            crate::stockwin::Spot::Track(track) => (
+                self.project
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == track)
+                    .and_then(|t| t.fx.get(slot))
+                    .map(|fx| fx.name.clone())
+                    .unwrap_or_default(),
+                crate::racks::Spot::Track(track, slot),
+            ),
+            crate::stockwin::Spot::Clip(clip) => (
+                self.project
+                    .clip(clip)
+                    .and_then(|found| found.fx.get(slot))
+                    .map(|fx| fx.name.clone())
+                    .unwrap_or_default(),
+                crate::racks::Spot::Clip(clip, slot),
+            ),
+        };
+        let knobs = self.peek_at(where_).knobs;
+        let heading = text(format!("Automate on {name}")).size(14).font(palette.semibold);
+        let needle = self.plugin_filter.trim().to_lowercase();
+        let mut list = column![].spacing(4);
+        let mut shown = 0;
+        for (knob, label) in knobs.iter().enumerate() {
+            if !needle.is_empty() && !label.to_lowercase().contains(&needle) {
+                continue;
+            }
+            shown += 1;
+            let target = match spot {
+                crate::stockwin::Spot::Track(track) => loupe_engine::Target::TrackFx { track, slot, knob },
+                crate::stockwin::Spot::Clip(clip) => loupe_engine::Target::ClipFx { clip, slot, knob },
+            };
+            let on = self.project.envelope(target).is_some();
+            list = list.push(
+                button(text(label.clone()).size(12.5))
+                    .padding([5, 10])
+                    .width(Length::Fill)
+                    .style(move |_, status| palette.toggled(on, status))
+                    .on_press(if on { Message::RemoveEnvelope(target) } else { Message::AddEnvelope(target) }),
+            );
+        }
+        let body: Element<'_, Message> = if knobs.is_empty() {
+            text("This plugin does not tell Loupe what its knobs are called.").size(12.5).color(palette.text_dim).into()
+        } else if shown == 0 {
+            text("Nothing matches that.").size(12.5).color(palette.text_dim).into()
+        } else {
+            scrollable(list).height(Length::Fixed(300.0)).into()
+        };
+        let search = text_input("Search", &self.plugin_filter)
+            .id(FILTER_ID)
+            .on_input(Message::PluginFilter)
+            .size(13)
+            .padding([5, 10]);
+        container(column![heading, search, body].spacing(10).align_x(Alignment::Start))
+            .width(Length::Fixed(440.0))
+            .into()
     }
 }

@@ -33,6 +33,7 @@ impl App {
             Overlay::Routing(track) => self.centred(self.routing_sheet(*track)),
             Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
             Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
+            Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
         }

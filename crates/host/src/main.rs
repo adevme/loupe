@@ -63,6 +63,26 @@ impl Open {
         }
     }
 
+    fn knobs(&mut self) -> Vec<String> {
+        match self {
+            Open::Vst3(effect) => effect.knobs(),
+            Open::Clap(effect) => effect.knobs(),
+            Open::Lv2(_) => Vec::new(),
+            #[cfg(target_os = "macos")]
+            Open::Au(_) => Vec::new(),
+        }
+    }
+
+    fn turn(&mut self, knob: usize, value: f32) {
+        match self {
+            Open::Clap(effect) => effect.turn(knob, value),
+            Open::Vst3(effect) => effect.turn(knob, value),
+            Open::Lv2(effect) => effect.turn(knob, value),
+            #[cfg(target_os = "macos")]
+            Open::Au(_) => {}
+        }
+    }
+
     fn latency(&self) -> usize {
         match self {
             Open::Vst3(effect) => effect.latency(),
@@ -227,6 +247,16 @@ fn main() {
                     }
                     Err(why) => Reply::Trouble(why),
                 }
+            }
+            Ask::Knobs => match open.as_mut() {
+                Some(effect) => Reply::Knobs(effect.knobs()),
+                None => Reply::Trouble("no plugin is open".into()),
+            },
+            Ask::Turn { knob, value } => {
+                if let Some(effect) = open.as_mut() {
+                    effect.turn(knob, value);
+                }
+                Reply::Fine
             }
             Ask::Save => match open.as_ref() {
                 Some(effect) => match effect.save() {

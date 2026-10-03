@@ -118,12 +118,17 @@ unsafe extern "C" fn no_extension(_host: *const clap_host, _id: *const c_char) -
 
 unsafe extern "C" fn nothing_to_do(_host: *const clap_host) {}
 
-unsafe extern "C" fn no_events(_list: *const clap_input_events) -> u32 {
-    0
+unsafe extern "C" fn how_many(list: *const clap_input_events) -> u32 {
+    let held = &*((*list).ctx as *const Vec<clap_sys::events::clap_event_param_value>);
+    held.len() as u32
 }
 
-unsafe extern "C" fn no_event(_list: *const clap_input_events, _index: u32) -> *const clap_event_header {
-    std::ptr::null()
+unsafe extern "C" fn one_event(list: *const clap_input_events, index: u32) -> *const clap_event_header {
+    let held = &*((*list).ctx as *const Vec<clap_sys::events::clap_event_param_value>);
+    match held.get(index as usize) {
+        Some(found) => &found.header as *const clap_event_header,
+        None => std::ptr::null(),
+    }
 }
 
 unsafe extern "C" fn drop_event(_list: *const clap_output_events, _event: *const clap_event_header) -> bool {
@@ -137,6 +142,9 @@ pub struct Effect {
     right: Vec<f32>,
     side_left: Vec<f32>,
     side_right: Vec<f32>,
+    ids: Vec<u32>,
+    ranges: Vec<(f64, f64)>,
+    waiting: Vec<clap_sys::events::clap_event_param_value>,
     _library: Library,
 }
 
@@ -184,6 +192,9 @@ impl Effect {
                 right: vec![0.0; block],
                 side_left: vec![0.0; block],
                 side_right: vec![0.0; block],
+                ids: Vec::new(),
+                ranges: Vec::new(),
+                waiting: Vec::new(),
                 _library: library,
             })
         }
@@ -222,7 +233,11 @@ impl Effect {
                 constant_mask: 0,
             };
             let ins = [bus, side_bus];
-            let coming = clap_input_events { ctx: std::ptr::null_mut(), size: Some(no_events), get: Some(no_event) };
+            let coming = clap_input_events {
+                ctx: &self.waiting as *const Vec<clap_sys::events::clap_event_param_value> as *mut c_void,
+                size: Some(how_many),
+                get: Some(one_event),
+            };
             let going = clap_output_events { ctx: std::ptr::null_mut(), try_push: Some(drop_event) };
             let data = clap_process {
                 steady_time: -1,
@@ -245,6 +260,62 @@ impl Effect {
             frame[0] = self.left[i];
             frame[1] = self.right[i];
         }
+    }
+
+    pub fn knobs(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        let mut spans = Vec::new();
+        unsafe {
+            let Some(get) = (*self.plugin).get_extension else { return out };
+            let found = get(self.plugin, clap_sys::ext::params::CLAP_EXT_PARAMS.as_ptr());
+            if found.is_null() {
+                return out;
+            }
+            let part = found as *const clap_sys::ext::params::clap_plugin_params;
+            let count = (*part).count.map(|count| count(self.plugin)).unwrap_or(0);
+            let Some(about) = (*part).get_info else { return out };
+            for index in 0..count.min(512) {
+                let mut info: clap_sys::ext::params::clap_param_info = std::mem::zeroed();
+                if !about(self.plugin, index, &mut info) {
+                    continue;
+                }
+                let raw: Vec<u8> = info.name.iter().take_while(|byte| **byte != 0).map(|byte| *byte as u8).collect();
+                out.push(String::from_utf8_lossy(&raw).into_owned());
+                seen.push(info.id);
+                spans.push((info.min_value, info.max_value));
+            }
+        }
+        self.ids = seen;
+        self.ranges = spans;
+        out
+    }
+
+    pub fn turn(&mut self, knob: usize, value: f32) {
+        if self.ids.is_empty() {
+            let _ = self.knobs();
+        }
+        let Some(id) = self.ids.get(knob).copied() else { return };
+        let (low, high) = self.ranges.get(knob).copied().unwrap_or((0.0, 1.0));
+        let value = low + (high - low) * value.clamp(0.0, 1.0) as f64;
+        let event = clap_sys::events::clap_event_param_value {
+            header: clap_sys::events::clap_event_header {
+                size: std::mem::size_of::<clap_sys::events::clap_event_param_value>() as u32,
+                time: 0,
+                space_id: clap_sys::events::CLAP_CORE_EVENT_SPACE_ID,
+                type_: clap_sys::events::CLAP_EVENT_PARAM_VALUE,
+                flags: 0,
+            },
+            param_id: id,
+            cookie: std::ptr::null_mut(),
+            note_id: -1,
+            port_index: -1,
+            channel: -1,
+            key: -1,
+            value,
+        };
+        self.waiting.retain(|kept| kept.param_id != id);
+        self.waiting.push(event);
     }
 
     pub fn latency(&self) -> usize {

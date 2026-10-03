@@ -168,6 +168,7 @@ pub enum Message {
     OpenClipPlugins(ClipId),
     ShowClipPlugin(ClipId, usize),
     MoveClipPlugin(ClipId, usize, usize),
+    OpenKnobs(stockwin::Spot, usize),
     AddClipPlugin(ClipId, usize),
     RemoveClipPlugin(ClipId, usize),
     BypassClipPlugin(ClipId, usize),
@@ -291,6 +292,7 @@ pub enum Overlay {
     Routing(TrackId),
     Plugins(TrackId),
     ClipPlugins(ClipId),
+    Knobs(stockwin::Spot, usize),
     Stock,
     Matrix,
 }
@@ -335,6 +337,7 @@ struct App {
     stock: Option<stockwin::Window>,
     fx_drag: Option<(TrackId, usize, usize)>,
     writing: Option<loupe_engine::Writer>,
+    knob_names: HashMap<(u64, usize, usize, bool), String>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
     plugin_filter: String,
@@ -461,6 +464,7 @@ impl App {
             stock: None,
             fx_drag: None,
             writing: None,
+            knob_names: HashMap::new(),
             found: Vec::new(),
             scanning: true,
             plugin_filter: String::new(),
@@ -1031,6 +1035,11 @@ impl App {
                 }
             }
             Message::ShowClipPlugin(clip, slot) => self.open_clip_plugin_window(clip, slot),
+            Message::OpenKnobs(spot, slot) => {
+                self.plugin_filter.clear();
+                self.overlay = Overlay::Knobs(spot, slot);
+                return text_input::focus(plugins::FILTER_ID);
+            }
             Message::RemoveClipPlugin(clip, slot) => {
                 self.edit(None, Command::RemoveClipFx { clip, slot });
             }
@@ -1574,6 +1583,18 @@ impl App {
             None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone())) as Box<dyn Chains>,
         };
         let troubles = racks.follow(&self.project);
+        self.knob_names.clear();
+        if let Ok(held) = self.peeks.lock() {
+            for (spot, peek) in held.iter() {
+                let (owner, slot, on_clip) = match spot {
+                    racks::Spot::Track(track, slot) => (track.0, *slot, false),
+                    racks::Spot::Clip(clip, slot) => (clip.0, *slot, true),
+                };
+                for (knob, name) in peek.knobs.iter().enumerate() {
+                    self.knob_names.insert((owner, slot, knob, on_clip), name.clone());
+                }
+            }
+        }
         if let Some(first) = troubles.first() {
             self.problem = Some(first.clone());
         }
@@ -1751,6 +1772,7 @@ impl App {
             return stack![self.home(), self.overlay(), self.opening_layer()].into();
         }
         let timeline = canvas(Timeline {
+            knobs: &self.knob_names,
             project: &self.project,
             palette: &self.palette,
             view: self.view,
