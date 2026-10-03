@@ -234,7 +234,18 @@ impl App {
         let (project, heights) = opened.saved.build(&opened.sources, self.project.rate);
         self.replace_project(project, heights.into_iter().collect());
         self.screen = Screen::Song;
-        if !as_template {
+        let newer = opened.saved.saved_by.as_deref().filter(|by| crate::versions::newer_than_this(by));
+        let protect = newer.is_some() || !opened.saved.skipped.is_empty();
+        if protect && !as_template {
+            self.path = None;
+            self.dirty = true;
+            let by = newer.map_or("a newer Loupe".to_string(), |by| format!("Loupe {by}"));
+            self.notice = Some(format!(
+                "This song was saved by {by}, newer than this Loupe ({}). It opened as a copy so your file stays as it was.",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+        if !as_template && !protect {
             settings::remember(&path);
             self.path = Some(path);
         }

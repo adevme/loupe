@@ -25,6 +25,8 @@ mod spinner;
 mod theme;
 mod theming;
 mod timeline;
+mod usage;
+mod versions;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -96,6 +98,7 @@ fn main() -> iced::Result {
     }
     let ran = loupe.run_with(move || App::new(loaded, settings));
     backup::mark_closed();
+    usage::finish();
     ran
 }
 
@@ -214,6 +217,15 @@ pub enum Message {
     RollView(piano_roll::RollView),
     TypedKey { key: u8, down: bool },
     Both(Box<Message>, Box<Message>),
+    OpenVersions,
+    UseVersion(String),
+    CheckForUpdates,
+    UpdateChecked(Result<Option<versions::Update>, String>),
+    InstallUpdate,
+    UpdateDownloaded(Result<PathBuf, String>),
+    UpdateLater,
+    UsageToggled(bool),
+    CheckUpdatesOnStart(bool),
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
     TogglePreview(ClipId),
@@ -270,16 +282,18 @@ pub enum SettingsTab {
     Display,
     File,
     Recording,
+    Privacy,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 3] = [Self::Display, Self::File, Self::Recording];
+    const ALL: [Self; 4] = [Self::Display, Self::File, Self::Recording, Self::Privacy];
 
     fn label(self) -> &'static str {
         match self {
             Self::Display => "Display",
             Self::File => "File",
             Self::Recording => "Recording",
+            Self::Privacy => "Privacy",
         }
     }
 }
@@ -321,6 +335,7 @@ pub enum Overlay {
     Matrix,
     Recover,
     Roll(ClipId),
+    Versions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -425,6 +440,11 @@ struct App {
     typing: HashSet<u8>,
     midi_keys: Option<loupe_engine::MidiKeys>,
     keys_aimed_at: Option<TrackId>,
+    update_state: versions::UpdateState,
+    quiet_check: bool,
+    check_updates: bool,
+    update_dismissed: bool,
+    usage: usage::Usage,
 }
 
 impl App {
@@ -436,6 +456,7 @@ impl App {
         engine.set_project(&project);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
+        let (usage_now, first_usage) = usage::Usage::begin(&settings);
         let mut app = Self {
             palette: loaded.palette,
             heights: HashMap::new(),
@@ -516,6 +537,11 @@ impl App {
             typing: HashSet::new(),
             midi_keys: None,
             keys_aimed_at: None,
+            update_state: versions::UpdateState::default(),
+            quiet_check: false,
+            check_updates: settings.check_updates,
+            update_dismissed: false,
+            usage: usage_now,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -547,8 +573,17 @@ impl App {
         }
         app.keep_safe();
         app.listen_to_keyboards();
+        if first_usage {
+            app.notice = Some(usage::NOTICE.to_string());
+        }
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
-        (app, Task::batch([task, hunt]))
+        let look = if app.check_updates {
+            app.quiet_check = true;
+            app.check_for_updates()
+        } else {
+            Task::none()
+        };
+        (app, Task::batch([task, hunt, look]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1421,6 +1456,32 @@ impl App {
             }
             Message::Recover => return self.recover(),
             Message::SkipRecovery => self.skip_recovery(),
+            Message::OpenVersions => self.overlay = Overlay::Versions,
+            Message::UseVersion(version) => return self.switch_version(version),
+            Message::CheckForUpdates => return self.check_for_updates(),
+            Message::UpdateChecked(result) => {
+                let quiet = std::mem::replace(&mut self.quiet_check, false);
+                self.update_state = match result {
+                    Err(_) if quiet => versions::UpdateState::Idle,
+                    Ok(None) if quiet => versions::UpdateState::Idle,
+                    Ok(Some(update)) => versions::UpdateState::Found(update),
+                    Ok(None) => versions::UpdateState::Current,
+                    Err(why) => versions::UpdateState::Failed(format!("Could not check for updates: {why}.")),
+                };
+            }
+            Message::InstallUpdate => return self.install_update(),
+            Message::UpdateLater => self.update_dismissed = true,
+            Message::UsageToggled(on) => self.set_usage(on),
+            Message::CheckUpdatesOnStart(on) => {
+                self.check_updates = on;
+                if let Err(why) = settings::save("check_updates", if on { "on" } else { "off" }) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
+            Message::UpdateDownloaded(result) => match result {
+                Ok(setup) => return self.run_setup(setup),
+                Err(why) => self.update_state = versions::UpdateState::Failed(format!("Could not download the update: {why}.")),
+            },
             Message::SettingsTab(tab) => self.settings_tab = tab,
             Message::ThemeChosen(name) => return self.use_theme(name),
             Message::ThemeFontLoaded => self.cache.clear(),
@@ -2203,6 +2264,7 @@ impl App {
             SettingsTab::Display => column![self.theme_picker(), rule(palette), scale].spacing(16),
             SettingsTab::File => column![folder, rule(palette), self.autosave_settings()].spacing(16),
             SettingsTab::Recording => recording,
+            SettingsTab::Privacy => column![self.privacy_settings()],
         };
         let body = column![tabs, rule(palette), container(page).height(SETTINGS_PAGE_HEIGHT)].spacing(14);
         self.window("Settings".to_string(), body.into(), 560.0)
@@ -2224,6 +2286,16 @@ impl App {
             .into()
         } else if let Some(notice) = &self.notice {
             text(notice.as_str()).size(12).color(palette.text).into()
+        } else if let (versions::UpdateState::Found(update), false) = (&self.update_state, self.update_dismissed) {
+            row![
+                text(format!("Loupe {} is available.", update.version)).size(12).color(palette.text),
+                button(text("Update").size(12).font(palette.medium)).padding([3, 12]).style(move |_, status| palette.solid(status)).on_press(Message::InstallUpdate),
+                button(text("What's new").size(12)).padding([3, 10]).style(move |_, status| palette.ghost(status)).on_press(Message::OpenVersions),
+                button(text("Later").size(12)).padding([3, 10]).style(move |_, status| palette.ghost(status)).on_press(Message::UpdateLater),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
         } else if self.loading > 0 {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
             text(format!("Loading {what}…")).size(12).color(palette.text_dim).into()

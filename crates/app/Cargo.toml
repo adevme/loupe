@@ -1,6 +1,6 @@
 [package]
 name = "loupe"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 
 [dependencies]
@@ -11,6 +11,8 @@ loupe-stock = { path = "../stock" }
 loupe-stock-ui = { path = "../stock-ui" }
 iced = { version = "0.13", features = ["tokio", "canvas", "advanced", "image"] }
 rfd = "0.14"
+ureq = "2"
+sha2 = "0.10"
 iced_runtime = "0.13"
 
 [build-dependencies]

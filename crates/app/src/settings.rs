@@ -19,6 +19,10 @@ pub struct Settings {
     pub input: Option<String>,
     pub autosave_minutes: u32,
     pub backups_kept: u32,
+    pub check_updates: bool,
+    pub usage: Option<bool>,
+    pub install_id: Option<String>,
+    pub last_version: Option<String>,
 }
 
 impl Settings {
@@ -34,6 +38,10 @@ impl Settings {
             input: value_of("input").map(str::to_string),
             autosave_minutes: value_of("autosave_minutes").and_then(|text| autosave_minutes_from(text).ok()).unwrap_or(DEFAULT_AUTOSAVE_MINUTES),
             backups_kept: value_of("backups_kept").and_then(|text| backups_kept_from(text).ok()).unwrap_or(DEFAULT_BACKUPS_KEPT),
+            check_updates: value_of("check_updates") != Some("off"),
+            usage: value_of("usage").map(|value| value != "off"),
+            install_id: value_of("install_id").map(str::to_string),
+            last_version: value_of("last_version").map(str::to_string),
         }
     }
 }

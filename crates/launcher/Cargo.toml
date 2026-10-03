@@ -1,7 +1,9 @@
 [package]
-name = "loupe-host"
+name = "loupe-launcher"
 version.workspace = true
 edition = "2021"
 
 [dependencies]
-loupe-plugins = { path = "../plugins" }
+
+[build-dependencies]
+winresource = "0.1"
