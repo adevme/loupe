@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
@@ -23,6 +23,11 @@ const MIN_GRID_PX: f64 = 14.0;
 const DRAG_THRESHOLD: f32 = 4.0;
 const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
+const ARM_BUTTON: f32 = 22.0;
+const ARM_GAP: f32 = 8.0;
+const ARM_DOT_RADIUS: f32 = 5.0;
+const METER_THICKNESS: f32 = 3.0;
+const METER_FLOOR_DB: f32 = -60.0;
 const HEADER_TINT: f32 = 0.42;
 const MUTED_HEADER_TINT: f32 = 0.16;
 const TOOL_BUTTON: f32 = 26.0;
@@ -90,6 +95,8 @@ pub struct Timeline<'a> {
     pub playhead: Frames,
     pub loop_range: LoopRange,
     pub tool: Tool,
+    pub armed: &'a HashSet<TrackId>,
+    pub input_level: f32,
     pub width: f32,
     pub cache: &'a Cache,
 }
@@ -144,6 +151,7 @@ enum Hit<'a> {
     Ruler,
     Resize(&'a Track),
     Mute(&'a Track),
+    Arm(&'a Track),
     Remove(&'a Track),
     AddTrack,
     Grip(&'a Clip, Grip),
@@ -245,6 +253,20 @@ impl Timeline<'_> {
             Point::new(HEADER_W - 68.0, top + 9.0)
         };
         Rectangle::new(corner, Size::new(28.0, 22.0))
+    }
+
+    fn arm_button(&self, index: usize) -> Rectangle {
+        let mute = self.mute_button(index);
+        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let left = if roomy { mute.x + mute.width + ARM_GAP } else { mute.x - ARM_GAP - ARM_BUTTON };
+        Rectangle::new(Point::new(left, mute.y), Size::new(ARM_BUTTON, mute.height))
+    }
+
+    fn meter_bar(&self, index: usize) -> Rectangle {
+        let top = self.track_top(index);
+        let height = self.height_of(&self.project.tracks[index]);
+        let inset = if height >= ROOMY_HEADER_H { 9.0 } else { 5.0 };
+        Rectangle::new(Point::new(16.0, top + height - inset), Size::new(HEADER_W - 32.0, METER_THICKNESS))
     }
 
     fn remove_button(&self, index: usize) -> Rectangle {
@@ -385,6 +407,9 @@ impl Timeline<'_> {
                 let track = &self.project.tracks[i];
                 if self.mute_button(i).contains(p) {
                     return Hit::Mute(track);
+                }
+                if self.arm_button(i).contains(p) {
+                    return Hit::Arm(track);
                 }
                 if self.remove_button(i).contains(p) {
                     return Hit::Remove(track);
@@ -540,6 +565,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         None
                     }
                     (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
+                    (_, Hit::Arm(track)) => Some(Message::ToggleArm(track.id)),
                     (_, Hit::Remove(track)) => Some(Message::RemoveTrack(track.id)),
                     (_, Hit::AddTrack) => Some(Message::AddTrack),
                     (_, Hit::Grip(clip, grip)) => {
@@ -815,6 +841,17 @@ impl canvas::Program<Message> for Timeline<'_> {
                 }
             }
         }
+        for (i, track) in self.project.tracks.iter().enumerate() {
+            let bar = self.meter_bar(i);
+            if !self.armed.contains(&track.id) || bar.y < LANES_TOP || bar.y > bounds.height {
+                continue;
+            }
+            let db = 20.0 * self.input_level.max(1e-6).log10();
+            let filled = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
+            let colour = if self.input_level >= 1.0 { p.danger } else { p.text };
+            overlay.fill_rectangle(bar.position(), bar.size(), theme::mix(p.panel, p.background, 0.6));
+            overlay.fill_rectangle(bar.position(), Size::new(bar.width * filled, bar.height), colour);
+        }
         let x = self.x_of(self.playhead as f64).round();
         if x >= HEADER_W && x <= bounds.width {
             overlay.fill_rectangle(Point::new(x - 0.5, SCROLLBAR_H), Size::new(1.0, bounds.height - SCROLLBAR_H), p.accent);
@@ -869,7 +906,9 @@ impl canvas::Program<Message> for Timeline<'_> {
         }
         match (self.tool, cursor.position_in(bounds).map(|p| self.hit(p))) {
             (_, Some(Hit::Resize(_))) => mouse::Interaction::ResizingVertically,
-            (_, Some(Hit::Mute(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => mouse::Interaction::Pointer,
+            (_, Some(Hit::Mute(_) | Hit::Arm(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => {
+                mouse::Interaction::Pointer
+            }
             (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
             (Tool::Mute | Tool::Delete, Some(Hit::Clip(_) | Hit::Grip(..))) => mouse::Interaction::Pointer,
             (Tool::Pencil, Some(Hit::Grip(_, grip))) => grip.pointer(),
@@ -1267,6 +1306,19 @@ impl Timeline<'_> {
                 vertical_alignment: alignment::Vertical::Center,
                 ..Text::default()
             });
+
+            let arm = self.arm_button(i);
+            let armed = self.armed.contains(&track.id);
+            let surround = Path::new(|b| {
+                b.rounded_rectangle(Point::new(arm.x, arm.y - LANES_TOP), arm.size(), 5.0.into());
+            });
+            frame.fill(&surround, p.raised);
+            let dot = Path::circle(Point::new(arm.center_x(), arm.center_y() - LANES_TOP), ARM_DOT_RADIUS);
+            if armed {
+                frame.fill(&dot, p.danger);
+            } else {
+                frame.stroke(&dot, Stroke::default().with_color(p.text_dim).with_width(1.5));
+            }
         }
 
         let add = self.add_button();

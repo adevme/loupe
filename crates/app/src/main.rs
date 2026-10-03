@@ -15,7 +15,7 @@ mod settings;
 mod theme;
 mod timeline;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -26,11 +26,13 @@ use iced::widget::canvas::Cache;
 use iced::advanced::widget::operation::Focusable;
 use iced::advanced::widget::{Id, Operation};
 use iced::widget::{
-    button, canvas, column, container, horizontal_space, progress_bar, row, slider, stack, text, text_input, Space,
+    button, canvas, column, container, horizontal_space, pick_list, progress_bar, row, slider, stack, text,
+    text_input, Space,
 };
 use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
 use loupe_engine::{
-    ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Outcome, Output, Project, Source, TrackId,
+    ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChoice, Outcome, Output, Project, Source,
+    TrackId,
 };
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
@@ -41,6 +43,8 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+const METER_FALL_PER_TICK: f32 = 0.86;
+const SYSTEM_INPUT: &str = "System default";
 const COPIED_SHOWN_FOR: Duration = Duration::from_millis(1500);
 const EXPORT_PROGRESS_STEPS: u32 = 1000;
 const MASTER_PERCENT_PER_PX: f32 = 0.5;
@@ -105,6 +109,8 @@ pub enum Message {
     AddTrack,
     RemoveTrack(TrackId),
     ToggleMute(TrackId),
+    ToggleArm(TrackId),
+    InputChosen(String),
     BpmTyped(String),
     BpmEntered,
     SetView(View),
@@ -224,6 +230,12 @@ struct App {
     editing_level: Option<mixer::Level>,
     preview: Option<clip_window::Preview>,
     copied: Option<Instant>,
+    armed: HashSet<TrackId>,
+    input: Option<Input>,
+    input_level: f32,
+    input_name: Option<String>,
+    input_names: Vec<String>,
+    practice_input: bool,
     engine: Engine,
     project: Project,
     undo: Vec<Project>,
@@ -284,6 +296,12 @@ impl App {
             editing_level: None,
             preview: None,
             copied: None,
+            armed: HashSet::new(),
+            input: None,
+            input_level: 0.0,
+            input_name: settings.input.clone(),
+            input_names: Vec::new(),
+            practice_input: silent,
             problem: None,
             notice: None,
             export_split: false,
@@ -401,6 +419,9 @@ impl App {
                 if self.copied.is_some_and(|at| at.elapsed() > COPIED_SHOWN_FOR) {
                     self.copied = None;
                 }
+                if let Some(input) = &self.input {
+                    self.input_level = input.take_peak().max(self.input_level * METER_FALL_PER_TICK);
+                }
                 self.engine.collect();
                 self.settle = self.settle.saturating_sub(1);
                 let position = self.engine.position();
@@ -500,7 +521,29 @@ impl App {
                     self.selected = None;
                 }
                 self.heights.remove(&track);
+                self.armed.remove(&track);
+                self.listen_if_armed();
                 self.edit(None, Command::RemoveTrack(track));
+            }
+            Message::ToggleArm(track) => {
+                if !self.armed.remove(&track) {
+                    self.armed.insert(track);
+                }
+                self.listen_if_armed();
+                self.cache.clear();
+            }
+            Message::InputChosen(name) => {
+                let chosen = (name != SYSTEM_INPUT).then_some(name);
+                let saved = match &chosen {
+                    Some(name) => settings::save("input", name),
+                    None => settings::forget("input"),
+                };
+                if let Err(why) = saved {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+                self.input_name = chosen;
+                self.input = None;
+                self.listen_if_armed();
             }
             Message::ToggleMute(track) => {
                 if let Some(muted) = self.project.track(track).map(|t| !t.muted) {
@@ -525,6 +568,7 @@ impl App {
             }
             Message::Resized(size) => self.window = size,
             Message::OpenSettings => {
+                self.input_names = loupe_engine::input_devices();
                 self.overlay = Overlay::Settings;
                 self.pending_scale = self.scale;
                 self.scale_text = format_scale(self.scale);
@@ -873,7 +917,8 @@ impl App {
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
             _ => None,
         });
-        let ticks = if self.playing || self.settle > 0 || self.exporting || self.copied.is_some() {
+        let watching = self.exporting || self.copied.is_some() || self.input.is_some();
+        let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
             Subscription::none()
@@ -940,6 +985,29 @@ impl App {
         }
         self.bpm = format_bpm(self.project.bpm);
         self.changed();
+    }
+
+    pub(crate) fn listen_if_armed(&mut self) {
+        if self.armed.is_empty() {
+            self.input = None;
+            self.input_level = 0.0;
+            return;
+        }
+        if self.input.is_some() {
+            return;
+        }
+        let choice = match (self.practice_input, &self.input_name) {
+            (true, _) => InputChoice::Practice,
+            (false, Some(name)) => InputChoice::Named(name.clone()),
+            (false, None) => InputChoice::SystemDefault,
+        };
+        match Input::open(choice) {
+            Ok(input) => self.input = Some(input),
+            Err(why) => {
+                self.armed.clear();
+                self.problem = Some(format!("Could not open the recording input: {why}"));
+            }
+        }
     }
 
     fn use_folder(&mut self, chosen: Option<PathBuf>) {
@@ -1088,6 +1156,8 @@ impl App {
             playhead: self.playhead,
             loop_range: self.loop_range,
             tool: self.tool,
+            armed: &self.armed,
+            input_level: self.input_level,
             width: self.canvas_width(),
             cache: &self.cache,
         })
@@ -1274,7 +1344,17 @@ impl App {
         ]
         .spacing(8);
 
-        let body = column![scale, rule(palette), folder].spacing(16);
+        let mut inputs = vec![SYSTEM_INPUT.to_string()];
+        inputs.extend(self.input_names.iter().cloned());
+        let current_input = self.input_name.clone().unwrap_or_else(|| SYSTEM_INPUT.to_string());
+        let recording = column![
+            text("Recording input").size(13).font(palette.medium),
+            text("The device armed tracks record from.").size(12).color(palette.text_dim),
+            pick_list(inputs, Some(current_input), Message::InputChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+        ]
+        .spacing(8);
+
+        let body = column![scale, rule(palette), folder, rule(palette), recording].spacing(16);
         self.window("Settings".to_string(), body.into(), 560.0)
     }
 

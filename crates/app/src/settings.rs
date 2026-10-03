@@ -11,6 +11,7 @@ pub struct Settings {
     pub mixer_height: Option<f32>,
     pub folder: Option<PathBuf>,
     pub mixer_open: bool,
+    pub input: Option<String>,
 }
 
 impl Settings {
@@ -23,6 +24,7 @@ impl Settings {
             mixer_height: value_of("mixer_height").and_then(|value| value.parse().ok()),
             folder: value_of("folder").map(PathBuf::from),
             mixer_open: value_of("mixer") == Some("open"),
+            input: value_of("input").map(str::to_string),
         }
     }
 }
