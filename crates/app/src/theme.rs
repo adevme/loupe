@@ -564,6 +564,20 @@ impl Palette {
         }
     }
 
+    pub fn solo(&self, soloed: bool, status: button::Status) -> button::Style {
+        let (background, text_color) = match (soloed, status) {
+            (true, _) => (self.accent, self.on_accent),
+            (false, button::Status::Hovered | button::Status::Pressed) => (self.hover, self.text),
+            (false, _) => (self.raised, self.text_dim),
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color,
+            border: Border::default().rounded(self.inner_corner()),
+            ..Default::default()
+        }
+    }
+
     pub fn mute(&self, muted: bool, status: button::Status) -> button::Style {
         let (background, text_color) = match (muted, status) {
             (true, _) => (self.danger, self.on_accent),

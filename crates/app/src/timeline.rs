@@ -21,6 +21,8 @@ const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
 const ARM_BUTTON: f32 = 22.0;
 const ARM_GAP: f32 = 8.0;
+const PAN_KNOB: f32 = 24.0;
+const PAN_PER_PX: f32 = 0.01;
 const ARM_DOT_RADIUS: f32 = 5.0;
 const PLAYHEAD_CAP: f32 = 11.0;
 const PLAYHEAD_CAP_DROP: f32 = 9.0;
@@ -106,6 +108,7 @@ pub struct Timeline<'a> {
 pub struct Interaction {
     drag: Option<Drag>,
     last_press: Option<(ClipId, Instant)>,
+    last_pan_press: Option<(TrackId, Instant)>,
     modifiers: keyboard::Modifiers,
 }
 
@@ -120,6 +123,7 @@ enum Drag {
     Paint { muted: Option<bool>, touched: Vec<ClipId> },
     Point { target: loupe_engine::Target, which: usize },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
+    Pan { track: TrackId, pull: EndlessDrag, pan_at_grab: f32 },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -155,6 +159,8 @@ enum Hit<'a> {
     Ruler,
     Resize(&'a Track),
     Mute(&'a Track),
+    Solo(&'a Track),
+    Pan(&'a Track),
     Arm(&'a Track),
     Route(&'a Track),
     Remove(&'a Track),
@@ -389,8 +395,22 @@ impl Timeline<'_> {
         Rectangle::new(Point::new(left, arm.y), Size::new(ARM_BUTTON, arm.height))
     }
 
-    fn arm_button(&self, index: usize) -> Rectangle {
+    fn solo_button(&self, index: usize) -> Rectangle {
         let mute = self.mute_button(index);
+        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let left = if roomy { mute.x + mute.width + ARM_GAP } else { mute.x - ARM_GAP - mute.width };
+        Rectangle::new(Point::new(left, mute.y), mute.size())
+    }
+
+    fn pan_knob(&self, index: usize) -> Option<Rectangle> {
+        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let route = self.route_button(index);
+        let left = route.x + route.width + ARM_GAP;
+        (roomy && left + PAN_KNOB <= self.header_right() - 6.0).then(|| Rectangle::new(Point::new(left, route.center_y() - PAN_KNOB / 2.0), Size::new(PAN_KNOB, PAN_KNOB)))
+    }
+
+    fn arm_button(&self, index: usize) -> Rectangle {
+        let mute = self.solo_button(index);
         let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
         let left = if roomy { mute.x + mute.width + ARM_GAP } else { mute.x - ARM_GAP - ARM_BUTTON };
         Rectangle::new(Point::new(left, mute.y), Size::new(ARM_BUTTON, mute.height))
@@ -550,6 +570,12 @@ impl Timeline<'_> {
                 let track = &self.project.tracks[i];
                 if self.mute_button(i).contains(p) {
                     return Hit::Mute(track);
+                }
+                if self.solo_button(i).contains(p) {
+                    return Hit::Solo(track);
+                }
+                if self.pan_knob(i).is_some_and(|knob| knob.contains(p)) {
+                    return Hit::Pan(track);
                 }
                 if self.arm_button(i).contains(p) {
                     return Hit::Arm(track);
@@ -742,6 +768,17 @@ impl canvas::Program<Message> for Timeline<'_> {
                         None
                     }
                     (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
+                    (_, Hit::Solo(track)) => Some(Message::ToggleSolo(track.id)),
+                    (_, Hit::Pan(track)) => {
+                        let again = state.last_pan_press.is_some_and(|(id, at)| id == track.id && at.elapsed() < DOUBLE_CLICK);
+                        state.last_pan_press = Some((track.id, Instant::now()));
+                        if again {
+                            Some(Message::TrackPan(track.id, 0.0))
+                        } else {
+                            state.drag = Some(Drag::Pan { track: track.id, pull: EndlessDrag::start(p, true), pan_at_grab: track.pan });
+                            None
+                        }
+                    }
                     (_, Hit::Arm(track)) => Some(Message::ToggleArm(track.id)),
                     (_, Hit::Route(track)) => Some(Message::OpenRouting(track.id)),
                     (_, Hit::Remove(track)) => Some(Message::RemoveTrack(track.id)),
@@ -827,6 +864,14 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let track = self.project.tracks[self.row_for_drag(p.y)].id;
                         let changed = start != clip.start || track != current.id;
                         (Captured, changed.then_some(Message::MoveClip { clip: *id, track, start }))
+                    }
+                    Drag::Pan { track, pull, pan_at_grab } => {
+                        let Some(travel_up) = pull.moved(p) else {
+                            return (Captured, None);
+                        };
+                        let pan = (*pan_at_grab + travel_up * PAN_PER_PX).clamp(-1.0, 1.0);
+                        let now = self.project.track(*track).map_or(0.0, |t| t.pan);
+                        (Captured, (pan != now).then_some(Message::TrackPan(*track, pan)))
                     }
                     Drag::Grip { clip, grip, pull, curve_at_grab, db_at_grab } => {
                         let Some(clip) = self.project.clip(*clip) else {
@@ -922,7 +967,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
                 Some(Drag::Range { anchor, moving: false, .. }) => (Captured, Some(Message::RulerClicked(anchor))),
-                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. } | Drag::Trim { .. }) => {
+                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. } | Drag::Trim { .. } | Drag::Pan { .. }) => {
                     (Captured, Some(Message::DragEnd))
                 }
                 Some(Drag::Marquee { .. }) => (Captured, Some(Message::Refresh)),
@@ -1159,11 +1204,12 @@ impl canvas::Program<Message> for Timeline<'_> {
             Some(Drag::Resize { .. }) => return mouse::Interaction::ResizingVertically,
             Some(Drag::Grip { grip, .. }) => return grip.pointer(),
             Some(Drag::Trim { .. }) => return mouse::Interaction::ResizingHorizontally,
+            Some(Drag::Pan { .. }) => return mouse::Interaction::ResizingVertically,
             _ => {}
         }
         match (self.tool, cursor.position_in(bounds).map(|p| self.hit(p))) {
             (_, Some(Hit::Resize(_))) => mouse::Interaction::ResizingVertically,
-            (_, Some(Hit::Mute(_) | Hit::Arm(_) | Hit::Route(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => {
+            (_, Some(Hit::Mute(_) | Hit::Solo(_) | Hit::Pan(_) | Hit::Arm(_) | Hit::Route(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => {
                 mouse::Interaction::Pointer
             }
             (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
@@ -1766,6 +1812,41 @@ impl Timeline<'_> {
                 vertical_alignment: alignment::Vertical::Center,
                 ..Text::default()
             });
+
+            let solo = self.solo_button(i);
+            let shape = Path::new(|b| {
+                b.rounded_rectangle(Point::new(solo.x - self.header_left(), solo.y - self.lanes_top()), solo.size(), small_corner.into());
+            });
+            frame.fill(&shape, if track.solo { p.accent } else { p.raised });
+            frame.fill_text(Text {
+                content: "S".into(),
+                position: Point::new(solo.center_x() - self.header_left(), solo.center_y() - self.lanes_top()),
+                color: if track.solo { p.on_accent } else { p.text_dim },
+                size: 11.5.into(),
+                font: p.semibold,
+                horizontal_alignment: alignment::Horizontal::Center,
+                vertical_alignment: alignment::Vertical::Center,
+                ..Text::default()
+            });
+
+            if let Some(knob) = self.pan_knob(i) {
+                let centre = Point::new(knob.center_x() - self.header_left(), knob.center_y() - self.lanes_top());
+                let radius = knob.width / 2.0 - 1.5;
+                let top = -std::f32::consts::FRAC_PI_2;
+                let angle = top + track.pan * 0.75 * std::f32::consts::PI;
+                let arc = |from: f32, to: f32| {
+                    Path::new(|b| {
+                        b.arc(canvas::path::Arc { center: centre, radius, start_angle: iced::Radians(from.min(to)), end_angle: iced::Radians(from.max(to)) });
+                    })
+                };
+                frame.fill(&Path::circle(centre, radius - 3.0), p.raised);
+                frame.stroke(&arc(top - 0.75 * std::f32::consts::PI, top + 0.75 * std::f32::consts::PI), Stroke::default().with_color(p.hover).with_width(2.0));
+                if track.pan != 0.0 {
+                    frame.stroke(&arc(top, angle), Stroke::default().with_color(p.accent).with_width(2.0));
+                }
+                let along = |distance: f32| Point::new(centre.x + angle.cos() * distance, centre.y + angle.sin() * distance);
+                frame.stroke(&Path::line(along(radius * 0.25), along(radius - 4.0)), Stroke::default().with_color(p.text).with_width(2.0));
+            }
 
             let arm = self.arm_button(i);
             let armed = self.armed.contains(&track.id);

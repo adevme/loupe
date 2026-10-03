@@ -18,7 +18,8 @@ pub struct Knob<'a> {
     pub highest: f32,
     pub resting: f32,
     pub per_px: f32,
-    pub on_turn: fn(f32) -> Message,
+    pub centred: bool,
+    pub on_turn: Box<dyn Fn(f32) -> Message + 'a>,
 }
 
 #[derive(Default)]
@@ -96,7 +97,15 @@ impl canvas::Program<Message> for Knob<'_> {
         };
         frame.fill(&Path::circle(centre, radius - 3.0), p.raised);
         frame.stroke(&sweep(START_ANGLE + SWEEP), Stroke::default().with_color(p.hover).with_width(2.0));
-        frame.stroke(&sweep(angle), Stroke::default().with_color(p.accent).with_width(2.0));
+        let lit = if self.centred {
+            let middle = START_ANGLE + SWEEP / 2.0;
+            Path::new(|b| {
+                b.arc(path::Arc { center: centre, radius, start_angle: Radians(middle.min(angle)), end_angle: Radians(middle.max(angle)) });
+            })
+        } else {
+            sweep(angle)
+        };
+        frame.stroke(&lit, Stroke::default().with_color(p.accent).with_width(2.0));
         let along = |distance: f32| Point::new(centre.x + angle.cos() * distance, centre.y + angle.sin() * distance);
         let pointer = Path::line(along(radius * 0.25), along(radius - 4.0));
         frame.stroke(&pointer, Stroke::default().with_color(p.text).with_width(2.0));

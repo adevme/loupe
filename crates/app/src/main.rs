@@ -138,6 +138,9 @@ pub enum Message {
     AddTrack,
     RemoveTrack(TrackId),
     ToggleMute(TrackId),
+    ToggleSolo(TrackId),
+    TrackPan(TrackId, f32),
+    ModifiersChanged(keyboard::Modifiers),
     ToggleArm(TrackId),
     InputChosen(String),
     BpmTyped(String),
@@ -312,6 +315,7 @@ enum Run {
     Fade(ClipId, Edge),
     TrackGain(TrackId),
     Master,
+    Pan(TrackId),
     Paint,
     Trim(ClipId),
     Send(TrackId, TrackId),
@@ -455,6 +459,7 @@ struct App {
     metronome: bool,
     count_in_bars: u32,
     copied_clips: Option<clipboard::Copied>,
+    modifiers: keyboard::Modifiers,
 }
 
 impl App {
@@ -556,6 +561,7 @@ impl App {
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
             copied_clips: None,
+            modifiers: keyboard::Modifiers::default(),
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -840,6 +846,11 @@ impl App {
                 self.input = None;
                 self.listen_if_armed();
             }
+            Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+            Message::TrackPan(track, pan) => {
+                self.edit(Some(Run::Pan(track)), Command::SetTrackPan { track, pan: pan.clamp(-1.0, 1.0) });
+            }
+            Message::ToggleSolo(track) => self.toggle_solo(track),
             Message::ToggleMute(track) => {
                 if let Some(muted) = self.project.track(track).map(|t| !t.muted) {
                     self.edit(None, Command::SetTrackMuted { track, muted });
@@ -1532,6 +1543,7 @@ impl App {
         let window = iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(Message::ModifiersChanged(modifiers)),
             _ => None,
         });
         let watching = self.exporting || self.copied.is_some() || self.input.is_some() || self.opening.is_some() || self.stock.is_some() || self.master_level > 0.0005;
@@ -2174,7 +2186,8 @@ impl App {
                 highest: mixer::LOUDEST_MASTER_PERCENT,
                 resting: 100.0,
                 per_px: MASTER_PERCENT_PER_PX,
-                on_turn: Message::MasterPercent,
+                centred: false,
+                on_turn: Box::new(Message::MasterPercent),
             })
             .width(30)
             .height(30),

@@ -174,10 +174,14 @@ pub fn mix_tracks_metered(
             None => 0,
         })
         .collect();
+    let soloing = only.is_none() && project.any_solo();
     for (index, track) in project.tracks.iter().enumerate() {
         scratch.sides[index][..len].fill([0.0; 2]);
         let buffer = &mut scratch.buffers[index][..len];
         buffer.fill([0.0; 2]);
+        if soloing && !project.heard_in_solo(track.id) {
+            continue;
+        }
         lay_clips(project, track, pos + ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
     }
     for step in 0..scratch.order.len() {
@@ -202,10 +206,11 @@ pub fn mix_tracks_metered(
         let closes = automated(project, target, pos + len as Frames, track.gain);
         let (opens, closes) = if silent { (0.0, 0.0) } else { (opens, closes) };
         let step = (closes - opens) / len.max(1) as f32;
+        let (left, right) = pan_gains(track.pan);
         for (i, frame) in scratch.buffers[index][..len].iter_mut().enumerate() {
             let gain = opens + step * (i + 1) as f32;
-            frame[0] *= gain;
-            frame[1] *= gain;
+            frame[0] *= gain * left;
+            frame[1] *= gain * right;
         }
         if let Some(slot) = peaks.as_deref_mut().and_then(|p| p.get_mut(index)) {
             let mut top = 0.0f32;
@@ -248,6 +253,13 @@ pub fn mix_tracks_metered(
             }
         }
     }
+}
+
+pub fn pan_gains(pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(-1.0, 1.0);
+    let left = (pan.max(0.0) * std::f32::consts::FRAC_PI_2).cos();
+    let right = ((-pan).max(0.0) * std::f32::consts::FRAC_PI_2).cos();
+    (left, right)
 }
 
 fn lay_clips(
@@ -934,6 +946,45 @@ mod routing {
         let mut out = vec![[0.0; 2]; len];
         mix_tracks(project, 0, &mut out, None);
         out
+    }
+
+    #[test]
+    fn pan_turns_down_the_far_side_only() {
+        let mut p = Project::new(48_000);
+        let t = track(&mut p);
+        p.apply(Command::AddClip { track: t, source: ones(8), start: 0 }).unwrap();
+        assert_eq!(heard(&p, 4)[0], [1.0, 1.0]);
+        p.apply(Command::SetTrackPan { track: t, pan: -1.0 }).unwrap();
+        let hard_left = heard(&p, 4)[0];
+        assert!(hard_left[0] == 1.0 && hard_left[1].abs() < 1e-6);
+        p.apply(Command::SetTrackPan { track: t, pan: 0.5 }).unwrap();
+        let half_right = heard(&p, 4)[0];
+        assert!((half_right[0] - 0.7071).abs() < 1e-3 && half_right[1] == 1.0);
+        assert!(p.apply(Command::SetTrackPan { track: t, pan: 1.5 }).is_err());
+        assert!(p.apply(Command::SetTrackPan { track: t, pan: f32::NAN }).is_err());
+    }
+
+    #[test]
+    fn solo_keeps_the_soloed_track_its_children_its_folder_and_its_sends() {
+        let mut p = Project::new(48_000);
+        let folder = track(&mut p);
+        let vocal = track(&mut p);
+        let drums = track(&mut p);
+        let verb = track(&mut p);
+        p.apply(Command::SetTrackParent { track: vocal, parent: Some(folder) }).unwrap();
+        p.apply(Command::AddClip { track: folder, source: ones(8), start: 0 }).unwrap();
+        p.apply(Command::AddClip { track: vocal, source: ones(8), start: 0 }).unwrap();
+        p.apply(Command::AddClip { track: drums, source: ones(8), start: 0 }).unwrap();
+        p.apply(Command::AddSend { from: vocal, to: verb }).unwrap();
+        p.apply(Command::SetSendGain { from: vocal, to: verb, gain: 0.25 }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 3.25);
+        p.apply(Command::SetTrackSolo { track: vocal, solo: true }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 1.25, "the vocal and its reverb only");
+        p.apply(Command::SetTrackSolo { track: vocal, solo: false }).unwrap();
+        p.apply(Command::SetTrackSolo { track: folder, solo: true }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 2.25, "the folder brings its children");
+        p.apply(Command::SetTrackMuted { track: folder, muted: true }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 0.25, "mute beats solo");
     }
 
     #[test]

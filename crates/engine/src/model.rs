@@ -91,6 +91,8 @@ pub struct Track {
     pub name: String,
     pub gain: f32,
     pub muted: bool,
+    pub pan: f32,
+    pub solo: bool,
     pub colour: Option<[u8; 3]>,
     pub clips: Vec<Clip>,
     pub parent: Option<TrackId>,
@@ -122,6 +124,8 @@ pub enum Command {
     AddSource(Arc<Source>),
     SetTrackGain { track: TrackId, gain: f32 },
     SetTrackMuted { track: TrackId, muted: bool },
+    SetTrackPan { track: TrackId, pan: f32 },
+    SetTrackSolo { track: TrackId, solo: bool },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
     PasteClip { track: TrackId, clip: Clip },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
@@ -259,7 +263,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -311,6 +315,19 @@ impl Project {
             Command::SetTrackMuted { track, muted } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].muted = muted;
+                Ok(Outcome::Done)
+            }
+            Command::SetTrackPan { track, pan } => {
+                let t = self.track_index(track)?;
+                if !pan.is_finite() || !(-1.0..=1.0).contains(&pan) {
+                    return Err(CommandError::InvalidValue);
+                }
+                self.tracks[t].pan = pan;
+                Ok(Outcome::Done)
+            }
+            Command::SetTrackSolo { track, solo } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].solo = solo;
                 Ok(Outcome::Done)
             }
             Command::AddClip { track, source, start } => {
@@ -659,6 +676,22 @@ impl Project {
         let id = self.next_id;
         self.next_id += 1;
         id
+    }
+
+    pub fn any_solo(&self) -> bool {
+        self.tracks.iter().any(|track| track.solo)
+    }
+
+    pub fn heard_in_solo(&self, track: TrackId) -> bool {
+        let mut at = self.track(track);
+        for _ in 0..=self.tracks.len() {
+            match at {
+                Some(found) if found.solo => return true,
+                Some(found) => at = found.parent.and_then(|parent| self.track(parent)),
+                None => return false,
+            }
+        }
+        false
     }
 
     pub fn depth_of(&self, track: TrackId) -> usize {
