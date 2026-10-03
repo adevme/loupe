@@ -23,6 +23,9 @@ pub struct Palette {
     pub accent: Color,
     pub on_accent: Color,
     pub danger: Color,
+    pub meter_low: Color,
+    pub meter_mid: Color,
+    pub meter_high: Color,
     pub tracks: [Color; 8],
     pub ui: Font,
     pub medium: Font,
@@ -44,6 +47,9 @@ const NEUTRAL: Palette = Palette {
     accent: Color::from_rgb(0.925, 0.925, 0.933),
     on_accent: Color::from_rgb(0.11, 0.11, 0.118),
     danger: Color::from_rgb(0.984, 0.443, 0.522),
+    meter_low: Color::from_rgb(0.33, 0.84, 0.5),
+    meter_mid: Color::from_rgb(0.96, 0.84, 0.33),
+    meter_high: Color::from_rgb(0.97, 0.6, 0.27),
     tracks: [
         Color::from_rgb(0.45, 0.72, 0.95),
         Color::from_rgb(0.73, 0.58, 0.96),
@@ -61,7 +67,7 @@ const NEUTRAL: Palette = Palette {
     track_height: 92.0,
 };
 
-const COLOUR_KEYS: [&str; 12] = [
+const COLOUR_KEYS: [&str; 15] = [
     "background",
     "panel",
     "raised",
@@ -74,6 +80,9 @@ const COLOUR_KEYS: [&str; 12] = [
     "accent",
     "on_accent",
     "danger",
+    "meter_low",
+    "meter_mid",
+    "meter_high",
 ];
 
 pub struct Loaded {
@@ -156,6 +165,9 @@ impl Palette {
             "accent" => &mut self.accent,
             "on_accent" => &mut self.on_accent,
             "danger" => &mut self.danger,
+            "meter_low" => &mut self.meter_low,
+            "meter_mid" => &mut self.meter_mid,
+            "meter_high" => &mut self.meter_high,
             _ => return None,
         })
     }

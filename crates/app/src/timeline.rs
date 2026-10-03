@@ -28,6 +28,8 @@ const ARM_GAP: f32 = 8.0;
 const ARM_DOT_RADIUS: f32 = 5.0;
 const METER_THICKNESS: f32 = 3.0;
 const METER_FLOOR_DB: f32 = -60.0;
+const METER_MID_DB: f32 = -12.0;
+const METER_HIGH_DB: f32 = -6.0;
 const HEADER_TINT: f32 = 0.42;
 const MUTED_HEADER_TINT: f32 = 0.16;
 const TOOL_BUTTON: f32 = 26.0;
@@ -907,10 +909,19 @@ impl canvas::Program<Message> for Timeline<'_> {
                 continue;
             }
             let db = 20.0 * self.input_level.max(1e-6).log10();
-            let filled = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
-            let colour = if self.input_level >= 1.0 { p.danger } else { p.text };
+            let along = |db: f32| ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0) * bar.width;
+            let filled = along(db);
+            let clipping = self.input_level >= 1.0;
             overlay.fill_rectangle(bar.position(), bar.size(), theme::mix(p.panel, p.background, 0.6));
-            overlay.fill_rectangle(bar.position(), Size::new(bar.width * filled, bar.height), colour);
+            let zones = [(METER_FLOOR_DB, p.meter_low), (METER_MID_DB, p.meter_mid), (METER_HIGH_DB, p.meter_high)];
+            for (i, (from_db, colour)) in zones.iter().enumerate() {
+                let from = along(*from_db);
+                let to = zones.get(i + 1).map_or(bar.width, |(next, _)| along(*next)).min(filled);
+                if to > from {
+                    let colour = if clipping { p.danger } else { *colour };
+                    overlay.fill_rectangle(Point::new(bar.x + from, bar.y), Size::new(to - from, bar.height), colour);
+                }
+            }
         }
         let x = self.x_of(self.playhead as f64).round();
         if x >= HEADER_W && x <= bounds.width {
