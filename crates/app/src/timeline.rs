@@ -403,6 +403,16 @@ impl canvas::Program<Message> for Timeline<'_> {
                 state.modifiers = modifiers;
                 (Ignored, None)
             }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                let Some(p) = cursor.position_in(bounds) else {
+                    return (Ignored, None);
+                };
+                let message = match self.hit(p) {
+                    Hit::Clip(clip) | Hit::Grip(clip, _) => Some(Message::DeleteClip(clip.id)),
+                    _ => None,
+                };
+                (Captured, message)
+            }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let Some(p) = cursor.position_in(bounds) else {
                     return (Ignored, None);

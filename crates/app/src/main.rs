@@ -91,6 +91,7 @@ pub enum Message {
     Resized(Size),
     OpenSettings,
     CloseSettings,
+    DeleteClip(ClipId),
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -323,6 +324,12 @@ impl App {
                 self.scale_text = format_scale(self.scale);
             }
             Message::CloseSettings => self.settings_open = false,
+            Message::DeleteClip(clip) => {
+                if self.selected == Some(clip) {
+                    self.selected = None;
+                }
+                self.edit(None, Command::DeleteClip(clip));
+            }
             Message::ScaleDragged(scale) => {
                 self.pending_scale = scale;
                 self.scale_text = format_scale(scale);
