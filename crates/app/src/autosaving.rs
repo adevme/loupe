@@ -19,12 +19,20 @@ impl App {
     }
 
     pub(crate) fn keep_safe(&mut self) {
+        if self.run.is_some() {
+            return;
+        }
+        let nothing_new = self.revision == self.remembered || self.project.tracks.is_empty();
+        let known = self.marked.as_ref().is_some_and(|marked| marked.same_as(self.path.as_deref()));
+        if nothing_new && known {
+            return;
+        }
         let place = self.backup_place();
-        if self.marked.as_ref() != Some(&place) {
+        if !known {
             backup::mark_running(&place);
             self.marked = Some(place.clone());
         }
-        if self.revision != self.remembered && !self.project.tracks.is_empty() {
+        if !nothing_new {
             self.remembered = self.revision;
             backup::remember(place, self.snapshot(), self.backups_kept as usize);
         }

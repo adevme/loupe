@@ -32,13 +32,23 @@ impl Place {
         }
     }
 
+    pub fn same_as(&self, project: Option<&Path>) -> bool {
+        self.project.as_deref() == project
+    }
+
     fn belongs(&self, file: &Path) -> bool {
         let Some(stem) = file.file_stem().map(|stem| stem.to_string_lossy().into_owned()) else {
             return false;
         };
         file.extension().is_some_and(|extension| extension == EXTENSION)
-            && stem.strip_prefix(&self.name).is_some_and(|rest| rest.starts_with(' ') && rest.len() == " 2026-10-03 18-04-05".len())
+            && stem.strip_prefix(&self.name).and_then(|rest| rest.strip_prefix(' ')).is_some_and(stamped)
     }
+}
+
+fn stamped(rest: &str) -> bool {
+    let shape = "0000-00-00 00-00-00";
+    rest.len() == shape.len()
+        && rest.chars().zip(shape.chars()).all(|(seen, want)| if want == '0' { seen.is_ascii_digit() } else { seen == want })
 }
 
 pub fn stamp(now: chrono::DateTime<chrono::Local>) -> String {
@@ -87,9 +97,7 @@ pub fn remember(place: Place, text: String, keep: usize) {
 }
 
 pub fn last_chance() {
-    let Ok(latest) = LATEST.try_lock() else {
-        return;
-    };
+    let latest = LATEST.lock().unwrap_or_else(|held| held.into_inner());
     if let Some((place, text, keep)) = latest.as_ref() {
         let _ = write(place, text, *keep + 1);
     }
@@ -265,6 +273,15 @@ mod tests {
         assert_eq!(place.project, Some(PathBuf::from("/music/Song/Song Two.lp")));
         assert_eq!(read_marker("folder /x\nname Untitled\nproject -\n").unwrap().project, None);
         assert!(read_marker("nonsense").is_none());
+    }
+
+    #[test]
+    fn only_real_time_stamps_count_as_backups() {
+        let place = Place { folder: PathBuf::from("/x"), name: "Song".into(), project: None };
+        assert!(place.belongs(Path::new("/x/Song 2026-10-03 18-04-05.lp")));
+        assert!(!place.belongs(Path::new("/x/Song a-sketch-i-made-here.lp")));
+        assert!(!place.belongs(Path::new("/x/Song 2026-10-03 18-04-05.wav")));
+        assert!(!place.belongs(Path::new("/x/Other 2026-10-03 18-04-05.lp")));
     }
 
     #[test]
