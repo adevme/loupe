@@ -104,7 +104,7 @@ enum Drag {
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Resize { track: TrackId, top: f32 },
     Scroll { grab_x: f32, span: f64 },
-    Slice { at: Frames, from_y: f32, to_y: f32 },
+    Slice { from: Point, to: Point },
     Trim { clip: ClipId, edge: Edge },
     Paint { muted: Option<bool>, touched: Vec<ClipId> },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
@@ -194,6 +194,23 @@ impl Timeline<'_> {
             None if y < LANES_TOP - self.view.scroll_y => 0,
             None => self.project.tracks.len().saturating_sub(1),
         }
+    }
+
+    fn slice_cuts(&self, from: Point, to: Point, free: bool) -> Vec<(usize, Frames)> {
+        let aims_at_nothing = from == to && self.track_at(from.y).is_none();
+        if self.project.tracks.is_empty() || aims_at_nothing {
+            return Vec::new();
+        }
+        let first = self.row_for_drag(from.y.min(to.y));
+        let last = self.row_for_drag(from.y.max(to.y));
+        (first..=last)
+            .map(|row| {
+                let middle = self.track_top(row) + self.height_of(&self.project.tracks[row]) / 2.0;
+                let along = if from.y == to.y { 0.0 } else { ((middle - from.y) / (to.y - from.y)).clamp(0.0, 1.0) };
+                let x = from.x + (to.x - from.x) * along;
+                (row, self.snap(self.frames_at(x), free))
+            })
+            .collect()
     }
 
     fn grid_beats(&self) -> f64 {
@@ -484,8 +501,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 let message = match (self.tool, self.hit(p)) {
                     (_, Hit::Tool(tool)) => Some(Message::SetTool(tool)),
                     (Tool::Razor, Hit::Clip(_) | Hit::Grip(..) | Hit::Lane) => {
-                        let at = self.snap(self.frames_at(p.x), free);
-                        state.drag = Some(Drag::Slice { at, from_y: p.y, to_y: p.y });
+                        state.drag = Some(Drag::Slice { from: p, to: p });
                         Some(Message::Refresh)
                     }
                     (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
@@ -554,7 +570,8 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let (Some(p), Some(drag)) = (anywhere, state.drag.as_mut()) else {
-                    return (Ignored, None);
+                    let aiming = self.tool == Tool::Razor && cursor.is_over(bounds);
+                    return (Ignored, aiming.then_some(Message::Refresh));
                 };
                 match drag {
                     Drag::Range { anchor, origin, moving } => {
@@ -637,8 +654,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let changed = start != clip.start || len != clip.len;
                         (Captured, changed.then_some(Message::TrimClip { clip: clip.id, start, offset, len }))
                     }
-                    Drag::Slice { to_y, .. } => {
-                        *to_y = p.y;
+                    Drag::Slice { to, .. } => {
+                        *to = p;
                         (Captured, Some(Message::Refresh))
                     }
                     Drag::Paint { muted, touched } => {
@@ -673,11 +690,13 @@ impl canvas::Program<Message> for Timeline<'_> {
                 Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. } | Drag::Trim { .. }) => {
                     (Captured, Some(Message::DragEnd))
                 }
-                Some(Drag::Slice { at, from_y, to_y }) if !self.project.tracks.is_empty() => {
-                    let first = self.row_for_drag(from_y.min(to_y));
-                    let last = self.row_for_drag(from_y.max(to_y));
-                    let tracks = self.project.tracks[first..=last].iter().map(|track| track.id).collect();
-                    (Captured, Some(Message::Slice { at, tracks }))
+                Some(Drag::Slice { from, to }) => {
+                    let cuts = self
+                        .slice_cuts(from, to, free)
+                        .into_iter()
+                        .map(|(row, at)| (self.project.tracks[row].id, at))
+                        .collect();
+                    (Captured, Some(Message::Slice { cuts }))
                 }
                 Some(_) => (Captured, None),
                 None => (Ignored, None),
@@ -710,7 +729,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let p = self.palette;
         let content = self.cache.draw(renderer, bounds.size(), |frame| {
@@ -774,14 +793,24 @@ impl canvas::Program<Message> for Timeline<'_> {
                 }
             }
         }
-        if let Some(Drag::Slice { at, from_y, to_y }) = &state.drag {
-            let x = self.x_of(*at as f64).round();
-            if x >= HEADER_W && !self.project.tracks.is_empty() {
-                let first = self.row_for_drag(from_y.min(*to_y));
-                let last = self.row_for_drag(from_y.max(*to_y));
-                let top = self.track_top(first);
-                let bottom = self.track_top(last) + self.height_of(&self.project.tracks[last]);
-                overlay.fill_rectangle(Point::new(x - 1.0, top), Size::new(2.0, bottom - top), p.accent);
+        let free = state.modifiers.alt() || state.modifiers.shift();
+        let slicing = match (&state.drag, self.tool, cursor.position_in(bounds)) {
+            (Some(Drag::Slice { from, to }), _, _) => Some((*from, *to)),
+            (None, Tool::Razor, Some(at)) if at.x >= HEADER_W && at.y >= LANES_TOP => Some((at, at)),
+            _ => None,
+        };
+        if let Some((from, to)) = slicing {
+            if from != to {
+                let stroke = Path::line(from, to);
+                overlay.stroke(&stroke, Stroke::default().with_color(theme::alpha(p.accent, 0.55)).with_width(1.0));
+            }
+            for (row, at) in self.slice_cuts(from, to, free) {
+                let x = self.x_of(at as f64).round();
+                let top = self.track_top(row).max(LANES_TOP);
+                let height = self.track_top(row) + self.height_of(&self.project.tracks[row]) - top;
+                if x >= HEADER_W && height > 0.0 {
+                    overlay.fill_rectangle(Point::new(x - 1.0, top), Size::new(2.0, height), p.accent);
+                }
             }
         }
         let x = self.x_of(self.playhead as f64).round();

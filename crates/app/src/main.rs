@@ -131,7 +131,7 @@ pub enum Message {
     PaintMute { clip: ClipId, muted: bool },
     PaintDelete(ClipId),
     TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
-    Slice { at: Frames, tracks: Vec<TrackId> },
+    Slice { cuts: Vec<(TrackId, Frames)> },
     TrackGain(TrackId, f32),
     TogglePool,
     PlaceSource(usize),
@@ -611,19 +611,17 @@ impl App {
                     });
                 }
             }
-            Message::Slice { at, tracks } => {
-                let cuts: Vec<ClipId> = self
-                    .project
-                    .tracks
+            Message::Slice { cuts } => {
+                let splits: Vec<(ClipId, Frames)> = cuts
                     .iter()
-                    .filter(|track| tracks.contains(&track.id))
-                    .flat_map(|track| track.clips.iter())
-                    .filter(|clip| at > clip.start && at < clip.end())
-                    .map(|clip| clip.id)
+                    .filter_map(|(track, at)| self.project.track(*track).map(|track| (track, *at)))
+                    .flat_map(|(track, at)| track.clips.iter().map(move |clip| (clip, at)))
+                    .filter(|(clip, at)| *at > clip.start && *at < clip.end())
+                    .map(|(clip, at)| (clip.id, at))
                     .collect();
-                if !cuts.is_empty() {
+                if !splits.is_empty() {
                     self.transact(None, |project| {
-                        for clip in cuts {
+                        for (clip, at) in splits {
                             project.apply(Command::SplitClip { clip, at })?;
                         }
                         Ok(Outcome::Done)
