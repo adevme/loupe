@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/app", "crates/plugins", "crates/host", "crates/stock"]
+members = ["crates/engine", "crates/app", "crates/plugins", "crates/host", "crates/stock", "crates/stock-ui"]
 
 [profile.release]
 lto = true

@@ -10,7 +10,7 @@ mod smooth;
 pub use biquad::{Coefficients, Shape};
 pub use compressor::Compressor;
 pub use delay::Delay;
-pub use eq::{knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
+pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
 pub use scope::Scope;
 pub use limiter::Limiter;
 pub use reverb::Reverb;

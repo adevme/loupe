@@ -1,0 +1,8 @@
+[package]
+name = "loupe-stock-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iced = { version = "0.13", features = ["canvas", "tokio"] }
+loupe-stock = { path = "../stock" }
