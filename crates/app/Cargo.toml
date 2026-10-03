@@ -7,3 +7,4 @@ edition = "2021"
 loupe-engine = { path = "../engine" }
 iced = { version = "0.13", features = ["tokio", "canvas", "advanced"] }
 rfd = "0.14"
+iced_runtime = "0.13"

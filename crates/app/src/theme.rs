@@ -1,8 +1,9 @@
 use std::fs;
-use std::path::PathBuf;
 
 use iced::widget::{button, container, slider, text_input};
 use iced::{font, Background, Border, Color, Font, Theme};
+
+use crate::settings::{config_dir, entries};
 
 pub const ICONS: Font = Font::with_name("lucide");
 pub const MIN_TRACK_HEIGHT: f32 = 40.0;
@@ -78,15 +79,13 @@ pub struct Loaded {
 }
 
 impl Palette {
-    pub fn load() -> Loaded {
+    pub fn load(chosen: Option<&str>) -> Loaded {
         let Some(dir) = config_dir() else {
             return Loaded { palette: NEUTRAL, problem: None };
         };
         let themes = dir.join("themes");
         let _ = fs::create_dir_all(&themes);
         let _ = fs::write(themes.join("default.theme"), NEUTRAL.to_text());
-        let settings = fs::read_to_string(dir.join("settings")).unwrap_or_default();
-        let chosen = entries(&settings).find(|(_, key, _)| *key == "theme").map(|(_, _, v)| v.to_string());
         let Some(name) = chosen else {
             return Loaded { palette: NEUTRAL, problem: None };
         };
@@ -191,6 +190,18 @@ impl Palette {
         )
     }
 
+    pub fn backdrop(&self) -> container::Style {
+        container::Style { background: Some(alpha(Color::BLACK, 0.55).into()), ..Default::default() }
+    }
+
+    pub fn sheet(&self) -> container::Style {
+        container::Style {
+            background: Some(self.panel.into()),
+            border: Border { color: self.line, width: 1.0, radius: 10.0.into() },
+            ..Default::default()
+        }
+    }
+
     pub fn bar(&self) -> container::Style {
         container::Style { background: Some(self.panel.into()), ..Default::default() }
     }
@@ -283,27 +294,6 @@ pub fn mix(base: Color, tint: Color, amount: f32) -> Color {
         base.g + (tint.g - base.g) * amount,
         base.b + (tint.b - base.b) * amount,
     )
-}
-
-fn config_dir() -> Option<PathBuf> {
-    if cfg!(windows) {
-        return std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata).join("loupe"));
-    }
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .map(|config| config.join("loupe"))
-}
-
-fn entries(text: &str) -> impl Iterator<Item = (usize, &str, &str)> {
-    text.lines().enumerate().filter_map(|(i, line)| {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            return None;
-        }
-        let (key, value) = line.split_once('=')?;
-        Some((i + 1, key.trim(), value.trim()))
-    })
 }
 
 fn colour(value: &str) -> Result<Color, String> {

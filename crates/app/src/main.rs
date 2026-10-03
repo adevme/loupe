@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod icons;
+mod settings;
 mod theme;
 mod timeline;
 
@@ -11,14 +12,18 @@ use std::time::Duration;
 
 use iced::futures::channel::oneshot;
 use iced::widget::canvas::Cache;
+use iced::advanced::widget::operation::Focusable;
+use iced::advanced::widget::{Id, Operation};
 use iced::widget::{
-    button, canvas, column, container, horizontal_space, row, slider, text, text_input, Space,
+    button, canvas, center, column, container, horizontal_space, mouse_area, opaque, row, slider, stack, text,
+    text_input, Space,
 };
 use iced::{keyboard, window, Alignment, Element, Length, Size, Subscription, Task};
 use loupe_engine::{
     ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Outcome, Output, Project, Source, TrackId,
 };
 
+use settings::{Settings, MAX_SCALE, MIN_SCALE};
 use theme::Palette;
 use timeline::{LoopRange, Timeline, View, MAX_GAIN_DB, MIN_GAIN_DB};
 
@@ -27,11 +32,14 @@ const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 
 fn main() -> iced::Result {
-    let loaded = Palette::load();
+    let settings = Settings::load();
+    let loaded = Palette::load(settings.theme.as_deref());
+    let scale = settings.scale;
     let ui_font = loaded.palette.ui;
     iced::application("Loupe", App::update, App::view)
         .subscription(App::subscription)
         .theme(|app: &App| app.palette.iced())
+        .scale_factor(|app: &App| app.scale)
         .font(include_bytes!("../assets/Inter-Regular.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-Medium.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-SemiBold.ttf").as_slice())
@@ -45,7 +53,7 @@ fn main() -> iced::Result {
             min_size: Some(Size::new(820.0, 420.0)),
             ..window::Settings::default()
         })
-        .run_with(move || App::new(loaded))
+        .run_with(move || App::new(loaded, scale))
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
@@ -81,6 +89,13 @@ pub enum Message {
     BpmEntered,
     SetView(View),
     Resized(Size),
+    OpenSettings,
+    CloseSettings,
+    ScaleDragged(f64),
+    ScaleChosen,
+    ScaleTyped(String),
+    ScaleEntered,
+    ScaleReset,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -109,11 +124,15 @@ struct App {
     loading: usize,
     problem: Option<String>,
     startup_problem: Option<String>,
+    scale: f64,
+    pending_scale: f64,
+    scale_text: String,
+    settings_open: bool,
     cache: Cache,
 }
 
 impl App {
-    fn new(loaded: theme::Loaded) -> (Self, Task<Message>) {
+    fn new(loaded: theme::Loaded, scale: f64) -> (Self, Task<Message>) {
         let silent = std::env::var("LOUPE_AUDIO").as_deref() == Ok("silent");
         let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device });
         let project = Project::new(engine.rate());
@@ -136,8 +155,12 @@ impl App {
             settle: 0,
             playhead: 0,
             view: View { zoom: 100.0, scroll: 0.0, scroll_y: 0.0 },
-            window: START_SIZE,
+            window: Size::new(START_SIZE.width / scale as f32, START_SIZE.height / scale as f32),
             loading: 0,
+            scale,
+            pending_scale: scale,
+            scale_text: format_scale(scale),
+            settings_open: false,
             cache: Cache::new(),
         };
         let task = app.import(std::env::args_os().skip(1).map(PathBuf::from).collect());
@@ -145,6 +168,19 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let belongs_to_the_song = matches!(
+            message,
+            Message::TogglePlay
+                | Message::ToStart
+                | Message::Split
+                | Message::Delete
+                | Message::Undo
+                | Message::Redo
+                | Message::Import
+        );
+        if self.settings_open && belongs_to_the_song {
+            return Task::none();
+        }
         match message {
             Message::TogglePlay => {
                 if self.playing {
@@ -274,13 +310,35 @@ impl App {
                     self.edit(None, Command::SetBpm(bpm));
                 }
                 self.bpm = format_bpm(self.project.bpm);
-                return iced::widget::focus_next();
+                return unfocus();
             }
             Message::SetView(view) => {
                 self.view = view;
                 self.cache.clear();
             }
             Message::Resized(size) => self.window = size,
+            Message::OpenSettings => {
+                self.settings_open = true;
+                self.pending_scale = self.scale;
+                self.scale_text = format_scale(self.scale);
+            }
+            Message::CloseSettings => self.settings_open = false,
+            Message::ScaleDragged(scale) => {
+                self.pending_scale = scale;
+                self.scale_text = format_scale(scale);
+            }
+            Message::ScaleChosen => self.apply_scale(self.pending_scale),
+            Message::ScaleTyped(typed) => {
+                if typed.len() <= 4 && typed.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    self.scale_text = typed;
+                }
+            }
+            Message::ScaleEntered => {
+                let typed = self.scale_text.parse::<f64>().unwrap_or(self.scale);
+                self.apply_scale(typed);
+                return unfocus();
+            }
+            Message::ScaleReset => self.apply_scale(1.0),
         }
         Task::none()
     }
@@ -343,6 +401,19 @@ impl App {
         }
         self.bpm = format_bpm(self.project.bpm);
         self.changed();
+    }
+
+    fn apply_scale(&mut self, wanted: f64) {
+        let scale = settings::clamp_scale(wanted);
+        let resize = (self.scale / scale) as f32;
+        self.window = Size::new(self.window.width * resize, self.window.height * resize);
+        self.scale = scale;
+        self.pending_scale = scale;
+        self.scale_text = format_scale(scale);
+        self.cache.clear();
+        if let Err(why) = settings::save("scale", &format_scale(scale)) {
+            self.problem = Some(format!("Could not save settings: {why}"));
+        }
     }
 
     fn set_loop(&mut self, range: LoopRange) {
@@ -452,7 +523,17 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        column![self.transport(), rule(self.palette), timeline, rule(self.palette), self.inspector()].into()
+        let palette = self.palette;
+        let song = column![self.transport(), rule(palette), timeline, rule(palette), self.inspector()];
+        let over_the_song: Element<'_, Message> = if self.settings_open {
+            opaque(
+                mouse_area(center(opaque(self.settings_sheet())).padding(16).style(move |_| palette.backdrop()))
+                    .on_press(Message::CloseSettings),
+            )
+        } else {
+            Space::new(0, 0).into()
+        };
+        stack![song, over_the_song].into()
     }
 
     fn transport(&self) -> Element<'_, Message> {
@@ -511,6 +592,7 @@ impl App {
                 tempo,
                 horizontal_space(),
                 history,
+                icon_button(palette, "settings", Some(Message::OpenSettings)),
                 import,
             ]
             .spacing(8)
@@ -521,6 +603,51 @@ impl App {
         .align_y(Alignment::Center)
         .style(move |_| palette.bar())
         .into()
+    }
+
+    fn settings_sheet(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let heading = row![
+            text("Settings").size(16).font(palette.semibold),
+            horizontal_space(),
+            icon_button(palette, "x", Some(Message::CloseSettings)),
+        ]
+        .align_y(Alignment::Center);
+
+        let scale = column![
+            text("Interface scale").size(13).font(palette.medium),
+            text("Makes everything in the window larger or smaller. 1 is the normal size.")
+                .size(12)
+                .color(palette.text_dim),
+            row![
+                slider(MIN_SCALE..=MAX_SCALE, self.pending_scale, Message::ScaleDragged)
+                    .step(0.05)
+                    .on_release(Message::ScaleChosen)
+                    .style(move |_, status| palette.gain(status)),
+                text_input("", &self.scale_text)
+                    .on_input(Message::ScaleTyped)
+                    .on_submit(Message::ScaleEntered)
+                    .font(palette.mono)
+                    .size(13)
+                    .padding([5, 8])
+                    .width(60)
+                    .style(move |_, status| palette.field(status)),
+                button(text("Reset").size(12.5).font(palette.medium))
+                    .padding([6, 12])
+                    .style(move |_, status| palette.outlined(status))
+                    .on_press_maybe((self.scale != 1.0).then_some(Message::ScaleReset)),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
+
+        container(column![heading, rule(palette), scale].spacing(16))
+            .padding(20)
+            .width(Length::Fill)
+            .max_width(560)
+            .style(move |_| palette.sheet())
+            .into()
     }
 
     fn inspector(&self) -> Element<'_, Message> {
@@ -593,6 +720,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
     match key {
         keyboard::Key::Named(Named::Space) => Some(Message::TogglePlay),
         keyboard::Key::Named(Named::Home) => Some(Message::ToStart),
+        keyboard::Key::Named(Named::Escape) => Some(Message::CloseSettings),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
@@ -605,6 +733,32 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         }
         _ => None,
     }
+}
+
+fn format_scale(scale: f64) -> String {
+    let text = format!("{scale:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+struct Unfocus;
+
+impl Operation for Unfocus {
+    fn container(
+        &mut self,
+        _id: Option<&Id>,
+        _bounds: iced::Rectangle,
+        operate_on_children: &mut dyn FnMut(&mut dyn Operation<()>),
+    ) {
+        operate_on_children(self);
+    }
+
+    fn focusable(&mut self, state: &mut dyn Focusable, _id: Option<&Id>) {
+        state.unfocus();
+    }
+}
+
+fn unfocus() -> Task<Message> {
+    iced_runtime::task::widget(Unfocus).discard()
 }
 
 fn format_bpm(bpm: f64) -> String {

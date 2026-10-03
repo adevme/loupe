@@ -9,6 +9,7 @@ pub fn glyph(name: &str) -> char {
         "redo-2" => '\u{e2a0}',
         "scissors" => '\u{e14e}',
         "x" => '\u{e1b2}',
+        "settings" => '\u{e154}',
         _ => '?',
     }
 }
