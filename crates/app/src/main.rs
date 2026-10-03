@@ -17,6 +17,7 @@ mod timeline;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,7 @@ use iced::widget::canvas::Cache;
 use iced::advanced::widget::operation::Focusable;
 use iced::advanced::widget::{Id, Operation};
 use iced::widget::{
-    button, canvas, column, container, horizontal_space, row, slider, stack, text, text_input, Space,
+    button, canvas, column, container, horizontal_space, progress_bar, row, slider, stack, text, text_input, Space,
 };
 use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
 use loupe_engine::{
@@ -40,6 +41,7 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+const EXPORT_PROGRESS_STEPS: u32 = 1000;
 const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
 const TOP_BAR_HEIGHT: f32 = 53.0;
@@ -236,6 +238,7 @@ struct App {
     export_range_only: bool,
     export_elsewhere: Option<PathBuf>,
     exporting: bool,
+    export_progress: Arc<AtomicU32>,
     startup_problem: Option<String>,
     scale: f64,
     pending_scale: f64,
@@ -281,6 +284,7 @@ impl App {
             export_range_only: false,
             export_elsewhere: None,
             exporting: false,
+            export_progress: Arc::new(AtomicU32::new(0)),
             startup_problem: no_sound.or(loaded.problem).or(no_folder),
             bpm: format_bpm(project.bpm),
             engine,
@@ -847,7 +851,7 @@ impl App {
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
             _ => None,
         });
-        let ticks = if self.playing || self.settle > 0 {
+        let ticks = if self.playing || self.settle > 0 || self.exporting {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
             Subscription::none()
@@ -1250,15 +1254,23 @@ impl App {
 
     fn status(&self) -> Option<Element<'_, Message>> {
         let palette = self.palette;
-        let line = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
-            text(problem.as_str()).size(12).color(palette.danger)
+        let line: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
+            text(problem.as_str()).size(12).color(palette.danger).into()
         } else if self.exporting {
-            text("Exporting…").size(12).color(palette.text_dim)
+            let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
+            row![
+                text("Exporting").size(12).color(palette.text_dim),
+                progress_bar(0.0..=1.0, done).width(240).height(6),
+                text(format!("{:.0}%", done * 100.0)).size(12).font(palette.mono).color(palette.text_dim),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .into()
         } else if let Some(notice) = &self.notice {
-            text(notice.as_str()).size(12).color(palette.text)
+            text(notice.as_str()).size(12).color(palette.text).into()
         } else if self.loading > 0 {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
-            text(format!("Loading {what}…")).size(12).color(palette.text_dim)
+            text(format!("Loading {what}…")).size(12).color(palette.text_dim).into()
         } else {
             return None;
         };

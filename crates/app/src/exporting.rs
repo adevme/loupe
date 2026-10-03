@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use iced::futures::channel::oneshot;
 use iced::widget::{button, checkbox, column, horizontal_space, row, text};
@@ -104,9 +105,14 @@ impl App {
         self.exporting = true;
         self.problem = None;
         self.notice = None;
+        self.export_progress.store(0, Ordering::Relaxed);
+        let progress = self.export_progress.clone();
         let (done, exported) = oneshot::channel();
         std::thread::spawn(move || {
-            let _ = done.send(export(&project, &plan).map(|()| folder));
+            let report = |fraction: f32| {
+                progress.store((fraction * crate::EXPORT_PROGRESS_STEPS as f32) as u32, Ordering::Relaxed);
+            };
+            let _ = done.send(export(&project, &plan, &report).map(|()| folder));
         });
         Task::perform(
             async move { exported.await.unwrap_or_else(|_| Err("the export stopped unexpectedly".into())) },

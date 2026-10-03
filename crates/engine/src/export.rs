@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use crate::model::{Frames, Project};
+use crate::model::{Frames, Project, Track};
 use crate::render::render;
 
 const BLOCK: usize = 16_384;
@@ -20,7 +20,7 @@ pub struct ExportPlan {
     pub project_file: String,
 }
 
-pub fn export(project: &Project, plan: &ExportPlan) -> Result<(), String> {
+pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> Result<(), String> {
     let (from, to) = plan.range.unwrap_or((0, project.length()));
     if to <= from {
         return Err("there is nothing to export".into());
@@ -28,21 +28,30 @@ pub fn export(project: &Project, plan: &ExportPlan) -> Result<(), String> {
     let failed = |what: &Path, why: io::Error| format!("{}: {why}", what.display());
     fs::create_dir_all(&plan.folder).map_err(|why| failed(&plan.folder, why))?;
 
+    let stems: Vec<&Track> =
+        if plan.split { project.tracks.iter().filter(|track| !track.muted).collect() } else { Vec::new() };
+    let all_frames = (to - from) * (1 + stems.len() as Frames);
+    let mut written = 0;
+    let mut count = |frames: Frames| {
+        written += frames;
+        progress(written as f32 / all_frames as f32);
+    };
+
     let mix = plan.folder.join(format!("{}.wav", plan.name));
-    write_wav(&mix, project, from, to).map_err(|why| failed(&mix, why))?;
+    write_wav(&mix, project, from, to, &mut count).map_err(|why| failed(&mix, why))?;
     let copy = plan.folder.join(format!("{}.lp", plan.name));
     fs::write(&copy, &plan.project_file).map_err(|why| failed(&copy, why))?;
 
     if plan.split {
-        let stems = plan.folder.join(STEMS_FOLDER);
-        fs::create_dir_all(&stems).map_err(|why| failed(&stems, why))?;
+        let stems_folder = plan.folder.join(STEMS_FOLDER);
+        fs::create_dir_all(&stems_folder).map_err(|why| failed(&stems_folder, why))?;
         let mut used: Vec<String> = Vec::new();
-        for track in project.tracks.iter().filter(|track| !track.muted) {
+        for track in stems {
             let mut alone = project.clone();
             alone.tracks.retain(|other| other.id == track.id);
             alone.master = 1.0;
-            let file = stems.join(format!("{}.wav", unused_name(&track.name, &mut used)));
-            write_wav(&file, &alone, from, to).map_err(|why| failed(&file, why))?;
+            let file = stems_folder.join(format!("{}.wav", unused_name(&track.name, &mut used)));
+            write_wav(&file, &alone, from, to, &mut count).map_err(|why| failed(&file, why))?;
         }
     }
     Ok(())
@@ -72,7 +81,13 @@ fn unused_name(wanted: &str, used: &mut Vec<String>) -> String {
     name
 }
 
-fn write_wav(path: &Path, project: &Project, from: Frames, to: Frames) -> io::Result<()> {
+fn write_wav(
+    path: &Path,
+    project: &Project,
+    from: Frames,
+    to: Frames,
+    wrote: &mut dyn FnMut(Frames),
+) -> io::Result<()> {
     let frames = to - from;
     let block_align = CHANNELS * BYTES_PER_SAMPLE;
     let data_bytes = u32::try_from(frames * block_align as u64)
@@ -105,6 +120,7 @@ fn write_wav(path: &Path, project: &Project, from: Frames, to: Frames) -> io::Re
             out.write_all(&frame[1].to_le_bytes())?;
         }
         pos += count as Frames;
+        wrote(count as Frames);
     }
     out.flush()
 }
@@ -156,7 +172,7 @@ mod tests {
             range: None,
             project_file: "saved".into(),
         };
-        export(&project, &plan).unwrap();
+        export(&project, &plan, &|_| {}).unwrap();
         let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         assert_eq!(read.frames, heard(&project));
         assert_eq!(fs::read_to_string(folder.join("Song.lp")).unwrap(), "saved");
@@ -170,7 +186,7 @@ mod tests {
         let folder = scratch("split");
         let plan =
             ExportPlan { folder: folder.clone(), name: "Song".into(), split: true, range: None, project_file: String::new() };
-        export(&project, &plan).unwrap();
+        export(&project, &plan, &|_| {}).unwrap();
         let stems = folder.join(STEMS_FOLDER);
         let vox = Source::load(&stems.join("Lead vox.wav"), 48_000).unwrap();
         let beat = Source::load(&stems.join("Beat.wav"), 48_000).unwrap();
@@ -188,6 +204,21 @@ mod tests {
     }
 
     #[test]
+    fn progress_only_climbs_and_ends_complete() {
+        let project = song();
+        let folder = scratch("progress");
+        let plan =
+            ExportPlan { folder: folder.clone(), name: "Song".into(), split: true, range: None, project_file: String::new() };
+        let seen = std::cell::RefCell::new(Vec::new());
+        export(&project, &plan, &|fraction| seen.borrow_mut().push(fraction)).unwrap();
+        let seen = seen.into_inner();
+        assert!(seen.len() >= 3, "one report per file at least");
+        assert!(seen.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert_eq!(seen.last(), Some(&1.0));
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn a_range_exports_only_that_part() {
         let project = song();
         let folder = scratch("range");
@@ -198,7 +229,7 @@ mod tests {
             range: Some((1500, 2500)),
             project_file: String::new(),
         };
-        export(&project, &plan).unwrap();
+        export(&project, &plan, &|_| {}).unwrap();
         let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         assert_eq!(read.frames, heard(&project)[1500..2500]);
         fs::remove_dir_all(folder).unwrap();
