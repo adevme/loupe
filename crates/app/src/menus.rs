@@ -20,6 +20,7 @@ impl App {
             Overlay::Settings => self.centred(self.settings_sheet()),
             Overlay::ConfirmDiscard(_) => self.centred(self.discard_sheet()),
             Overlay::TemplateName => self.centred(self.template_sheet()),
+            Overlay::SaveName => self.centred(self.save_sheet()),
             Overlay::Clip(clip) => self.centred(self.clip_sheet(*clip)),
             Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
             Overlay::HelpMenu => self.floating(HELP_MENU_AT, self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
@@ -161,6 +162,49 @@ impl App {
         .padding(22)
         .width(Length::Fill)
         .max_width(420)
+        .style(move |_| palette.sheet())
+        .into()
+    }
+
+    fn save_sheet(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let lands_at = match self.named_project_file() {
+            Some(file) => file.display().to_string(),
+            None => "Type a name for the project.".to_string(),
+        };
+        let note: Element<'_, Message> = match &self.entry_problem {
+            Some(problem) => text(problem.as_str()).size(12).color(palette.danger).into(),
+            None => text(lands_at).size(11.5).font(palette.mono).color(palette.text_dim).into(),
+        };
+        let choices = row![
+            button(text("Choose another place…").size(13).font(palette.medium))
+                .padding([7, 14])
+                .style(move |_, status| palette.ghost(status))
+                .on_press(Message::SaveElsewhere),
+            horizontal_space(),
+            button(text("Cancel").size(13).font(palette.medium))
+                .padding([7, 14])
+                .style(move |_, status| palette.outlined(status))
+                .on_press(Message::CloseOverlay),
+            button(text("Save").size(13).font(palette.medium))
+                .padding([7, 18])
+                .style(move |_, status| palette.solid(status))
+                .on_press_maybe(self.named_project_file().map(|_| Message::EntryEntered)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        container(
+            column![
+                text("Save project").size(16).font(palette.semibold),
+                self.entry_field("Project name"),
+                note,
+                choices,
+            ]
+            .spacing(12),
+        )
+        .padding(20)
+        .width(Length::Fill)
+        .max_width(520)
         .style(move |_| palette.sheet())
         .into()
     }

@@ -9,6 +9,24 @@ use loupe_engine::{Project, SavedProject, Source, TrackId};
 use crate::{settings, App, Message, Overlay, Pending, Screen};
 
 pub const EXTENSION: &str = "lp";
+const PROJECT_FOLDERS: [&str; 2] = ["Audio", "Exports"];
+const NOT_IN_FILE_NAMES: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+
+fn make_project_folders(project_file: &Path) {
+    let Some(folder) = project_file.parent() else {
+        return;
+    };
+    let has_its_own_folder = folder.file_name().is_some_and(|name| Some(name) == project_file.file_stem());
+    if has_its_own_folder {
+        for name in PROJECT_FOLDERS {
+            let _ = std::fs::create_dir_all(folder.join(name));
+        }
+    }
+}
+
+fn file_safe(typed: &str) -> String {
+    typed.trim().trim_end_matches('.').chars().filter(|c| !NOT_IN_FILE_NAMES.contains(c)).collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct Opened {
@@ -46,6 +64,43 @@ impl App {
     }
 
     pub(crate) fn save_as(&mut self) -> Task<Message> {
+        self.entry = self.path.as_deref().map(crate::home::stem).unwrap_or_default();
+        self.entry_problem = None;
+        self.overlay = Overlay::SaveName;
+        Task::batch([
+            iced::widget::text_input::focus(crate::menus::ENTRY_ID),
+            iced::widget::text_input::select_all(crate::menus::ENTRY_ID),
+        ])
+    }
+
+    pub(crate) fn save_named(&mut self, typed: &str) {
+        let name = file_safe(typed);
+        if name.is_empty() {
+            return;
+        }
+        let folder = settings::projects_folder(self.folder.as_deref()).join(&name);
+        let file = folder.join(format!("{name}.{EXTENSION}"));
+        if file.exists() && self.path.as_deref() != Some(file.as_path()) {
+            self.entry_problem = Some(format!("A project called {name} already exists."));
+            return;
+        }
+        if let Err(why) = std::fs::create_dir_all(&folder) {
+            self.entry_problem = Some(format!("Could not make {}: {why}", folder.display()));
+            return;
+        }
+        self.overlay = Overlay::None;
+        self.write_to(file);
+    }
+
+    pub(crate) fn named_project_file(&self) -> Option<PathBuf> {
+        let name = file_safe(&self.entry);
+        (!name.is_empty()).then(|| {
+            settings::projects_folder(self.folder.as_deref()).join(&name).join(format!("{name}.{EXTENSION}"))
+        })
+    }
+
+    pub(crate) fn save_elsewhere(&mut self) -> Task<Message> {
+        self.overlay = Overlay::None;
         let suggested = self
             .path
             .as_deref()
@@ -75,6 +130,7 @@ impl App {
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
         match std::fs::write(&path, saved.to_text()) {
             Ok(()) => {
+                make_project_folders(&path);
                 settings::remember(&path);
                 self.path = Some(path);
                 self.dirty = false;
@@ -137,7 +193,7 @@ impl App {
     }
 
     pub(crate) fn save_template(&mut self, typed: &str) {
-        let name: String = typed.trim().chars().filter(|c| !matches!(c, '/' | '\\' | ':')).collect();
+        let name = file_safe(typed);
         if name.is_empty() {
             return;
         }

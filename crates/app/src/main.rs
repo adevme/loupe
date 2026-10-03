@@ -144,6 +144,7 @@ pub enum Message {
     Save,
     SaveAs,
     SavePicked(Option<PathBuf>),
+    SaveElsewhere,
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -177,6 +178,7 @@ pub enum Overlay {
     Colour { track: TrackId, at: Point },
     ConfirmDiscard(Pending),
     TemplateName,
+    SaveName,
     Clip(ClipId),
 }
 
@@ -220,6 +222,7 @@ struct App {
     scale_text: String,
     overlay: Overlay,
     entry: String,
+    entry_problem: Option<String>,
     mixer_open: bool,
     mixer_height: f32,
     folder: Option<PathBuf>,
@@ -270,6 +273,7 @@ impl App {
             scale_text: format_scale(scale),
             overlay: Overlay::None,
             entry: String::new(),
+            entry_problem: None,
             mixer_open: false,
             mixer_height: settings.mixer_height.unwrap_or(mixer::MIXER_HEIGHT).max(mixer::SHORTEST_MIXER),
             resizing_mixer: false,
@@ -497,7 +501,10 @@ impl App {
                     self.overlay = Overlay::Colour { track, at: *at };
                 }
             }
-            Message::EntryTyped(typed) => self.entry = typed,
+            Message::EntryTyped(typed) => {
+                self.entry = typed;
+                self.entry_problem = None;
+            }
             Message::EntryEntered => match self.overlay.clone() {
                 Overlay::Rename { track, .. } => {
                     let name = self.entry.clone();
@@ -513,6 +520,10 @@ impl App {
                 Overlay::TemplateName => {
                     let name = self.entry.clone();
                     self.save_template(&name);
+                }
+                Overlay::SaveName => {
+                    let name = self.entry.clone();
+                    self.save_named(&name);
                 }
                 _ => {}
             },
@@ -697,6 +708,7 @@ impl App {
                     return self.save_as();
                 }
             }
+            Message::SaveElsewhere => return self.save_elsewhere(),
             Message::SavePicked(path) => {
                 if let Some(path) = path {
                     self.write_to(path);
