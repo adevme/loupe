@@ -42,6 +42,8 @@ impl App {
         let starts = format!("bar {}.{}", (beats / 4.0) as u64 + 1, beats as u64 % 4 + 1);
         let previewing = self.preview.as_ref().is_some_and(|preview| preview.clip == id);
         let muted = clip.muted;
+        let file = clip.source.path.clone();
+        let found = !clip.source.frames.is_empty();
 
         let preview = button(
             row![
@@ -63,6 +65,28 @@ impl App {
                     .padding([5, 10]),
             ]
             .align_y(Alignment::Center),
+            row![
+                label("File"),
+                column![
+                    text(file.display().to_string())
+                        .size(11.5)
+                        .font(palette.mono)
+                        .color(palette.text_dim)
+                        .wrapping(text::Wrapping::Glyph),
+                    row![
+                        button(text(if self.copied.is_some() { "Copied" } else { "Copy path" }).size(12).font(palette.medium))
+                            .padding([4, 10])
+                            .style(move |_, status| palette.outlined(status))
+                            .on_press(Message::CopyText(file.display().to_string())),
+                        button(text("Show in folder").size(12).font(palette.medium))
+                            .padding([4, 10])
+                            .style(move |_, status| palette.outlined(status))
+                            .on_press_maybe(found.then(|| Message::ShowInFolder(file.clone()))),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(8),
+            ],
             row![label("Starts"), text(starts).size(13).font(palette.mono)].align_y(Alignment::Center),
             row![
                 label("Length"),
@@ -88,7 +112,7 @@ impl App {
         .spacing(12);
 
         let body = column![fields, rule(palette), preview].spacing(16);
-        self.window(clip.source.name.clone(), body.into(), 440.0)
+        self.window(clip.source.name.clone(), body.into(), 520.0)
     }
 
     pub(crate) fn toggle_preview(&mut self, id: ClipId) {

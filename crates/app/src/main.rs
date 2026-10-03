@@ -41,6 +41,7 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+const COPIED_SHOWN_FOR: Duration = Duration::from_millis(1500);
 const EXPORT_PROGRESS_STEPS: u32 = 1000;
 const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
@@ -130,6 +131,8 @@ pub enum Message {
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
     TogglePreview(ClipId),
+    CopyText(String),
+    ShowInFolder(PathBuf),
     LevelEntered,
     SetTool(Tool),
     Refresh,
@@ -219,6 +222,7 @@ struct App {
     level_press: Option<(mixer::Level, Instant)>,
     editing_level: Option<mixer::Level>,
     preview: Option<clip_window::Preview>,
+    copied: Option<Instant>,
     engine: Engine,
     project: Project,
     undo: Vec<Project>,
@@ -278,6 +282,7 @@ impl App {
             level_press: None,
             editing_level: None,
             preview: None,
+            copied: None,
             problem: None,
             notice: None,
             export_split: false,
@@ -392,6 +397,9 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                if self.copied.is_some_and(|at| at.elapsed() > COPIED_SHOWN_FOR) {
+                    self.copied = None;
+                }
                 self.engine.collect();
                 self.settle = self.settle.saturating_sub(1);
                 let position = self.engine.position();
@@ -541,6 +549,15 @@ impl App {
                 }
             }
             Message::TogglePreview(clip) => self.toggle_preview(clip),
+            Message::CopyText(copied) => {
+                self.copied = Some(Instant::now());
+                return iced::clipboard::write(copied);
+            }
+            Message::ShowInFolder(file) => {
+                if let Err(why) = files::show_in_folder(&file) {
+                    self.problem = Some(format!("Could not open the folder: {why}"));
+                }
+            }
             Message::DeleteClip(clip) => {
                 if self.selected == Some(clip) {
                     self.selected = None;
@@ -855,7 +872,7 @@ impl App {
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
             _ => None,
         });
-        let ticks = if self.playing || self.settle > 0 || self.exporting {
+        let ticks = if self.playing || self.settle > 0 || self.exporting || self.copied.is_some() {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
             Subscription::none()

@@ -276,3 +276,16 @@ fn read_file(path: &Path, rate: u32) -> Result<Opened, String> {
         .collect();
     Ok(Opened { saved, sources, not_found })
 }
+
+pub fn show_in_folder(file: &Path) -> std::io::Result<()> {
+    let mut opener = if cfg!(windows) {
+        let mut explorer = std::process::Command::new("explorer");
+        explorer.arg(format!("/select,{}", file.display()));
+        explorer
+    } else {
+        let mut opener = std::process::Command::new("xdg-open");
+        opener.arg(file.parent().unwrap_or(file));
+        opener
+    };
+    opener.spawn().map(|_| ())
+}
