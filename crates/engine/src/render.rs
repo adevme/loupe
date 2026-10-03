@@ -1,3 +1,4 @@
+use crate::instrument::{Instrument, Note};
 use crate::model::{Clip, ClipId, Frames, Project, Track, TrackId};
 
 pub trait Chains: Send {
@@ -158,7 +159,7 @@ pub fn mix_tracks_metered(
         scratch.sides[index][..len].fill([0.0; 2]);
         let buffer = &mut scratch.buffers[index][..len];
         buffer.fill([0.0; 2]);
-        lay_clips(track, pos + ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
+        lay_clips(track, pos + ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart, project.rate);
     }
     for step in 0..scratch.order.len() {
         let index = scratch.index[step];
@@ -227,6 +228,7 @@ fn lay_clips(
     only: Option<ClipId>,
     mut chains: Option<&mut (dyn Chains + '_)>,
     apart: &mut Vec<[f32; 2]>,
+    rate: u32,
 ) {
     for clip in &track.clips {
         let ahead = match chains.as_deref() {
@@ -246,7 +248,10 @@ fn lay_clips(
         let to = clip.end().min(end);
         let source = &clip.source.frames;
         let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
-        let count = ((to - from) as usize).min(source.len() - source_from);
+        let count = match clip.notes {
+            Some(_) => (to - from) as usize,
+            None => ((to - from) as usize).min(source.len() - source_from),
+        };
         let gain = clip.gain;
         let own = !clip.fx.is_empty() && chains.is_some();
         if own {
@@ -257,8 +262,11 @@ fn lay_clips(
             true => &mut apart[(from - pos) as usize..][..count],
             false => &mut out[(from - pos) as usize..][..count],
         };
-        let audio = &source[source_from..][..count];
         let first = from - clip.start;
+        if let Some(notes) = &clip.notes {
+            play_notes(track.instrument, notes, clip, first, target, rate);
+        } else {
+        let audio = &source[source_from..][..count];
         let fade_in_frames = (clip.fade_in.len.saturating_sub(first) as usize).min(count);
         let steady_end = clip.len - clip.fade_out.len;
         let fade_out_from = (steady_end.saturating_sub(first) as usize).clamp(fade_in_frames, count);
@@ -271,6 +279,7 @@ fn lay_clips(
             clip,
             first + fade_out_from as Frames,
         );
+        }
         if own {
             if let Some(racks) = chains.as_deref_mut() {
                 racks.process_clip(clip.id, apart);
@@ -280,6 +289,30 @@ fn lay_clips(
                 into[1] += from[1];
             }
         }
+    }
+}
+
+fn play_notes(instrument: Instrument, notes: &[Note], clip: &Clip, first: Frames, target: &mut [[f32; 2]], rate: u32) {
+    let tail = instrument.tail(rate);
+    let window_from = clip.offset + first;
+    let window_to = window_from + target.len() as Frames;
+    let content_end = clip.offset + clip.len;
+    for note in notes {
+        if note.start >= window_to {
+            break;
+        }
+        if note.start >= content_end || note.end() + tail <= window_from {
+            continue;
+        }
+        let from = note.start.max(window_from);
+        let to = (note.end() + tail).min(window_to);
+        if to <= from {
+            continue;
+        }
+        let into = (from - window_from) as usize;
+        let span = &mut target[into..(to - window_from) as usize];
+        let level = |i: usize| clip.gain * clip.fade_level(first + (into + i) as Frames);
+        instrument.play(note, from - note.start, span, level, rate);
     }
 }
 
@@ -873,4 +906,106 @@ fn head_start(project: &Project, track: TrackId, racks: &dyn Chains) -> usize {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+    use crate::file::SavedProject;
+    use crate::model::{Command, Outcome};
+
+    const RATE: u32 = 48_000;
+
+    fn song(instrument: Instrument, notes: Vec<Note>) -> (Project, ClipId) {
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Keys".into() }) else { panic!("no track") };
+        project.apply(Command::SetInstrument { track, instrument }).unwrap();
+        let made = Command::AddNotesClip { track, name: "Melody".into(), start: 4_800, len: 48_000, notes };
+        let Ok(Outcome::Clip(clip)) = project.apply(made) else { panic!("no clip") };
+        (project, clip)
+    }
+
+    fn heard(project: &Project, frames: usize) -> Vec<[f32; 2]> {
+        let mut out = vec![[0.0; 2]; frames];
+        render(project, 0, &mut out);
+        out
+    }
+
+    fn loudness(audio: &[[f32; 2]]) -> f32 {
+        audio.iter().map(|f| f[0].abs()).fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn a_note_sounds_where_it_sits_in_its_clip() {
+        let (project, _) = song(Instrument::default(), vec![Note { key: 60, start: 9_600, len: 4_800, velocity: 1.0 }]);
+        let out = heard(&project, 60_000);
+        assert_eq!(loudness(&out[..4_800 + 9_600]), 0.0, "silent before the note");
+        assert!(loudness(&out[14_400..19_200]) > 0.05);
+        assert_eq!(project.length(), 4_800 + 48_000);
+    }
+
+    #[test]
+    fn a_note_clip_plays_the_same_in_any_block_size_and_through_a_split() {
+        let notes = vec![
+            Note { key: 48, start: 0, len: 20_000, velocity: 0.9 },
+            Note { key: 55, start: 10_000, len: 30_000, velocity: 0.7 },
+        ];
+        let (mut project, clip) = song(Instrument::default(), notes);
+        let whole = heard(&project, 60_000);
+        let mut pieces = vec![[0.0f32; 2]; 60_000];
+        for (n, part) in pieces.chunks_mut(1000).enumerate() {
+            render(&project, (n * 1000) as Frames, part);
+        }
+        assert_eq!(whole, pieces);
+        project.apply(Command::SplitClip { clip, at: 25_000 }).unwrap();
+        let split = heard(&project, 60_000);
+        assert!(whole.iter().zip(&split).take(25_000).all(|(a, b)| a == b));
+        let after: f32 = whole[25_000..40_000].iter().zip(&split[25_000..40_000]).map(|(a, b)| (a[0] - b[0]).abs()).fold(0.0, f32::max);
+        assert!(after < 1e-6, "the right piece carries on the held notes, differs by {after}");
+    }
+
+    #[test]
+    fn muting_and_clip_gain_apply_to_notes_too() {
+        let (mut project, clip) = song(Instrument::Drums, vec![Note { key: 36, start: 0, len: 100, velocity: 1.0 }]);
+        let full = loudness(&heard(&project, 20_000));
+        project.apply(Command::SetClipGain { clip, gain: 0.5 }).unwrap();
+        let half = loudness(&heard(&project, 20_000));
+        assert!((half / full - 0.5).abs() < 1e-3);
+        project.apply(Command::SetClipMuted { clip, muted: true }).unwrap();
+        assert_eq!(loudness(&heard(&project, 20_000)), 0.0);
+    }
+
+    #[test]
+    fn notes_and_instruments_survive_saving() {
+        let notes = vec![Note { key: 62, start: 1_000, len: 2_000, velocity: 0.75 }, Note { key: 36, start: 0, len: 10, velocity: 1.0 }];
+        let (mut project, clip) = song(Instrument::Drums, notes);
+        project.apply(Command::TrimClip { clip, offset: 500, len: 9_000 }).unwrap();
+        let text = SavedProject::capture(&project, |_| None).to_text();
+        assert!(text.contains("instrument=drums") && text.contains("notes start=4800") && text.contains("note key=36"));
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], RATE);
+        let clip = back.clips().next().unwrap();
+        assert_eq!(clip.source.name, "Melody");
+        assert_eq!((clip.start, clip.offset, clip.len), (4_800, 500, 9_000));
+        assert_eq!(clip.notes.as_deref().unwrap(), &project.clips().next().unwrap().notes.as_deref().unwrap()[..]);
+        assert_eq!(back.tracks[0].instrument, Instrument::Drums);
+        assert_eq!(heard(&back, 20_000), heard(&project, 20_000));
+        let synth = Instrument::Synth(crate::instrument::Synth { attack: 0.02, ..Default::default() });
+        let (with_synth, _) = song(synth, Vec::new());
+        let text = SavedProject::capture(&with_synth, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], RATE);
+        assert_eq!(back.tracks[0].instrument, synth);
+    }
+
+    #[test]
+    fn notes_are_kept_in_order_and_bad_ones_dropped() {
+        let notes = vec![
+            Note { key: 64, start: 900, len: 10, velocity: 2.0 },
+            Note { key: 60, start: 100, len: 10, velocity: 0.5 },
+            Note { key: 61, start: 50, len: 0, velocity: 0.5 },
+        ];
+        let (project, _) = song(Instrument::default(), notes);
+        let kept = project.clips().next().unwrap().notes.clone().unwrap();
+        assert_eq!(kept.iter().map(|n| n.key).collect::<Vec<_>>(), [60, 64]);
+        assert_eq!(kept[1].velocity, 1.0);
+    }
 }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::instrument::{Instrument, Note};
 use crate::source::Source;
 
 pub type Frames = u64;
@@ -42,11 +43,16 @@ pub struct Clip {
     pub fade_in: Fade,
     pub fade_out: Fade,
     pub fx: Vec<Fx>,
+    pub notes: Option<Arc<Vec<Note>>>,
 }
 
 impl Clip {
     pub fn end(&self) -> Frames {
         self.start + self.len
+    }
+
+    pub fn is_notes(&self) -> bool {
+        self.notes.is_some()
     }
 
     pub fn fade_level(&self, frames_into_clip: Frames) -> f32 {
@@ -91,6 +97,7 @@ pub struct Track {
     pub collapsed: bool,
     pub sends: Vec<Send>,
     pub fx: Vec<Fx>,
+    pub instrument: Instrument,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +149,9 @@ pub enum Command {
     MoveFx { track: TrackId, slot: usize, to: usize },
     BypassFx { track: TrackId, slot: usize, bypassed: bool },
     SetFxState { track: TrackId, slot: usize, state: Vec<u8> },
+    AddNotesClip { track: TrackId, name: String, start: Frames, len: Frames, notes: Vec<Note> },
+    SetNotes { clip: ClipId, notes: Vec<Note> },
+    SetInstrument { track: TrackId, instrument: Instrument },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +201,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -261,8 +271,44 @@ impl Project {
                     fx: Vec::new(),
                     fade_in: Fade::NONE,
                     fade_out: Fade::NONE,
+                    notes: None,
                 });
                 Ok(Outcome::Clip(id))
+            }
+            Command::AddNotesClip { track, name, start, len, notes } => {
+                let t = self.track_index(track)?;
+                if len == 0 {
+                    return Err(CommandError::InvalidValue);
+                }
+                let id = ClipId(self.fresh());
+                self.tracks[t].clips.push(Clip {
+                    id,
+                    source: Arc::new(Source::from_frames(name, Vec::new())),
+                    start,
+                    offset: 0,
+                    len,
+                    gain: 1.0,
+                    muted: false,
+                    fx: Vec::new(),
+                    fade_in: Fade::NONE,
+                    fade_out: Fade::NONE,
+                    notes: Some(Arc::new(tidy(notes))),
+                });
+                Ok(Outcome::Clip(id))
+            }
+            Command::SetNotes { clip, notes } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                if target.notes.is_none() {
+                    return Err(CommandError::InvalidValue);
+                }
+                target.notes = Some(Arc::new(tidy(notes)));
+                Ok(Outcome::Done)
+            }
+            Command::SetInstrument { track, instrument } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].instrument = instrument;
+                Ok(Outcome::Done)
             }
             Command::MoveClip { clip, track, start } => {
                 let to = self.track_index(track)?;
@@ -574,6 +620,15 @@ impl Project {
         }
         Err(CommandError::NoSuchClip)
     }
+}
+
+fn tidy(mut notes: Vec<Note>) -> Vec<Note> {
+    notes.retain(|note| note.len > 0 && note.key <= crate::instrument::HIGHEST_KEY && note.velocity.is_finite());
+    for note in &mut notes {
+        note.velocity = note.velocity.clamp(0.0, 1.0);
+    }
+    notes.sort_by_key(|note| (note.start, note.key));
+    notes
 }
 
 fn valid_gain(gain: f32) -> Result<f32, CommandError> {
