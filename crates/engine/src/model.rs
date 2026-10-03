@@ -123,6 +123,7 @@ pub enum Command {
     SetTrackGain { track: TrackId, gain: f32 },
     SetTrackMuted { track: TrackId, muted: bool },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
+    PasteClip { track: TrackId, clip: Clip },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
     SplitClip { clip: ClipId, at: Frames },
     DeleteClip(ClipId),
@@ -330,6 +331,17 @@ impl Project {
                     fade_out: Fade::NONE,
                     notes: None,
                 });
+                Ok(Outcome::Clip(id))
+            }
+            Command::PasteClip { track, mut clip } => {
+                let t = self.track_index(track)?;
+                if clip.len == 0 {
+                    return Err(CommandError::InvalidValue);
+                }
+                clip.id = ClipId(self.fresh());
+                self.keep(&clip.source);
+                let id = clip.id;
+                self.tracks[t].clips.push(clip);
                 Ok(Outcome::Clip(id))
             }
             Command::AddNotesClip { track, name, start, len, notes } => {
@@ -756,6 +768,25 @@ mod tests {
             panic!("no clip")
         };
         (p, track, clip)
+    }
+
+    #[test]
+    fn a_pasted_clip_is_a_new_copy_with_everything_kept() {
+        let (mut p, track, clip) = project_with_clip(1000);
+        p.apply(Command::TrimClip { clip, offset: 50, len: 500 }).unwrap();
+        p.apply(Command::SetClipGain { clip, gain: 0.5 }).unwrap();
+        let Ok(Outcome::Track(other)) = p.apply(Command::AddTrack { name: "Two".into() }) else { panic!() };
+        let mut copied = p.clip(clip).unwrap().clone();
+        p.apply(Command::DeleteClip(clip)).unwrap();
+        copied.start = 9_000;
+        let Ok(Outcome::Clip(pasted)) = p.apply(Command::PasteClip { track: other, clip: copied.clone() }) else { panic!() };
+        assert_ne!(pasted, clip);
+        let placed = p.clip(pasted).unwrap();
+        assert_eq!((placed.start, placed.offset, placed.len, placed.gain), (9_000, 50, 500, 0.5));
+        assert_eq!(p.track_of(pasted).unwrap().id, other);
+        assert!(p.sources.iter().any(|s| Arc::ptr_eq(s, &placed.source)));
+        copied.len = 0;
+        assert_eq!(p.apply(Command::PasteClip { track, clip: copied }), Err(CommandError::InvalidValue));
     }
 
     #[test]

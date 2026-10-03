@@ -3,6 +3,7 @@
 mod backup;
 mod autosaving;
 mod clip_window;
+mod clipboard;
 mod crash;
 mod exporting;
 mod files;
@@ -227,6 +228,10 @@ pub enum Message {
     UsageToggled(bool),
     CheckUpdatesOnStart(bool),
     ToggleMetronome,
+    CopyClips,
+    CutClips,
+    PasteClips,
+    DuplicateClips,
     CountInChosen(CountIn),
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
@@ -449,6 +454,7 @@ struct App {
     usage: usage::Usage,
     metronome: bool,
     count_in_bars: u32,
+    copied_clips: Option<clipboard::Copied>,
 }
 
 impl App {
@@ -549,6 +555,7 @@ impl App {
             usage: usage_now,
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
+            copied_clips: None,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -628,6 +635,10 @@ impl App {
                 | Message::ToStart
                 | Message::Split
                 | Message::Delete
+                | Message::CopyClips
+                | Message::CutClips
+                | Message::PasteClips
+                | Message::DuplicateClips
                 | Message::Undo
                 | Message::Redo
                 | Message::Import
@@ -765,6 +776,12 @@ impl App {
                 self.stop_writing();
             }
             Message::Split => self.split(),
+            Message::CopyClips => {
+                self.copy_clips();
+            }
+            Message::CutClips => self.cut_clips(),
+            Message::PasteClips => self.paste_clips(),
+            Message::DuplicateClips => self.duplicate_clips(),
             Message::Delete => {
                 let chosen: Vec<ClipId> = self.selection.iter().copied().collect();
                 if !chosen.is_empty() {
@@ -2362,6 +2379,10 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
                 ("m", true, _) => Some(Message::ToggleMetronome),
+                ("c", true, _) => Some(Message::CopyClips),
+                ("x", true, _) => Some(Message::CutClips),
+                ("v", true, _) => Some(Message::PasteClips),
+                ("d", true, _) => Some(Message::DuplicateClips),
                 ("s", true, false) => Some(Message::Save),
                 ("s", true, true) => Some(Message::SaveAs),
                 ("o", true, _) => Some(Message::OpenProject),
