@@ -27,6 +27,7 @@ pub struct Settings {
     pub metronome: bool,
     pub count_in_bars: u32,
     pub snap: bool,
+    pub audio: loupe_engine::Device,
 }
 
 impl Settings {
@@ -49,6 +50,12 @@ impl Settings {
             metronome: value_of("metronome") == Some("on"),
             count_in_bars: value_of("count_in").and_then(count_in_from).unwrap_or(0),
             snap: value_of("snap") != Some("off"),
+            audio: loupe_engine::Device {
+                driver: value_of("audio_driver").map(str::to_string),
+                output: value_of("audio_output").map(str::to_string),
+                rate: value_of("audio_rate").and_then(|text| text.parse().ok()).filter(|rate| loupe_engine::RATES.contains(rate)),
+                buffer: value_of("audio_buffer").and_then(|text| text.parse().ok()).filter(|size| loupe_engine::BUFFERS.contains(size)),
+            },
         }
     }
 }

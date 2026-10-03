@@ -90,7 +90,7 @@ pub struct Input {
 }
 
 pub fn input_devices() -> Vec<String> {
-    cpal::default_host()
+    crate::devices::host()
         .input_devices()
         .map(|devices| devices.filter_map(|device| device.name().ok()).collect())
         .unwrap_or_default()
@@ -299,7 +299,7 @@ fn practice_sample(frame: u64) -> f32 {
 }
 
 fn open_device(choice: &InputChoice, tap: Tap) -> Result<(cpal::Stream, u32), String> {
-    let host = cpal::default_host();
+    let host = crate::devices::host();
     let device = match choice {
         InputChoice::Named(wanted) => host
             .input_devices()

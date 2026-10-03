@@ -3,11 +3,12 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::clock;
+use crate::devices::{self, Device, Running};
 use crate::instrument::Note;
 use crate::midi_in::{KeyEvent, KeySender};
 use crate::model::{ClipId, Frames, Project, TrackId};
@@ -19,10 +20,11 @@ const QUEUE: usize = 256;
 const SILENT_RATE: u32 = 48_000;
 pub const METERS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    Device,
+    Device(Device),
     Silent,
+    SilentAt(u32),
 }
 
 enum Msg {
@@ -333,6 +335,7 @@ impl Rt {
 pub struct Engine {
     remote: Remote,
     rate: u32,
+    running: Option<Running>,
     output_error: Option<String>,
     quit: Arc<AtomicBool>,
     host: Option<thread::JoinHandle<()>>,
@@ -341,12 +344,16 @@ pub struct Engine {
 struct Ready {
     remote: Remote,
     rate: u32,
+    running: Option<Running>,
     error: Option<String>,
 }
 
 impl Engine {
     pub fn start(output: Output) -> Self {
         clock::start();
+        if let Output::Device(choice) = &output {
+            devices::use_driver(choice.driver.as_deref());
+        }
         let quit = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = mpsc::channel();
         let host = thread::Builder::new()
@@ -360,6 +367,7 @@ impl Engine {
         Self {
             remote: ready.remote,
             rate: ready.rate,
+            running: ready.running,
             output_error: ready.error,
             quit,
             host: Some(host),
@@ -368,6 +376,10 @@ impl Engine {
 
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    pub fn running(&self) -> Option<&Running> {
+        self.running.as_ref()
     }
 
     pub fn output_error(&self) -> Option<&str> {
@@ -555,10 +567,10 @@ fn add_clicks(out: &mut [[f32; 2]], from: f64, beat: f64, rate: u32) {
 
 fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
     let mut error = None;
-    if output == Output::Device {
-        match open_device() {
-            Ok((stream, remote, rate)) => {
-                let _ = ready.send(Ready { remote, rate, error: None });
+    if let Output::Device(choice) = &output {
+        match open_device(choice) {
+            Ok((stream, remote, running, warning)) => {
+                let _ = ready.send(Ready { remote, rate: running.rate, running: Some(running), error: warning });
                 while !quit.load(Ordering::Relaxed) {
                     thread::park_timeout(Duration::from_millis(200));
                 }
@@ -569,9 +581,13 @@ fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
         }
     }
 
-    let (mut rt, remote) = pair(SILENT_RATE);
-    let _ = ready.send(Ready { remote, rate: SILENT_RATE, error });
-    let block = SILENT_RATE as usize / 100;
+    let rate = match output {
+        Output::SilentAt(rate) => rate,
+        _ => SILENT_RATE,
+    };
+    let (mut rt, remote) = pair(rate);
+    let _ = ready.send(Ready { remote, rate, running: None, error });
+    let block = rate as usize / 100;
     let mut next = Instant::now();
     while !quit.load(Ordering::Relaxed) {
         rt.process(block);
@@ -584,23 +600,65 @@ fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
     }
 }
 
-fn open_device() -> Result<(cpal::Stream, Remote, u32), String> {
-    let device = cpal::default_host().default_output_device().ok_or("no sound output found")?;
-    let supported = device.default_output_config().map_err(|e| e.to_string())?;
+fn open_device(choice: &Device) -> Result<(cpal::Stream, Remote, Running, Option<String>), String> {
+    let host = devices::host_named(choice.driver.as_deref());
+    let device = devices::output_named(&host, choice.output.as_deref()).ok_or("no sound output found")?;
+    let default = device.default_output_config().map_err(|e| e.to_string())?;
+    let supported = match choice.rate {
+        Some(rate) if rate != default.sample_rate().0 => device
+            .supported_output_configs()
+            .ok()
+            .and_then(|configs| {
+                let fits: Vec<_> = configs.filter(|c| (c.min_sample_rate().0..=c.max_sample_rate().0).contains(&rate)).collect();
+                let best = fits.iter().find(|c| c.channels() == default.channels() && c.sample_format() == default.sample_format()).or_else(|| fits.iter().find(|c| c.channels() >= 2)).or(fits.first());
+                best.cloned()
+            })
+            .map(|c| c.with_sample_rate(cpal::SampleRate(rate)))
+            .unwrap_or(default),
+        _ => default,
+    };
     let format = supported.sample_format();
-    let config: cpal::StreamConfig = supported.into();
-    let rate = config.sample_rate.0;
-    let (rt, remote) = pair(rate);
+    let mut config: cpal::StreamConfig = supported.into();
+    let mut warning = None;
+    if let Some(size) = choice.buffer {
+        config.buffer_size = cpal::BufferSize::Fixed(size);
+    }
+    let stream = match start_stream(&device, &config, format) {
+        Err(_) if choice.buffer.is_some() => {
+            config.buffer_size = cpal::BufferSize::Default;
+            warning = Some("the sound output refused that buffer size, so it uses its own".to_string());
+            start_stream(&device, &config, format)
+        }
+        other => other,
+    };
+    let (stream, remote) = stream?;
+    if choice.rate.is_some_and(|rate| rate != config.sample_rate.0) {
+        warning = Some(format!("the sound output cannot run at that sample rate, so it runs at {} Hz", config.sample_rate.0));
+    }
+    let running = Running {
+        driver: host.id().name().to_string(),
+        output: device.name().unwrap_or_default(),
+        rate: config.sample_rate.0,
+        buffer: match config.buffer_size {
+            cpal::BufferSize::Fixed(size) => Some(size),
+            cpal::BufferSize::Default => None,
+        },
+    };
+    Ok((stream, remote, running, warning))
+}
+
+fn start_stream(device: &cpal::Device, config: &cpal::StreamConfig, format: cpal::SampleFormat) -> Result<(cpal::Stream, Remote), String> {
+    let (rt, remote) = pair(config.sample_rate.0);
     let stream = match format {
-        cpal::SampleFormat::F32 => stream::<f32>(&device, &config, rt),
-        cpal::SampleFormat::I16 => stream::<i16>(&device, &config, rt),
-        cpal::SampleFormat::U16 => stream::<u16>(&device, &config, rt),
-        cpal::SampleFormat::I32 => stream::<i32>(&device, &config, rt),
+        cpal::SampleFormat::F32 => stream::<f32>(device, config, rt),
+        cpal::SampleFormat::I16 => stream::<i16>(device, config, rt),
+        cpal::SampleFormat::U16 => stream::<u16>(device, config, rt),
+        cpal::SampleFormat::I32 => stream::<i32>(device, config, rt),
         other => return Err(format!("the sound output uses a format Loupe cannot write ({other})")),
     }
     .map_err(|e| e.to_string())?;
     stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, remote, rate))
+    Ok((stream, remote))
 }
 
 fn stream<T: SizedSample + FromSample<f32>>(
