@@ -212,7 +212,7 @@ impl App {
         self.undo.clear();
         self.redo.clear();
         self.run = None;
-        self.selected = None;
+        self.choose(None);
         self.armed.clear();
         self.listen_if_armed();
         self.bpm = crate::format_bpm(self.project.bpm);

@@ -92,6 +92,7 @@ pub struct Timeline<'a> {
     pub view: View,
     pub heights: &'a HashMap<TrackId, f32>,
     pub selected: Option<ClipId>,
+    pub selection: &'a HashSet<ClipId>,
     pub playhead: Frames,
     pub loop_range: LoopRange,
     pub tool: Tool,
@@ -115,6 +116,7 @@ enum Drag {
     Resize { track: TrackId, top: f32 },
     Scroll { grab_x: f32, span: f64 },
     Slice { from: Point, to: Point },
+    Marquee { from: Point, to: Point },
     Trim { clip: ClipId, edge: Edge },
     Paint { muted: Option<bool>, touched: Vec<ClipId> },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
@@ -205,6 +207,26 @@ impl Timeline<'_> {
             None if y < LANES_TOP - self.view.scroll_y => 0,
             None => self.project.tracks.len().saturating_sub(1),
         }
+    }
+
+    fn clips_between(&self, from: Point, to: Point) -> Vec<ClipId> {
+        let (left, right) = (from.x.min(to.x), from.x.max(to.x));
+        let (top, bottom) = (from.y.min(to.y), from.y.max(to.y));
+        let mut inside = Vec::new();
+        for (i, track) in self.project.tracks.iter().enumerate() {
+            let lane_top = self.track_top(i) + CLIP_PAD;
+            let lane_bottom = self.track_top(i) + self.height_of(track) - CLIP_PAD;
+            if lane_bottom < top || lane_top > bottom {
+                continue;
+            }
+            for clip in &track.clips {
+                let touches = self.x_of(clip.start as f64) <= right && self.x_of(clip.end() as f64) >= left;
+                if touches {
+                    inside.push(clip.id);
+                }
+            }
+        }
+        inside
     }
 
     fn slice_cuts(&self, from: Point, to: Point, free: bool) -> Vec<(usize, Frames)> {
@@ -519,6 +541,18 @@ impl canvas::Program<Message> for Timeline<'_> {
                 let Some(p) = cursor.position_in(bounds) else {
                     return (Ignored, None);
                 };
+                if self.tool == Tool::Pencil && state.modifiers.command() {
+                    match self.hit(p) {
+                        Hit::Clip(clip) | Hit::Edge(clip, _) | Hit::Grip(clip, _) => {
+                            return (Captured, Some(Message::ToggleSelect(clip.id)));
+                        }
+                        Hit::Lane => {
+                            state.drag = Some(Drag::Marquee { from: p, to: p });
+                            return (Captured, Some(Message::SelectMany(Vec::new())));
+                        }
+                        _ => {}
+                    }
+                }
                 if let (Tool::Pencil, Hit::Clip(clip) | Hit::Edge(clip, _)) = (self.tool, self.hit(p)) {
                     let pressed_twice = state.last_press.is_some_and(|(last, at)| last == clip.id && at.elapsed() < DOUBLE_CLICK);
                     state.last_press = (!pressed_twice).then(|| (clip.id, Instant::now()));
@@ -590,7 +624,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             origin: p,
                             moving: false,
                         });
-                        Some(Message::Select(Some(clip.id)))
+                        (!self.selection.contains(&clip.id)).then_some(Message::Select(Some(clip.id)))
                     }
                     (_, Hit::Lane) => Some(Message::LaneClicked(self.snap(self.frames_at(p.x), free))),
                     (_, Hit::Nothing) => None,
@@ -683,6 +717,10 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let changed = start != clip.start || len != clip.len;
                         (Captured, changed.then_some(Message::TrimClip { clip: clip.id, start, offset, len }))
                     }
+                    Drag::Marquee { from, to } => {
+                        *to = p;
+                        (Captured, Some(Message::SelectMany(self.clips_between(*from, p))))
+                    }
                     Drag::Slice { to, .. } => {
                         *to = p;
                         (Captured, Some(Message::Refresh))
@@ -719,6 +757,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. } | Drag::Trim { .. }) => {
                     (Captured, Some(Message::DragEnd))
                 }
+                Some(Drag::Marquee { .. }) => (Captured, Some(Message::Refresh)),
                 Some(Drag::Slice { from, to }) => {
                     let cuts = self
                         .slice_cuts(from, to, free)
@@ -821,6 +860,15 @@ impl canvas::Program<Message> for Timeline<'_> {
                     );
                 }
             }
+        }
+        if let Some(Drag::Marquee { from, to }) = &state.drag {
+            let corner = Point::new(from.x.min(to.x).max(HEADER_W), from.y.min(to.y).max(LANES_TOP));
+            let size = Size::new((from.x.max(to.x) - corner.x).max(0.0), (from.y.max(to.y) - corner.y).max(0.0));
+            overlay.fill_rectangle(corner, size, theme::alpha(p.accent, 0.08));
+            overlay.stroke(
+                &Path::rectangle(corner, size),
+                Stroke::default().with_color(theme::alpha(p.accent, 0.6)).with_width(1.0),
+            );
         }
         let free = state.modifiers.alt() || state.modifiers.shift();
         let slicing = match (&state.drag, self.tool, cursor.position_in(bounds)) {
@@ -986,7 +1034,7 @@ impl Timeline<'_> {
         if right < 0.0 || left > size.width {
             return;
         }
-        let selected = self.selected == Some(clip.id);
+        let selected = self.selection.contains(&clip.id);
         let top = lane_top + CLIP_PAD;
         let height = lane_height - CLIP_PAD * 2.0;
         let shown_left = left.max(-8.0);

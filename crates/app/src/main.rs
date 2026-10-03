@@ -11,6 +11,7 @@ mod menus;
 mod mixer;
 mod pointer;
 mod pool;
+mod selection;
 mod settings;
 mod spinner;
 mod theme;
@@ -95,6 +96,9 @@ pub enum Message {
     Dropped(PathBuf),
     Loaded(PathBuf, Result<Arc<Source>, String>),
     Select(Option<ClipId>),
+    ToggleSelect(ClipId),
+    SelectMany(Vec<ClipId>),
+    SelectAll,
     LaneClicked(Frames),
     RulerClicked(Frames),
     SetLoop(LoopRange),
@@ -243,6 +247,7 @@ struct App {
     redo: Vec<Project>,
     run: Option<Run>,
     selected: Option<ClipId>,
+    selection: HashSet<ClipId>,
     playing: bool,
     settle: u8,
     playhead: Frames,
@@ -319,6 +324,7 @@ impl App {
             redo: Vec::new(),
             run: None,
             selected: None,
+            selection: HashSet::new(),
             playing: false,
             settle: 0,
             playhead: 0,
@@ -463,12 +469,21 @@ impl App {
                     }
                 }
             }
-            Message::Select(clip) => {
-                self.selected = clip;
-                self.cache.clear();
+            Message::Select(clip) => self.choose(clip),
+            Message::ToggleSelect(clip) => {
+                let mut chosen = self.selection.clone();
+                if !chosen.remove(&clip) {
+                    chosen.insert(clip);
+                }
+                self.choose(chosen);
+            }
+            Message::SelectMany(clips) => self.choose(clips),
+            Message::SelectAll => {
+                let every: Vec<ClipId> = self.project.clips().map(|clip| clip.id).collect();
+                self.choose(every);
             }
             Message::LaneClicked(at) => {
-                self.selected = None;
+                self.choose(None);
                 self.seek(at);
             }
             Message::RulerClicked(at) => {
@@ -480,14 +495,13 @@ impl App {
                 self.heights.insert(track, height);
                 self.cache.clear();
             }
-            Message::MoveClip { clip, track, start } => {
-                self.edit(Some(Run::Move(clip)), Command::MoveClip { clip, track, start });
-            }
+            Message::MoveClip { clip, track, start } => self.move_clips(clip, track, start),
             Message::DragEnd => self.run = None,
             Message::Split => self.split(),
             Message::Delete => {
-                if let Some(clip) = self.selected.take() {
-                    self.edit(None, Command::DeleteClip(clip));
+                let chosen: Vec<ClipId> = self.selection.iter().copied().collect();
+                if !chosen.is_empty() {
+                    self.delete_clips(chosen, None);
                 }
             }
             Message::Undo => {
@@ -516,17 +530,11 @@ impl App {
                 self.edit(None, Command::AddTrack { name });
             }
             Message::RemoveTrack(track) => {
-                let holds_selection = self
-                    .selected
-                    .and_then(|clip| self.project.track_of(clip))
-                    .is_some_and(|t| t.id == track);
-                if holds_selection {
-                    self.selected = None;
-                }
                 self.heights.remove(&track);
                 self.armed.remove(&track);
                 self.listen_if_armed();
                 self.edit(None, Command::RemoveTrack(track));
+                self.forget_gone_clips();
             }
             Message::ToggleArm(track) => {
                 if !self.armed.remove(&track) {
@@ -577,14 +585,16 @@ impl App {
                 self.scale_text = format_scale(self.scale);
             }
             Message::CloseOverlay => {
+                if self.overlay == Overlay::None {
+                    self.choose(None);
+                }
                 self.overlay = Overlay::None;
                 self.editing_level = None;
                 self.stop_preview();
             }
             Message::OpenClip(clip) => {
-                self.selected = Some(clip);
+                self.choose([clip]);
                 self.overlay = Overlay::Clip(clip);
-                self.cache.clear();
             }
             Message::ClipToTrack(clip, track) => {
                 if let Some(start) = self.project.clip(clip).map(|clip| clip.start) {
@@ -606,12 +616,7 @@ impl App {
                     self.problem = Some(format!("Could not open the folder: {why}"));
                 }
             }
-            Message::DeleteClip(clip) => {
-                if self.selected == Some(clip) {
-                    self.selected = None;
-                }
-                self.edit(None, Command::DeleteClip(clip));
-            }
+            Message::DeleteClip(clip) => self.delete_clips(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
@@ -691,15 +696,8 @@ impl App {
                 self.cache.clear();
             }
             Message::Refresh => {}
-            Message::PaintMute { clip, muted } => {
-                self.edit(Some(Run::Paint), Command::SetClipMuted { clip, muted });
-            }
-            Message::PaintDelete(clip) => {
-                if self.selected == Some(clip) {
-                    self.selected = None;
-                }
-                self.edit(Some(Run::Paint), Command::DeleteClip(clip));
-            }
+            Message::PaintMute { clip, muted } => self.mute_clips(self.affected_by(clip), muted),
+            Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
             Message::TrimClip { clip, start, offset, len } => {
                 if let Some(track) = self.project.track_of(clip).map(|track| track.id) {
                     self.transact(Some(Run::Trim(clip)), |project| {
@@ -984,9 +982,7 @@ impl App {
     fn restored(&mut self) {
         self.run = None;
         self.dirty = true;
-        if self.selected.is_some_and(|clip| self.project.clip(clip).is_none()) {
-            self.selected = None;
-        }
+        self.forget_gone_clips();
         self.bpm = format_bpm(self.project.bpm);
         self.changed();
     }
@@ -1102,7 +1098,7 @@ impl App {
             project.apply(Command::AddClip { track, source, start })
         });
         if let Some(Outcome::Clip(clip)) = placed {
-            self.selected = Some(clip);
+            self.choose([clip]);
             if first {
                 self.show_whole_song();
             }
@@ -1132,8 +1128,7 @@ impl App {
             Ok(last)
         });
         if let (true, Some(Outcome::Clip(right))) = (reselect, made) {
-            self.selected = Some(right);
-            self.cache.clear();
+            self.choose([right]);
         }
     }
 
@@ -1157,6 +1152,7 @@ impl App {
             view: self.view,
             heights: &self.heights,
             selected: self.selected,
+            selection: &self.selection,
             playhead: self.playhead,
             loop_range: self.loop_range,
             tool: self.tool,
@@ -1431,6 +1427,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("s", true, true) => Some(Message::SaveAs),
                 ("o", true, _) => Some(Message::OpenProject),
                 ("w", true, _) => Some(Message::GoHome),
+                ("a", true, _) => Some(Message::SelectAll),
                 ("e", true, _) => Some(Message::OpenExport),
                 ("z", true, false) => Some(Message::Undo),
                 ("z", true, true) | ("y", true, _) => Some(Message::Redo),
