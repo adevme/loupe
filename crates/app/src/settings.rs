@@ -8,6 +8,7 @@ pub const AUTOSAVE_MINUTES: std::ops::RangeInclusive<u32> = 0..=60;
 pub const DEFAULT_AUTOSAVE_MINUTES: u32 = 2;
 pub const BACKUPS_KEPT: std::ops::RangeInclusive<u32> = 1..=100;
 pub const DEFAULT_BACKUPS_KEPT: u32 = 20;
+pub const COUNT_IN_BARS: [u32; 4] = [0, 1, 2, 4];
 const LONGEST_NUMBER: usize = 3;
 
 pub struct Settings {
@@ -23,6 +24,8 @@ pub struct Settings {
     pub usage: Option<bool>,
     pub install_id: Option<String>,
     pub last_version: Option<String>,
+    pub metronome: bool,
+    pub count_in_bars: u32,
 }
 
 impl Settings {
@@ -42,6 +45,8 @@ impl Settings {
             usage: value_of("usage").map(|value| value != "off"),
             install_id: value_of("install_id").map(str::to_string),
             last_version: value_of("last_version").map(str::to_string),
+            metronome: value_of("metronome") == Some("on"),
+            count_in_bars: value_of("count_in").and_then(count_in_from).unwrap_or(0),
         }
     }
 }
@@ -66,6 +71,11 @@ pub fn autosave_minutes_from(text: &str) -> Result<u32, String> {
 
 pub fn backups_kept_from(text: &str) -> Result<u32, String> {
     whole_in(text, &BACKUPS_KEPT).ok_or_else(|| format!("Keep from {} to {} backups.", BACKUPS_KEPT.start(), BACKUPS_KEPT.end()))
+}
+
+pub fn count_in_from(text: &str) -> Option<u32> {
+    let text = text.trim();
+    (text.len() == 1 && text.chars().all(|c| c.is_ascii_digit())).then(|| text.parse::<u32>().ok()).flatten().filter(|bars| COUNT_IN_BARS.contains(bars))
 }
 
 pub const HOME_FOLDER: &str = "Loupe";
@@ -213,6 +223,16 @@ pub fn templates(chosen: Option<&Path>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_in_is_one_of_the_offered_lengths() {
+        for (text, bars) in [("0", 0), ("1", 1), (" 2 ", 2), ("4", 4)] {
+            assert_eq!(count_in_from(text), Some(bars));
+        }
+        for bad in ["3", "8", "+1", "-1", "", "1.0", "two", "04"] {
+            assert_eq!(count_in_from(bad), None, "{bad} was accepted");
+        }
+    }
 
     #[test]
     fn autosave_settings_only_take_sane_whole_numbers() {

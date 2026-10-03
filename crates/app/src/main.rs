@@ -109,7 +109,7 @@ const HOME_SIZE: Size = Size::new(940.0, 600.0);
 pub enum Message {
     TogglePlay,
     ToggleRecord,
-    TakeReady { tracks: Vec<TrackId>, start: i64, warning: Option<String>, result: Result<Arc<Source>, String> },
+    TakeReady { tracks: Vec<TrackId>, start: i64, keep_from: i64, warning: Option<String>, result: Result<Arc<Source>, String> },
     ToStart,
     Seek(Frames),
     Tick,
@@ -226,6 +226,8 @@ pub enum Message {
     UpdateLater,
     UsageToggled(bool),
     CheckUpdatesOnStart(bool),
+    ToggleMetronome,
+    CountInChosen(CountIn),
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
     TogglePreview(ClipId),
@@ -445,6 +447,8 @@ struct App {
     check_updates: bool,
     update_dismissed: bool,
     usage: usage::Usage,
+    metronome: bool,
+    count_in_bars: u32,
 }
 
 impl App {
@@ -454,6 +458,7 @@ impl App {
         let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device });
         let project = Project::new(engine.rate());
         engine.set_project(&project);
+        engine.set_metronome(settings.metronome);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
         let (usage_now, first_usage) = usage::Usage::begin(&settings);
@@ -542,6 +547,8 @@ impl App {
             check_updates: settings.check_updates,
             update_dismissed: false,
             usage: usage_now,
+            metronome: settings.metronome,
+            count_in_bars: settings.count_in_bars,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -646,8 +653,8 @@ impl App {
         }
         match message {
             Message::ToggleRecord => return self.toggle_recording(),
-            Message::TakeReady { tracks, start, warning, result } => {
-                self.place_take(tracks, start, result);
+            Message::TakeReady { tracks, start, keep_from, warning, result } => {
+                self.place_take(tracks, start, keep_from, result);
                 if warning.is_some() {
                     self.problem = warning;
                 }
@@ -1483,6 +1490,19 @@ impl App {
                 Err(why) => self.update_state = versions::UpdateState::Failed(format!("Could not download the update: {why}.")),
             },
             Message::SettingsTab(tab) => self.settings_tab = tab,
+            Message::ToggleMetronome => {
+                self.metronome = !self.metronome;
+                self.engine.set_metronome(self.metronome);
+                if let Err(why) = settings::save("metronome", if self.metronome { "on" } else { "off" }) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
+            Message::CountInChosen(CountIn(bars)) => {
+                self.count_in_bars = bars;
+                if let Err(why) = settings::save("count_in", &bars.to_string()) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
             Message::ThemeChosen(name) => return self.use_theme(name),
             Message::ThemeFontLoaded => self.cache.clear(),
             Message::ShowThemes => self.show_themes_folder(),
@@ -2090,6 +2110,13 @@ impl App {
             .style(move |_, status| palette.record(recording, status))
             .on_press(Message::ToggleRecord);
 
+        let metronome_on = self.metronome;
+        let metronome = button(container(icon("metronome", 15.0)).center(30))
+            .padding(0)
+            .style(move |_, status| palette.toggled(metronome_on, status))
+            .on_press(Message::ToggleMetronome);
+        let record = row![record, metronome].spacing(8).align_y(Alignment::Center);
+
         let tempo = text_input("", &self.bpm)
             .on_input(Message::BpmTyped)
             .on_submit(Message::BpmEntered)
@@ -2248,6 +2275,9 @@ impl App {
             pick_list(inputs, Some(current_input), Message::InputChosen).text_size(13).padding([5, 10]).width(Length::Fill),
             text("MIDI keyboards").size(13).font(palette.medium),
             text(self.keyboards_found()).size(12).color(palette.text_dim),
+            text("Count in").size(13).font(palette.medium),
+            text("Bars of clicks before recording starts, when Loupe is stopped. The take begins where the playhead was.").size(12).color(palette.text_dim),
+            pick_list(COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).text_size(13).padding([5, 10]).width(160),
         ]
         .spacing(8);
 
@@ -2331,6 +2361,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("c", false, _) => Some(Message::SetTool(Tool::Razor)),
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
+                ("m", true, _) => Some(Message::ToggleMetronome),
                 ("s", true, false) => Some(Message::Save),
                 ("s", true, true) => Some(Message::SaveAs),
                 ("o", true, _) => Some(Message::OpenProject),
@@ -2345,6 +2376,21 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
             }
         }
         _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountIn(u32);
+
+const COUNT_INS: [CountIn; 4] = [CountIn(settings::COUNT_IN_BARS[0]), CountIn(settings::COUNT_IN_BARS[1]), CountIn(settings::COUNT_IN_BARS[2]), CountIn(settings::COUNT_IN_BARS[3])];
+
+impl std::fmt::Display for CountIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            0 => write!(f, "Off"),
+            1 => write!(f, "1 bar"),
+            bars => write!(f, "{bars} bars"),
+        }
     }
 }
 
