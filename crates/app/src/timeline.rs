@@ -219,6 +219,20 @@ impl Timeline<'_> {
         LANES_TOP + tracks + ADD_ROW_H
     }
 
+    fn colour_of(&self, index: usize) -> Color {
+        match self.project.tracks[index].colour {
+            Some([r, g, b]) => Color::from_rgb8(r, g, b),
+            None => self.palette.track(self.project.tracks[index].id.0.saturating_sub(1) as usize),
+        }
+    }
+
+    fn track_header_at(&self, p: Point) -> Option<&Track> {
+        if p.x >= HEADER_W {
+            return None;
+        }
+        self.track_at(p.y).map(|i| &self.project.tracks[i])
+    }
+
     fn lanes_width(&self) -> f32 {
         (self.width - HEADER_W).max(1.0)
     }
@@ -409,7 +423,10 @@ impl canvas::Program<Message> for Timeline<'_> {
                 };
                 let message = match self.hit(p) {
                     Hit::Clip(clip) | Hit::Grip(clip, _) => Some(Message::DeleteClip(clip.id)),
-                    _ => None,
+                    _ => self.track_header_at(p).map(|track| Message::TrackMenu {
+                        track: track.id,
+                        at: Point::new(bounds.x + p.x, bounds.y + p.y),
+                    }),
                 };
                 (Captured, message)
             }
@@ -746,7 +763,7 @@ impl Timeline<'_> {
                 continue;
             }
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
-            let colour = if track.muted { p.text_faint } else { p.track(i) };
+            let colour = if track.muted { p.text_faint } else { self.colour_of(i) };
             for clip in &track.clips {
                 self.draw_clip(frame, size, clip, top, height, colour);
             }
@@ -921,7 +938,8 @@ impl Timeline<'_> {
             frame.stroke(&curve, Stroke::default().with_color(curve_colour).with_width(1.25));
         }
         let selected_body = theme::mix(p.background, colour, 0.26);
-        for (grip, at) in self.grips(clip) {
+        let on_screen = |at: &Point| at.x >= HEADER_W - HANDLE_REACH && at.x <= self.width + HANDLE_REACH;
+        for (grip, at) in self.grips(clip).into_iter().filter(|(_, at)| on_screen(at)) {
             let at = in_lanes(at);
             match grip {
                 Grip::FadeIn | Grip::FadeOut => {
@@ -970,7 +988,7 @@ impl Timeline<'_> {
                 frame.fill_rectangle(
                     Point::new(from, y),
                     Size::new((to - from).max(1.0), (row_step - 1.0).max(1.0)),
-                    theme::mix(p.background, p.track(i), 0.7),
+                    theme::mix(p.background, self.colour_of(i), 0.7),
                 );
             }
         }
@@ -1038,7 +1056,7 @@ impl Timeline<'_> {
             if top > size.height || top + height < 0.0 {
                 continue;
             }
-            frame.fill_rectangle(Point::new(0.0, top), Size::new(3.0, height - 1.0), p.track(i));
+            frame.fill_rectangle(Point::new(0.0, top), Size::new(3.0, height - 1.0), self.colour_of(i));
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
             frame.fill_text(Text {
                 content: shorten(&track.name, if height >= ROOMY_HEADER_H { 20 } else { 14 }),

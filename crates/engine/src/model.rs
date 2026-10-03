@@ -66,6 +66,7 @@ pub struct Track {
     pub name: String,
     pub gain: f32,
     pub muted: bool,
+    pub colour: Option<[u8; 3]>,
     pub clips: Vec<Clip>,
 }
 
@@ -81,6 +82,9 @@ pub struct Project {
 pub enum Command {
     AddTrack { name: String },
     RemoveTrack(TrackId),
+    RenameTrack { track: TrackId, name: String },
+    SetTrackColour { track: TrackId, colour: Option<[u8; 3]> },
+    DuplicateTrack(TrackId),
     SetTrackGain { track: TrackId, gain: f32 },
     SetTrackMuted { track: TrackId, muted: bool },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
@@ -139,13 +143,38 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, clips: Vec::new() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, colour: None, clips: Vec::new() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
                 let t = self.track_index(track)?;
                 self.tracks.remove(t);
                 Ok(Outcome::Done)
+            }
+            Command::RenameTrack { track, name } => {
+                let t = self.track_index(track)?;
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(CommandError::InvalidValue);
+                }
+                self.tracks[t].name = name.to_string();
+                Ok(Outcome::Done)
+            }
+            Command::SetTrackColour { track, colour } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].colour = colour;
+                Ok(Outcome::Done)
+            }
+            Command::DuplicateTrack(track) => {
+                let t = self.track_index(track)?;
+                let mut copy = self.tracks[t].clone();
+                copy.id = TrackId(self.fresh());
+                for clip in &mut copy.clips {
+                    clip.id = ClipId(self.fresh());
+                }
+                let id = copy.id;
+                self.tracks.insert(t + 1, copy);
+                Ok(Outcome::Track(id))
             }
             Command::SetTrackGain { track, gain } => {
                 let t = self.track_index(track)?;

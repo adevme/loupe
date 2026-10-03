@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod icons;
+mod menus;
 mod pointer;
 mod settings;
 mod theme;
@@ -16,10 +17,9 @@ use iced::widget::canvas::Cache;
 use iced::advanced::widget::operation::Focusable;
 use iced::advanced::widget::{Id, Operation};
 use iced::widget::{
-    button, canvas, center, column, container, horizontal_space, mouse_area, opaque, row, slider, stack, text,
-    text_input, Space,
+    button, canvas, column, container, horizontal_space, row, slider, stack, text, text_input, Space,
 };
-use iced::{keyboard, window, Alignment, Element, Length, Size, Subscription, Task};
+use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
 use loupe_engine::{
     ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Outcome, Output, Project, Source, TrackId,
 };
@@ -90,8 +90,15 @@ pub enum Message {
     SetView(View),
     Resized(Size),
     OpenSettings,
-    CloseSettings,
+    CloseOverlay,
     DeleteClip(ClipId),
+    TrackMenu { track: TrackId, at: Point },
+    StartRename(TrackId),
+    StartColour(TrackId),
+    EntryTyped(String),
+    EntryEntered,
+    ColourPicked(TrackId, Option<[u8; 3]>),
+    DuplicateTrack(TrackId),
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -104,6 +111,15 @@ enum Run {
     Move(ClipId),
     Gain(ClipId),
     Fade(ClipId, Edge),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Overlay {
+    None,
+    Settings,
+    TrackMenu { track: TrackId, at: Point },
+    Rename { track: TrackId, at: Point },
+    Colour { track: TrackId, at: Point },
 }
 
 struct App {
@@ -128,7 +144,8 @@ struct App {
     scale: f64,
     pending_scale: f64,
     scale_text: String,
-    settings_open: bool,
+    overlay: Overlay,
+    entry: String,
     cache: Cache,
 }
 
@@ -161,7 +178,8 @@ impl App {
             scale,
             pending_scale: scale,
             scale_text: format_scale(scale),
-            settings_open: false,
+            overlay: Overlay::None,
+            entry: String::new(),
             cache: Cache::new(),
         };
         let task = app.import(std::env::args_os().skip(1).map(PathBuf::from).collect());
@@ -179,7 +197,7 @@ impl App {
                 | Message::Redo
                 | Message::Import
         );
-        if self.settings_open && belongs_to_the_song {
+        if self.overlay != Overlay::None && belongs_to_the_song {
             return Task::none();
         }
         match message {
@@ -319,16 +337,56 @@ impl App {
             }
             Message::Resized(size) => self.window = size,
             Message::OpenSettings => {
-                self.settings_open = true;
+                self.overlay = Overlay::Settings;
                 self.pending_scale = self.scale;
                 self.scale_text = format_scale(self.scale);
             }
-            Message::CloseSettings => self.settings_open = false,
+            Message::CloseOverlay => self.overlay = Overlay::None,
             Message::DeleteClip(clip) => {
                 if self.selected == Some(clip) {
                     self.selected = None;
                 }
                 self.edit(None, Command::DeleteClip(clip));
+            }
+            Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
+            Message::StartRename(track) => {
+                if let (Overlay::TrackMenu { at, .. }, Some(found)) = (&self.overlay, self.project.track(track)) {
+                    self.entry = found.name.clone();
+                    self.overlay = Overlay::Rename { track, at: *at };
+                    return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
+                }
+            }
+            Message::StartColour(track) => {
+                if let Overlay::TrackMenu { at, .. } = &self.overlay {
+                    self.entry = String::new();
+                    self.overlay = Overlay::Colour { track, at: *at };
+                }
+            }
+            Message::EntryTyped(typed) => self.entry = typed,
+            Message::EntryEntered => match self.overlay.clone() {
+                Overlay::Rename { track, .. } => {
+                    let name = self.entry.clone();
+                    self.edit(None, Command::RenameTrack { track, name });
+                    self.overlay = Overlay::None;
+                }
+                Overlay::Colour { track, .. } => {
+                    if let Some(colour) = menus::colour_from_hex(&self.entry) {
+                        self.edit(None, Command::SetTrackColour { track, colour: Some(colour) });
+                        self.overlay = Overlay::None;
+                    }
+                }
+                _ => {}
+            },
+            Message::ColourPicked(track, colour) => {
+                self.edit(None, Command::SetTrackColour { track, colour });
+                self.overlay = Overlay::None;
+            }
+            Message::DuplicateTrack(track) => {
+                self.overlay = Overlay::None;
+                let height = self.heights.get(&track).copied();
+                if let (Some(Outcome::Track(copy)), Some(height)) = (self.edit(None, Command::DuplicateTrack(track)), height) {
+                    self.heights.insert(copy, height);
+                }
             }
             Message::ScaleDragged(scale) => {
                 self.pending_scale = scale;
@@ -532,15 +590,7 @@ impl App {
 
         let palette = self.palette;
         let song = column![self.transport(), rule(palette), timeline, rule(palette), self.inspector()];
-        let over_the_song: Element<'_, Message> = if self.settings_open {
-            opaque(
-                mouse_area(center(opaque(self.settings_sheet())).padding(16).style(move |_| palette.backdrop()))
-                    .on_press(Message::CloseSettings),
-            )
-        } else {
-            Space::new(0, 0).into()
-        };
-        stack![song, over_the_song].into()
+        stack![song, self.overlay()].into()
     }
 
     fn transport(&self) -> Element<'_, Message> {
@@ -617,7 +667,7 @@ impl App {
         let heading = row![
             text("Settings").size(16).font(palette.semibold),
             horizontal_space(),
-            icon_button(palette, "x", Some(Message::CloseSettings)),
+            icon_button(palette, "x", Some(Message::CloseOverlay)),
         ]
         .align_y(Alignment::Center);
 
@@ -719,7 +769,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
     match key {
         keyboard::Key::Named(Named::Space) => Some(Message::TogglePlay),
         keyboard::Key::Named(Named::Home) => Some(Message::ToStart),
-        keyboard::Key::Named(Named::Escape) => Some(Message::CloseSettings),
+        keyboard::Key::Named(Named::Escape) => Some(Message::CloseOverlay),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {

@@ -206,6 +206,36 @@ impl Palette {
         }
     }
 
+    pub fn menu(&self) -> container::Style {
+        container::Style {
+            background: Some(self.panel.into()),
+            border: Border { color: self.hover, width: 1.0, radius: 8.0.into() },
+            shadow: iced::Shadow {
+                color: alpha(Color::BLACK, 0.4),
+                offset: iced::Vector::new(0.0, 6.0),
+                blur_radius: 18.0,
+            },
+            ..Default::default()
+        }
+    }
+
+    pub fn menu_item(&self, status: button::Status) -> button::Style {
+        let (background, text_color) = match status {
+            button::Status::Active => (None, self.text),
+            button::Status::Hovered | button::Status::Pressed => (Some(self.hover.into()), self.text),
+            button::Status::Disabled => (None, self.text_faint),
+        };
+        button::Style { background, text_color, border: Border::default().rounded(5), ..Default::default() }
+    }
+
+    pub fn swatch(&self, colour: Color, status: button::Status) -> button::Style {
+        let border = match status {
+            button::Status::Hovered | button::Status::Pressed => Border { color: self.text, width: 2.0, radius: 5.0.into() },
+            _ => Border { color: self.line, width: 1.0, radius: 5.0.into() },
+        };
+        button::Style { background: Some(colour.into()), border, ..Default::default() }
+    }
+
     pub fn bar(&self) -> container::Style {
         container::Style { background: Some(self.panel.into()), ..Default::default() }
     }
