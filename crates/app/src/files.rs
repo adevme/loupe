@@ -127,6 +127,7 @@ impl App {
         if path.extension().is_none() {
             path.set_extension(EXTENSION);
         }
+        self.gather_fx_state();
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
         match std::fs::write(&path, saved.to_text()) {
             Ok(()) => {
@@ -201,6 +202,7 @@ impl App {
         self.overlay = Overlay::None;
         let folder = settings::templates_folder(self.folder.as_deref());
         let file = folder.join(format!("{name}.{EXTENSION}"));
+        self.gather_fx_state();
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
         let written = std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&file, saved.to_text()));
         self.problem = written.err().map(|why| format!("Could not save the template {}: {why}", file.display()));

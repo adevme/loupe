@@ -98,7 +98,10 @@ impl App {
             name: self.path.as_deref().map(crate::home::stem).unwrap_or_else(|| "Untitled".to_string()),
             split: self.export_split,
             range: if self.export_range_only { self.loop_range } else { None },
-            project_file: SavedProject::capture(&self.project, |track| self.heights.get(&track).copied()).to_text(),
+            project_file: {
+                self.gather_fx_state();
+                SavedProject::capture(&self.project, |track| self.heights.get(&track).copied()).to_text()
+            },
         };
         let project = self.project.clone();
         self.overlay = Overlay::None;

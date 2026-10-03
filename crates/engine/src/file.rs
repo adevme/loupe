@@ -28,6 +28,16 @@ pub struct SavedTrack {
     pub parent: Option<usize>,
     pub collapsed: bool,
     pub sends: Vec<(usize, f32, bool)>,
+    pub fx: Vec<SavedFx>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedFx {
+    pub path: PathBuf,
+    pub index: usize,
+    pub name: String,
+    pub bypassed: bool,
+    pub state: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,6 +81,17 @@ impl SavedProject {
                             project.tracks.iter().position(|t| t.id == send.to).map(|to| (to, send.gain, send.pre_fader))
                         })
                         .collect(),
+                    fx: track
+                        .fx
+                        .iter()
+                        .map(|fx| SavedFx {
+                            path: fx.path.clone(),
+                            index: fx.index,
+                            name: fx.name.clone(),
+                            bypassed: fx.bypassed,
+                            state: fx.state.clone(),
+                        })
+                        .collect(),
                     clips: track
                         .clips
                         .iter()
@@ -106,6 +127,14 @@ impl SavedProject {
             for (to, gain, pre) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={}\n", *pre as u8));
             }
+            for fx in &track.fx {
+                out.push_str(&format!("fxpath {}\n", fx.path.display()));
+                let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
+                out.push_str(&format!(
+                    "fx index={} bypass={} state={state} name={}\n",
+                    fx.index, fx.bypassed as u8, fx.name
+                ));
+            }
             for clip in &track.clips {
                 out.push_str(&format!(
                     "clip source={} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}\n",
@@ -132,6 +161,7 @@ impl SavedProject {
             _ => return Err("this is not a Loupe project file".into()),
         }
         let mut saved = Self { rate: 0, bpm: 120.0, master: 1.0, master_muted: false, sources: Vec::new(), tracks: Vec::new() };
+        let mut held: Option<PathBuf> = None;
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
             let bad = |what: &str| format!("line {number}: {what}");
@@ -154,6 +184,7 @@ impl SavedProject {
                         parent: fields.get("parent").and_then(|v| v.parse::<usize>().ok()),
                         collapsed: fields.get("collapsed") == Some(&"1"),
                         sends: Vec::new(),
+                        fx: Vec::new(),
                     });
                 }
                 "send" => {
@@ -162,6 +193,24 @@ impl SavedProject {
                     let to = fields.get("to").and_then(|v| v.parse::<usize>().ok()).ok_or_else(|| bad("the send has no target"))?;
                     let gain = number_in(&fields, "gain").unwrap_or(1.0);
                     track.sends.push((to, gain, fields.get("pre") == Some(&"1")));
+                }
+                "fxpath" => held = Some(PathBuf::from(rest)),
+                "fx" => {
+                    let (fields, name) = rest.split_once("name=").ok_or_else(|| bad("the plugin has no name"))?;
+                    let fields = fields_of(fields);
+                    let path = held.take().ok_or_else(|| bad("the plugin has no file"))?;
+                    let state = match fields.get("state") {
+                        Some(&"-") | None => Vec::new(),
+                        Some(text) => bytes_of(text).ok_or_else(|| bad("the plugin settings are not readable"))?,
+                    };
+                    let fx = SavedFx {
+                        path,
+                        index: fields.get("index").and_then(|v| v.parse().ok()).unwrap_or(0),
+                        name: name.to_string(),
+                        bypassed: fields.get("bypass") == Some(&"1"),
+                        state,
+                    };
+                    saved.tracks.last_mut().ok_or_else(|| bad("a plugin before any track"))?.fx.push(fx);
                 }
                 "clip" => {
                     let fields = fields_of(rest);
@@ -246,9 +295,40 @@ impl SavedProject {
                     let _ = project.apply(Command::SetSendPreFader { from: *track, to: *to, pre_fader: *pre });
                 }
             }
+            for fx in &saved.fx {
+                let added = crate::model::Fx {
+                    path: fx.path.clone(),
+                    index: fx.index,
+                    name: fx.name.clone(),
+                    bypassed: fx.bypassed,
+                    state: fx.state.clone(),
+                };
+                let _ = project.apply(Command::AddFx { track: *track, fx: added });
+            }
         }
         (project, heights)
     }
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn bytes_of(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    let raw = text.as_bytes();
+    let mut out = Vec::with_capacity(text.len() / 2);
+    for pair in raw.chunks(2) {
+        let two = std::str::from_utf8(pair).ok()?;
+        out.push(u8::from_str_radix(two, 16).ok()?);
+    }
+    Some(out)
 }
 
 fn fields_of(text: &str) -> HashMap<&str, &str> {
@@ -378,5 +458,42 @@ mod routing_round_trip {
         assert_eq!(back.tracks[1].sends.len(), 1);
         assert_eq!(back.tracks[1].sends[0].gain, 0.25);
         assert!(back.tracks[1].sends[0].pre_fader);
+    }
+
+    #[test]
+    fn plugin_chains_survive_a_save_and_open() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vox".into() }) else {
+            panic!("no track")
+        };
+        let eq = crate::model::Fx {
+            path: PathBuf::from("/plugins/Pro Q 4.vst3"),
+            index: 0,
+            name: "FabFilter Pro-Q 4".into(),
+            bypassed: false,
+            state: vec![0, 1, 2, 250, 255],
+        };
+        let comp = crate::model::Fx {
+            path: PathBuf::from("/plugins/Pro C 2.vst3"),
+            index: 1,
+            name: "FabFilter Pro-C 2".into(),
+            bypassed: true,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddFx { track, fx: eq }).unwrap();
+        p.apply(Command::AddFx { track, fx: comp }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let read = SavedProject::parse(&text).unwrap();
+        let sources: Vec<Arc<Source>> = Vec::new();
+        let (back, _) = read.build(&sources, 48_000);
+        let chain = &back.tracks[0].fx;
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].name, "FabFilter Pro-Q 4");
+        assert_eq!(chain[0].path, PathBuf::from("/plugins/Pro Q 4.vst3"));
+        assert_eq!(chain[0].state, vec![0, 1, 2, 250, 255]);
+        assert!(!chain[0].bypassed);
+        assert_eq!(chain[1].index, 1);
+        assert!(chain[1].bypassed);
+        assert!(chain[1].state.is_empty());
     }
 }
