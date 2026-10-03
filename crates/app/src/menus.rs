@@ -50,6 +50,26 @@ impl App {
         )
     }
 
+    pub(crate) fn window<'a>(&self, title: String, body: Element<'a, Message>, widest: f32) -> Element<'a, Message> {
+        let palette = self.palette;
+        let close = button(container(crate::icon("x", 13.0)).center(22))
+            .padding(0)
+            .style(move |_, status| palette.ghost(status))
+            .on_press(Message::CloseOverlay);
+        let title_bar = container(
+            row![text(title).size(13).font(palette.medium), horizontal_space(), close].align_y(Alignment::Center),
+        )
+        .padding(iced::Padding { top: 4.0, right: 6.0, bottom: 4.0, left: 14.0 })
+        .width(Length::Fill)
+        .style(move |_| palette.title_bar());
+        container(column![title_bar, container(body).padding(18)])
+            .padding(1)
+            .width(Length::Fill)
+            .max_width(widest)
+            .style(move |_| palette.sheet())
+            .into()
+    }
+
     fn menu<'a>(&self, items: Vec<Element<'a, Message>>) -> Element<'a, Message> {
         let palette = self.palette;
         container(column(items).spacing(2)).padding(6).width(MENU_WIDTH).style(move |_| palette.menu()).into()
@@ -143,27 +163,16 @@ impl App {
     fn about_sheet(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let credit = |line: &'static str| text(line).size(13).color(palette.text_dim);
-        container(
-            column![
-                row![
-                    text("Loupe").size(22).font(palette.semibold),
-                    horizontal_space(),
-                    crate::icon_button(palette, "x", Some(Message::CloseOverlay)),
-                ]
-                .align_y(Alignment::Center),
-                text(concat!("Version ", env!("CARGO_PKG_VERSION"))).size(12).font(palette.mono).color(palette.text_dim),
-                rule(palette),
-                credit("Made by ash."),
-                credit("Built with Rust, Iced, cpal and Symphonia."),
-                credit("Typefaces: Inter and JetBrains Mono. Icons: Lucide."),
-            ]
-            .spacing(10),
-        )
-        .padding(22)
-        .width(Length::Fill)
-        .max_width(420)
-        .style(move |_| palette.sheet())
-        .into()
+        let body = column![
+            text("Loupe").size(22).font(palette.semibold),
+            text(concat!("Version ", env!("CARGO_PKG_VERSION"))).size(12).font(palette.mono).color(palette.text_dim),
+            rule(palette),
+            credit("Made by ash."),
+            credit("Built with Rust, Iced, cpal and Symphonia."),
+            credit("Typefaces: Inter and JetBrains Mono. Icons: Lucide."),
+        ]
+        .spacing(10);
+        self.window("About".to_string(), body.into(), 420.0)
     }
 
     fn save_sheet(&self) -> Element<'_, Message> {

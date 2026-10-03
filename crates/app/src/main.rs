@@ -1148,13 +1148,6 @@ impl App {
 
     fn settings_sheet(&self) -> Element<'_, Message> {
         let palette = self.palette;
-        let heading = row![
-            text("Settings").size(16).font(palette.semibold),
-            horizontal_space(),
-            icon_button(palette, "x", Some(Message::CloseOverlay)),
-        ]
-        .align_y(Alignment::Center);
-
         let scale = column![
             text("Interface scale").size(13).font(palette.medium),
             text("Makes everything in the window larger or smaller. 1 is the normal size.")
@@ -1205,12 +1198,8 @@ impl App {
         ]
         .spacing(8);
 
-        container(column![heading, rule(palette), scale, rule(palette), folder].spacing(16))
-            .padding(20)
-            .width(Length::Fill)
-            .max_width(560)
-            .style(move |_| palette.sheet())
-            .into()
+        let body = column![scale, rule(palette), folder].spacing(16);
+        self.window("Settings".to_string(), body.into(), 560.0)
     }
 
     fn status(&self) -> Option<Element<'_, Message>> {

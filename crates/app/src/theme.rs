@@ -284,6 +284,14 @@ impl Palette {
         }
     }
 
+    pub fn title_bar(&self) -> container::Style {
+        container::Style {
+            background: Some(self.raised.into()),
+            border: Border { radius: iced::border::top(9), ..Border::default() },
+            ..Default::default()
+        }
+    }
+
     pub fn bar(&self) -> container::Style {
         container::Style { background: Some(self.panel.into()), ..Default::default() }
     }

@@ -1,11 +1,11 @@
 use std::fmt;
 
-use iced::widget::{button, column, container, horizontal_space, pick_list, row, text};
-use iced::{Alignment, Element, Length};
+use iced::widget::{button, column, pick_list, row, text};
+use iced::{Alignment, Element};
 use loupe_engine::{ClipId, Frames, TrackId};
 
 use crate::mixer::Level;
-use crate::{icon, icon_button, rule, App, LoopRange, Message};
+use crate::{icon, rule, App, LoopRange, Message};
 
 const LABEL_WIDTH: f32 = 90.0;
 
@@ -42,13 +42,6 @@ impl App {
         let starts = format!("bar {}.{}", (beats / 4.0) as u64 + 1, beats as u64 % 4 + 1);
         let previewing = self.preview.as_ref().is_some_and(|preview| preview.clip == id);
         let muted = clip.muted;
-
-        let heading = row![
-            text(clip.source.name.as_str()).size(16).font(palette.semibold),
-            horizontal_space(),
-            icon_button(palette, "x", Some(Message::CloseOverlay)),
-        ]
-        .align_y(Alignment::Center);
 
         let preview = button(
             row![
@@ -94,12 +87,8 @@ impl App {
         ]
         .spacing(12);
 
-        container(column![heading, rule(palette), fields, rule(palette), preview].spacing(16))
-            .padding(20)
-            .width(Length::Fill)
-            .max_width(440)
-            .style(move |_| palette.sheet())
-            .into()
+        let body = column![fields, rule(palette), preview].spacing(16);
+        self.window(clip.source.name.clone(), body.into(), 440.0)
     }
 
     pub(crate) fn toggle_preview(&mut self, id: ClipId) {
