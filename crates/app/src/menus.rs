@@ -166,7 +166,7 @@ impl App {
         let palette = self.palette;
         let credit = |line: &'static str| text(line).size(13).color(palette.text_dim);
         let body = column![
-            text("Loupe").size(22).font(palette.semibold),
+            iced::widget::image(text_logo()).height(44),
             text(concat!("Version ", env!("CARGO_PKG_VERSION"))).size(12).font(palette.mono).color(palette.text_dim),
             rule(palette),
             credit("Made by ash."),
@@ -269,6 +269,12 @@ impl App {
         .style(move |_| palette.sheet())
         .into()
     }
+}
+
+pub fn text_logo() -> iced::widget::image::Handle {
+    static LOGO: std::sync::OnceLock<iced::widget::image::Handle> = std::sync::OnceLock::new();
+    LOGO.get_or_init(|| iced::widget::image::Handle::from_bytes(include_bytes!("../assets/text-logo.png").as_slice()))
+        .clone()
 }
 
 pub fn colour_from_hex(typed: &str) -> Option<[u8; 3]> {

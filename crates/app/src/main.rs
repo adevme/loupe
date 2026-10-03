@@ -69,6 +69,7 @@ fn main() -> iced::Result {
         .antialiasing(true)
         .window(window::Settings {
             size: first_size,
+            icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
             min_size: Some(Size::new(820.0, 420.0)),
             ..window::Settings::default()
         })

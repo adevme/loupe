@@ -1,12 +1,15 @@
 use std::path::Path;
 
-use iced::widget::{button, column, container, horizontal_space, row, scrollable, text};
+use iced::widget::{button, column, container, horizontal_space, image, row, scrollable, text};
 use iced::{Alignment, Element, Length};
 
 use crate::{icon_button, rule, App, Message};
 
 const START_WIDTH: f32 = 290.0;
 const PAGE_WIDTH: f32 = 860.0;
+const LOGO_HEIGHT: f32 = 56.0;
+const PAGE_TOP: f32 = 26.0;
+const PAGE_SIDE: f32 = 32.0;
 
 impl App {
     pub(crate) fn home(&self) -> Element<'_, Message> {
@@ -46,7 +49,7 @@ impl App {
         };
 
         let title = row![
-            text("Loupe").size(30).font(palette.semibold),
+            image(crate::menus::text_logo()).height(LOGO_HEIGHT),
             horizontal_space(),
             icon_button(palette, "settings", Some(Message::OpenSettings)),
         ]
@@ -64,7 +67,7 @@ impl App {
         }
         container(container(page).width(Length::Fill).max_width(PAGE_WIDTH))
             .center_x(Length::Fill)
-            .padding([48, 32])
+            .padding(iced::Padding { top: PAGE_TOP, right: PAGE_SIDE, bottom: PAGE_SIDE, left: PAGE_SIDE })
             .height(Length::Fill)
             .into()
     }

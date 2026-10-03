@@ -5,6 +5,9 @@ edition = "2021"
 
 [dependencies]
 loupe-engine = { path = "../engine" }
-iced = { version = "0.13", features = ["tokio", "canvas", "advanced"] }
+iced = { version = "0.13", features = ["tokio", "canvas", "advanced", "image"] }
 rfd = "0.14"
 iced_runtime = "0.13"
+
+[build-dependencies]
+winresource = "0.1"
