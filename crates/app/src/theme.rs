@@ -13,6 +13,18 @@ pub const BAR_SLOTS: usize = 24;
 const POSTSCRIPT_OUTLINES: &[u8] = b"OTTO";
 const THEME_EXTENSION: &str = "theme";
 pub const REFERENCE_FILE: &str = "default.theme";
+const BUNDLED: [(&str, &str); 10] = [
+    ("Arctic", include_str!("../themes/Arctic.theme")),
+    ("Ember", include_str!("../themes/Ember.theme")),
+    ("Forest", include_str!("../themes/Forest.theme")),
+    ("Graphite", include_str!("../themes/Graphite.theme")),
+    ("High Contrast", include_str!("../themes/High Contrast.theme")),
+    ("Midnight", include_str!("../themes/Midnight.theme")),
+    ("Ocean", include_str!("../themes/Ocean.theme")),
+    ("Paper", include_str!("../themes/Paper.theme")),
+    ("Rose", include_str!("../themes/Rose.theme")),
+    ("Studio", include_str!("../themes/Studio.theme")),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -256,6 +268,12 @@ impl Palette {
         };
         let _ = fs::create_dir_all(&themes);
         let _ = fs::write(themes.join(REFERENCE_FILE), NEUTRAL.to_text());
+        for (name, text) in BUNDLED {
+            let file = themes.join(format!("{name}.{THEME_EXTENSION}"));
+            if !file.exists() {
+                let _ = fs::write(file, text);
+            }
+        }
         let Some(name) = chosen else {
             return plain(None);
         };
@@ -792,6 +810,16 @@ mod tests {
         assert_eq!(read.top_bar, NEUTRAL.top_bar);
         assert_eq!(read.header_width, NEUTRAL.header_width);
         assert_eq!(read.headers, Side::Left);
+    }
+
+    #[test]
+    fn every_bundled_theme_reads_without_a_problem() {
+        for (name, text) in BUNDLED {
+            let mut theme = NEUTRAL;
+            for (line, key, value) in entries(text) {
+                theme.set(key, value).unwrap_or_else(|why| panic!("{name} line {line}: {why}"));
+            }
+        }
     }
 
     #[test]
