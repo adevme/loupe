@@ -568,7 +568,7 @@ impl App {
             .font(palette.mono)
             .size(13)
             .padding([5, 8])
-            .width(64)
+            .width(46)
             .style(move |_, status| palette.field(status));
 
         let history = row![
