@@ -97,6 +97,8 @@ pub enum Message {
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
     OpenFileMenu,
+    OpenHelpMenu,
+    OpenAbout,
     StartRename(TrackId),
     StartColour(TrackId),
     EntryTyped(String),
@@ -134,6 +136,8 @@ pub enum Overlay {
     None,
     Settings,
     FileMenu,
+    HelpMenu,
+    About,
     TrackMenu { track: TrackId, at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
@@ -383,6 +387,8 @@ impl App {
             }
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
+            Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
+            Message::OpenAbout => self.overlay = Overlay::About,
             Message::StartRename(track) => {
                 if let (Overlay::TrackMenu { at, .. }, Some(found)) = (&self.overlay, self.project.track(track)) {
                     self.entry = found.name.clone();
@@ -734,6 +740,12 @@ impl App {
         .style(move |_, status| palette.toggled(file_menu_open, status))
         .on_press(Message::OpenFileMenu);
 
+        let help_menu_open = self.overlay == Overlay::HelpMenu;
+        let help = button(text("Help").size(13).font(palette.medium))
+            .padding([6, 10])
+            .style(move |_, status| palette.toggled(help_menu_open, status))
+            .on_press(Message::OpenHelpMenu);
+
         let mixer = button(container(icon("sliders-vertical", 15.0)).center(30))
             .padding(0)
             .style(move |_, status| palette.toggled(mixer_open, status))
@@ -758,6 +770,7 @@ impl App {
             row![
                 text("Loupe").size(16).font(palette.semibold),
                 file,
+                help,
                 Space::with_width(6),
                 icon_button(palette, "skip-back", Some(Message::ToStart)),
                 play,

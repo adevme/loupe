@@ -10,6 +10,7 @@ const MENU_WIDTH: f32 = 220.0;
 const TALLEST_MENU: f32 = 190.0;
 const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_AT: Point = Point::new(76.0, 44.0);
+const HELP_MENU_AT: Point = Point::new(134.0, 44.0);
 pub const ENTRY_ID: &str = "overlay-entry";
 
 impl App {
@@ -19,6 +20,8 @@ impl App {
             Overlay::Settings => self.centred(self.settings_sheet()),
             Overlay::ConfirmDiscard => self.centred(self.discard_sheet()),
             Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
+            Overlay::HelpMenu => self.floating(HELP_MENU_AT, self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
+            Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
@@ -129,6 +132,32 @@ impl App {
             self.entry_field("#rrggbb"),
             follow_theme.into(),
         ])
+    }
+
+    fn about_sheet(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let credit = |line: &'static str| text(line).size(13).color(palette.text_dim);
+        container(
+            column![
+                row![
+                    text("Loupe").size(22).font(palette.semibold),
+                    horizontal_space(),
+                    crate::icon_button(palette, "x", Some(Message::CloseOverlay)),
+                ]
+                .align_y(Alignment::Center),
+                text(concat!("Version ", env!("CARGO_PKG_VERSION"))).size(12).font(palette.mono).color(palette.text_dim),
+                rule(palette),
+                credit("Made by ash."),
+                credit("Built with Rust, Iced, cpal and Symphonia."),
+                credit("Typefaces: Inter and JetBrains Mono. Icons: Lucide."),
+            ]
+            .spacing(10),
+        )
+        .padding(22)
+        .width(Length::Fill)
+        .max_width(420)
+        .style(move |_| palette.sheet())
+        .into()
     }
 
     fn discard_sheet(&self) -> Element<'_, Message> {
