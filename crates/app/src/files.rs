@@ -25,6 +25,11 @@ impl App {
         }
     }
 
+    fn dialog_folder(&self) -> PathBuf {
+        let beside_the_song = self.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+        beside_the_song.unwrap_or_else(|| crate::settings::projects_folder(self.folder.as_deref()))
+    }
+
     pub(crate) fn save(&mut self) -> Task<Message> {
         match self.path.clone() {
             Some(path) => {
@@ -42,11 +47,13 @@ impl App {
             .and_then(Path::file_name)
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("Untitled.{EXTENSION}"));
+        let start_in = self.dialog_folder();
         Task::perform(
             async move {
                 rfd::AsyncFileDialog::new()
                     .add_filter("Loupe project", &[EXTENSION])
                     .set_title("Save project")
+                    .set_directory(start_in)
                     .set_file_name(suggested)
                     .save_file()
                     .await
@@ -81,11 +88,13 @@ impl App {
 
     pub(crate) fn pick_project(&mut self) -> Task<Message> {
         self.overlay = Overlay::None;
+        let start_in = self.dialog_folder();
         Task::perform(
-            async {
+            async move {
                 rfd::AsyncFileDialog::new()
                     .add_filter("Loupe project", &[EXTENSION])
                     .set_title("Open project")
+                    .set_directory(start_in)
                     .pick_file()
                     .await
                     .map(|file| file.path().to_path_buf())

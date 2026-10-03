@@ -136,6 +136,9 @@ pub enum Message {
     ScaleTyped(String),
     ScaleEntered,
     ScaleReset,
+    PickFolder,
+    FolderPicked(Option<PathBuf>),
+    FolderReset,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -191,6 +194,7 @@ struct App {
     entry: String,
     mixer_open: bool,
     mixer_height: f32,
+    folder: Option<PathBuf>,
     resizing_mixer: bool,
     pool_open: bool,
     path: Option<PathBuf>,
@@ -206,6 +210,7 @@ impl App {
         let project = Project::new(engine.rate());
         engine.set_project(&project);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
+        let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
         let mut app = Self {
             palette: loaded.palette,
             heights: HashMap::new(),
@@ -214,7 +219,7 @@ impl App {
             level_press: None,
             editing_level: None,
             problem: None,
-            startup_problem: no_sound.or(loaded.problem),
+            startup_problem: no_sound.or(loaded.problem).or(no_folder),
             bpm: format_bpm(project.bpm),
             engine,
             project,
@@ -236,6 +241,7 @@ impl App {
             mixer_open: false,
             mixer_height: settings.mixer_height.unwrap_or(mixer::MIXER_HEIGHT).max(mixer::SHORTEST_MIXER),
             resizing_mixer: false,
+            folder: settings.folder.clone(),
             pool_open: false,
             path: None,
             dirty: false,
@@ -613,6 +619,26 @@ impl App {
                 return unfocus();
             }
             Message::ScaleReset => self.apply_scale(1.0),
+            Message::PickFolder => {
+                let start_in = settings::home_folder(self.folder.as_deref());
+                return Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .set_title("Choose where the Loupe folder lives")
+                            .set_directory(start_in)
+                            .pick_folder()
+                            .await
+                            .map(|folder| folder.path().to_path_buf())
+                    },
+                    Message::FolderPicked,
+                );
+            }
+            Message::FolderPicked(folder) => {
+                if let Some(folder) = folder {
+                    self.use_folder(Some(folder));
+                }
+            }
+            Message::FolderReset => self.use_folder(None),
         }
         Task::none()
     }
@@ -686,6 +712,16 @@ impl App {
         }
         self.bpm = format_bpm(self.project.bpm);
         self.changed();
+    }
+
+    fn use_folder(&mut self, chosen: Option<PathBuf>) {
+        let saved = match &chosen {
+            Some(folder) => settings::save("folder", &folder.display().to_string()),
+            None => settings::forget("folder"),
+        };
+        self.folder = chosen;
+        let made = settings::make_folders(self.folder.as_deref());
+        self.problem = saved.and(made).err().map(|why| format!("Could not set the Loupe folder: {why}"));
     }
 
     fn apply_scale(&mut self, wanted: f64) {
@@ -983,7 +1019,29 @@ impl App {
         ]
         .spacing(8);
 
-        container(column![heading, rule(palette), scale].spacing(16))
+        let home = settings::home_folder(self.folder.as_deref());
+        let folder = column![
+            text("Loupe folder").size(13).font(palette.medium),
+            text("Projects and templates live here by default. You can still save anywhere.")
+                .size(12)
+                .color(palette.text_dim),
+            row![
+                text(home.display().to_string()).size(12).font(palette.mono).width(Length::Fill),
+                button(text("Change…").size(12.5).font(palette.medium))
+                    .padding([6, 12])
+                    .style(move |_, status| palette.outlined(status))
+                    .on_press(Message::PickFolder),
+                button(text("Reset").size(12.5).font(palette.medium))
+                    .padding([6, 12])
+                    .style(move |_, status| palette.outlined(status))
+                    .on_press_maybe(self.folder.is_some().then_some(Message::FolderReset)),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
+
+        container(column![heading, rule(palette), scale, rule(palette), folder].spacing(16))
             .padding(20)
             .width(Length::Fill)
             .max_width(560)
