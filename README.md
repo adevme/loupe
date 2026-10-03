@@ -21,3 +21,11 @@ old laptop and something to say should be able to get to the end of a song.
 Loupe is free software under the [GNU General Public License, version 2](LICENSE)
 or any later version. It includes [Rubber Band](https://breakfastquay.com/rubberband/)
 for time stretching, which is under the same licence.
+
+### ASIO
+
+Loupe does not ship with ASIO. Steinberg's ASIO SDK is not free software, and a
+build that links it cannot be passed on under this licence. On Windows, pick the
+WASAPI driver in Settings for low latency. If you have agreed to Steinberg's
+terms you can build your own copy with `cargo build --features asio`, but please
+keep that build to yourself.

@@ -10,5 +10,9 @@ loupe-stretch = { path = "../stretch" }
 rtrb = "0.3"
 symphonia = { version = "0.5", features = ["aac", "aiff", "isomp4", "mp3", "wav", "pcm", "ogg", "vorbis", "flac"] }
 
-[target.'cfg(windows)'.dependencies]
-cpal = { version = "0.15", features = ["asio"] }
+# ASIO is off by default. Steinberg's ASIO SDK is not free software, so a
+# build that links it cannot be given away under this licence, and the build
+# downloads the SDK from steinberg.net. Build with --features asio only if you
+# have agreed to Steinberg's terms and are keeping that build to yourself.
+[features]
+asio = ["cpal/asio"]
