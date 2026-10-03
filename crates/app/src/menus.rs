@@ -150,6 +150,13 @@ impl App {
                 Some(if has_volume { Message::RemoveEnvelope(volume) } else { Message::AddEnvelope(volume) }),
             ),
         ];
+        let panning = loupe_engine::Target::TrackPan(track);
+        let has_pan = self.project.envelope(panning).is_some();
+        items.push(self.item(
+            if has_pan { "Remove the pan envelope" } else { "Automate pan" },
+            "",
+            Some(if has_pan { Message::RemoveEnvelope(panning) } else { Message::AddEnvelope(panning) }),
+        ));
         if has_volume {
             let armed = self.project.envelope(volume).and_then(|shape| shape.armed);
             let touch = armed == Some(loupe_engine::Mode::Touch);

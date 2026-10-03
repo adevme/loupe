@@ -3,6 +3,7 @@ use crate::model::{ClipId, Frames, TrackId};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     TrackGain(TrackId),
+    TrackPan(TrackId),
     MasterGain,
     SendGain { from: TrackId, to: TrackId },
     TrackFx { track: TrackId, slot: usize, knob: usize },
@@ -22,6 +23,7 @@ impl Target {
     pub fn on_track(&self) -> Option<TrackId> {
         match self {
             Target::TrackGain(track) => Some(*track),
+            Target::TrackPan(track) => Some(*track),
             Target::SendGain { from, .. } => Some(*from),
             Target::TrackFx { track, .. } => Some(*track),
             _ => None,

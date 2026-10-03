@@ -36,6 +36,8 @@ pub struct SavedTrack {
     pub name: String,
     pub gain: f32,
     pub muted: bool,
+    pub pan: f32,
+    pub solo: bool,
     pub colour: Option<[u8; 3]>,
     pub height: Option<f32>,
     pub clips: Vec<SavedClip>,
@@ -115,6 +117,8 @@ impl SavedProject {
                     name: track.name.clone(),
                     gain: track.gain,
                     muted: track.muted,
+                    pan: track.pan,
+                    solo: track.solo,
                     colour: track.colour,
                     height: height_of(track.id),
                     parent: track.parent.and_then(|id| project.tracks.iter().position(|t| t.id == id)),
@@ -180,8 +184,8 @@ impl SavedProject {
             let height = track.height.map_or("-".to_string(), |h| h.to_string());
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} colour={colour} height={height} parent={parent} collapsed={} instrument={} name={}\n",
-                track.gain, track.muted as u8, track.collapsed as u8, instrument_text(&track.instrument), track.name
+                "track gain={} muted={} pan={} solo={} colour={colour} height={height} parent={parent} collapsed={} instrument={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.collapsed as u8, instrument_text(&track.instrument), track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -269,6 +273,8 @@ impl SavedProject {
                         name: name.to_string(),
                         gain: number_in(&fields, "gain").ok_or_else(|| bad("the track has no gain"))?,
                         muted: fields.get("muted") == Some(&"1"),
+                        pan: number_in(&fields, "pan").filter(|pan| (-1.0..=1.0).contains(pan)).unwrap_or(0.0),
+                        solo: fields.get("solo") == Some(&"1"),
                         colour: fields.get("colour").and_then(|value| colour_from(value)),
                         height: number_in(&fields, "height"),
                         clips: Vec::new(),
@@ -406,6 +412,8 @@ impl SavedProject {
             };
             let _ = project.apply(Command::SetTrackGain { track, gain: saved.gain });
             let _ = project.apply(Command::SetTrackMuted { track, muted: saved.muted });
+            let _ = project.apply(Command::SetTrackPan { track, pan: saved.pan });
+            let _ = project.apply(Command::SetTrackSolo { track, solo: saved.solo });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
             let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
             if let Some(height) = saved.height {
@@ -486,6 +494,7 @@ impl SavedProject {
             let target = match shape.target {
                 SavedTarget::Master => Some(crate::envelope::Target::MasterGain),
                 SavedTarget::Track(track) => ids.get(track).map(|id| crate::envelope::Target::TrackGain(*id)),
+                SavedTarget::Pan(track) => ids.get(track).map(|id| crate::envelope::Target::TrackPan(*id)),
                 SavedTarget::Send(from, to) => match (ids.get(from), ids.get(to)) {
                     (Some(from), Some(to)) => Some(crate::envelope::Target::SendGain { from: *from, to: *to }),
                     _ => None,
@@ -698,6 +707,22 @@ mod routing_round_trip {
     }
 
     #[test]
+    fn pan_and_solo_survive_a_save_and_open() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(a)) = p.apply(Command::AddTrack { name: "A".into() }) else { panic!() };
+        p.apply(Command::AddTrack { name: "B".into() }).unwrap();
+        p.apply(Command::SetTrackPan { track: a, pan: -0.4 }).unwrap();
+        p.apply(Command::SetTrackSolo { track: a, solo: true }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert_eq!((back.tracks[0].pan, back.tracks[0].solo), (-0.4, true));
+        assert_eq!((back.tracks[1].pan, back.tracks[1].solo), (0.0, false));
+        let old = text.replace(" pan=-0.4 solo=1", "");
+        let (back, _) = SavedProject::parse(&old).unwrap().build(&[], 48_000);
+        assert_eq!((back.tracks[0].pan, back.tracks[0].solo), (0.0, false));
+    }
+
+    #[test]
     fn folders_and_sends_survive_a_save_and_open() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(folder)) = p.apply(Command::AddTrack { name: "Vox".into() }) else {
@@ -797,6 +822,7 @@ fn target_text(target: crate::envelope::Target, place: &dyn Fn(TrackId) -> usize
     match target {
         Target::MasterGain => "master".to_string(),
         Target::TrackGain(track) => format!("track:{}", place(track)),
+        Target::TrackPan(track) => format!("pan:{}", place(track)),
         Target::SendGain { from, to } => format!("send:{}:{}", place(from), place(to)),
         Target::TrackFx { track, slot, knob } => format!("trackfx:{}:{slot}:{knob}", place(track)),
         Target::ClipGain(clip) => {
@@ -814,6 +840,7 @@ fn target_text(target: crate::envelope::Target, place: &dyn Fn(TrackId) -> usize
 pub enum SavedTarget {
     Master,
     Track(usize),
+    Pan(usize),
     Send(usize, usize),
     TrackFx(usize, usize, usize),
     Clip(usize, usize),
@@ -827,6 +854,7 @@ fn target_from(text: &str) -> Option<SavedTarget> {
     match kind {
         "master" => Some(SavedTarget::Master),
         "track" => Some(SavedTarget::Track(number()?)),
+        "pan" => Some(SavedTarget::Pan(number()?)),
         "send" => Some(SavedTarget::Send(number()?, number()?)),
         "trackfx" => Some(SavedTarget::TrackFx(number()?, number()?, number()?)),
         "clip" => Some(SavedTarget::Clip(number()?, number()?)),
@@ -859,6 +887,7 @@ fn where_text(target: &SavedTarget) -> String {
     match target {
         SavedTarget::Master => "master".to_string(),
         SavedTarget::Track(track) => format!("track:{track}"),
+        SavedTarget::Pan(track) => format!("pan:{track}"),
         SavedTarget::Send(from, to) => format!("send:{from}:{to}"),
         SavedTarget::TrackFx(track, slot, knob) => format!("trackfx:{track}:{slot}:{knob}"),
         SavedTarget::Clip(track, at) => format!("clip:{track}:{at}"),

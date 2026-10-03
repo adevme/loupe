@@ -2,7 +2,7 @@ use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, canvas, column, container, mouse_area, row as hrow, scrollable, text, text_input, vertical_slider, Space};
 use iced::{mouse, Alignment, Color, Element, Length};
 
-use loupe_engine::{ClipId, TrackId};
+use loupe_engine::{ClipId, Command, TrackId};
 
 use crate::{upright_rule, App, Message};
 
@@ -12,6 +12,7 @@ const GRAB_BAR: f32 = 6.0;
 const STRIP_MARGIN: f32 = 32.0;
 const STRIP_WIDTH: f32 = 112.0;
 const NAME_LENGTH: usize = 9;
+const PAN_PER_PX: f32 = 1.0;
 pub const SILENT_DB: f32 = -60.0;
 pub const LOUDEST_DB: f32 = 6.0;
 pub const LEVEL_ENTRY_ID: &str = "level-entry";
@@ -66,7 +67,56 @@ pub fn level_text(gain: f32) -> String {
     }
 }
 
+pub fn pan_text(pan: f32) -> String {
+    let percent = (pan * 100.0).round() as i32;
+    match percent {
+        0 => "C".to_string(),
+        p if p < 0 => format!("L{}", -p),
+        p => format!("R{p}"),
+    }
+}
+
 impl App {
+    pub(crate) fn toggle_solo(&mut self, track: TrackId) {
+        let Some(was) = self.project.track(track).map(|t| t.solo) else {
+            return;
+        };
+        let adding = self.modifiers.command();
+        let others: Vec<TrackId> = match adding {
+            true => Vec::new(),
+            false => self.project.tracks.iter().filter(|t| t.solo && t.id != track).map(|t| t.id).collect(),
+        };
+        let solo = !was || (!adding && !others.is_empty());
+        self.transact(None, |project| {
+            for other in others {
+                project.apply(Command::SetTrackSolo { track: other, solo: false })?;
+            }
+            project.apply(Command::SetTrackSolo { track, solo })
+        });
+    }
+
+    pub(crate) fn pan_knob(&self, track: TrackId, pan: f32) -> Element<'_, Message> {
+        let palette = self.palette;
+        hrow![
+            canvas(crate::knob::Knob {
+                palette: &self.palette,
+                value: pan * 100.0,
+                lowest: -100.0,
+                highest: 100.0,
+                resting: 0.0,
+                per_px: PAN_PER_PX,
+                centred: true,
+                on_turn: Box::new(move |percent| Message::TrackPan(track, percent / 100.0)),
+            })
+            .width(20)
+            .height(20),
+        ]
+        .push_maybe((self.editing_level.is_none()).then(|| text(pan_text(pan)).size(10.5).font(palette.mono).color(palette.text_dim).width(26)))
+        .spacing(3)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
     pub(crate) fn level_readout(&self, level: Level, gain: f32) -> Element<'_, Message> {
         let palette = self.palette;
         if self.editing_level == Some(level) {
@@ -158,6 +208,7 @@ impl App {
             };
             let name: String = track.name.chars().take(NAME_LENGTH).collect();
             let muted = track.muted;
+            let soloed = track.solo;
             let count = track.sends.len();
             let wired = count > 0 || track.parent.is_some();
             let routes = if count > 0 { format!("→{count}") } else { "→".to_string() };
@@ -184,12 +235,16 @@ impl App {
                     .spacing(10)
                     .height(Length::Fill)
                     .align_y(Alignment::Center),
-                    self.level_readout(Level::Track(id), shown),
+                    hrow![self.pan_knob(id, track.pan), self.level_readout(Level::Track(id), shown)].spacing(4).align_y(Alignment::Center),
                     hrow![
                         button(text("M").size(11.5).font(palette.semibold))
-                            .padding([3, 9])
+                            .padding([3, 7])
                             .style(move |_, status| palette.mute(muted, status))
                             .on_press(Message::ToggleMute(id)),
+                        button(text("S").size(11.5).font(palette.semibold))
+                            .padding([3, 7])
+                            .style(move |_, status| palette.solo(soloed, status))
+                            .on_press(Message::ToggleSolo(id)),
                         button(text(routes).size(11.5).font(palette.semibold))
                             .padding([3, 7])
                             .style(move |_, status| palette.toggled(wired, status))
