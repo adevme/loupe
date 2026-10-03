@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clip_window;
+mod crash;
 mod exporting;
 mod files;
 mod home;
@@ -45,6 +46,7 @@ const TOP_BAR_HEIGHT: f32 = 53.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 fn main() -> iced::Result {
+    crash::keep_a_record();
     let settings = Settings::load();
     let loaded = Palette::load(settings.theme.as_deref());
     let ui_font = loaded.palette.ui;
