@@ -236,6 +236,41 @@ impl Palette {
         button::Style { background: Some(colour.into()), border, ..Default::default() }
     }
 
+    pub fn mute(&self, muted: bool, status: button::Status) -> button::Style {
+        let (background, text_color) = match (muted, status) {
+            (true, _) => (self.danger, self.on_accent),
+            (false, button::Status::Hovered | button::Status::Pressed) => (self.hover, self.text),
+            (false, _) => (self.raised, self.text_dim),
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color,
+            border: Border::default().rounded(5),
+            ..Default::default()
+        }
+    }
+
+    pub fn strip(&self) -> container::Style {
+        container::Style {
+            background: Some(self.background.into()),
+            border: Border { color: self.line, width: 1.0, radius: 6.0.into() },
+            ..Default::default()
+        }
+    }
+
+    pub fn toggled(&self, on: bool, status: button::Status) -> button::Style {
+        if on {
+            button::Style {
+                background: Some(self.hover.into()),
+                text_color: self.text,
+                border: Border::default().rounded(6),
+                ..Default::default()
+            }
+        } else {
+            self.ghost(status)
+        }
+    }
+
     pub fn bar(&self) -> container::Style {
         container::Style { background: Some(self.panel.into()), ..Default::default() }
     }

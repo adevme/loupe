@@ -10,6 +10,7 @@ pub fn glyph(name: &str) -> char {
         "scissors" => '\u{e14e}',
         "x" => '\u{e1b2}',
         "settings" => '\u{e154}',
+        "sliders-vertical" => '\u{e162}',
         _ => '?',
     }
 }

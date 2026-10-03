@@ -2,6 +2,7 @@
 
 mod icons;
 mod menus;
+mod mixer;
 mod pointer;
 mod settings;
 mod theme;
@@ -99,6 +100,8 @@ pub enum Message {
     EntryEntered,
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
+    ToggleMixer,
+    TrackGain(TrackId, f32),
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -111,6 +114,7 @@ enum Run {
     Move(ClipId),
     Gain(ClipId),
     Fade(ClipId, Edge),
+    TrackGain(TrackId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +150,7 @@ struct App {
     scale_text: String,
     overlay: Overlay,
     entry: String,
+    mixer_open: bool,
     cache: Cache,
 }
 
@@ -180,6 +185,7 @@ impl App {
             scale_text: format_scale(scale),
             overlay: Overlay::None,
             entry: String::new(),
+            mixer_open: false,
             cache: Cache::new(),
         };
         let task = app.import(std::env::args_os().skip(1).map(PathBuf::from).collect());
@@ -388,6 +394,11 @@ impl App {
                     self.heights.insert(copy, height);
                 }
             }
+            Message::ToggleMixer => self.mixer_open = !self.mixer_open,
+            Message::TrackGain(track, db) => {
+                let gain = mixer::gain_from_db(db);
+                self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
+            }
             Message::ScaleDragged(scale) => {
                 self.pending_scale = scale;
                 self.scale_text = format_scale(scale);
@@ -589,7 +600,11 @@ impl App {
         .height(Length::Fill);
 
         let palette = self.palette;
-        let song = column![self.transport(), rule(palette), timeline, rule(palette), self.inspector()];
+        let mut song = column![self.transport(), rule(palette), timeline];
+        if self.mixer_open {
+            song = song.push(rule(palette)).push(self.mixer());
+        }
+        let song = song.push(rule(palette)).push(self.inspector());
         stack![song, self.overlay()].into()
     }
 
@@ -621,6 +636,12 @@ impl App {
             .width(46)
             .style(move |_, status| palette.field(status));
 
+        let mixer_open = self.mixer_open;
+        let mixer = button(container(icon("sliders-vertical", 15.0)).center(30))
+            .padding(0)
+            .style(move |_, status| palette.toggled(mixer_open, status))
+            .on_press(Message::ToggleMixer);
+
         let history = row![
             icon_button(palette, "undo-2", (!self.undo.is_empty()).then_some(Message::Undo)),
             icon_button(palette, "redo-2", (!self.redo.is_empty()).then_some(Message::Redo)),
@@ -649,6 +670,7 @@ impl App {
                 tempo,
                 horizontal_space(),
                 history,
+                mixer,
                 icon_button(palette, "settings", Some(Message::OpenSettings)),
                 import,
             ]
@@ -770,6 +792,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::Space) => Some(Message::TogglePlay),
         keyboard::Key::Named(Named::Home) => Some(Message::ToStart),
         keyboard::Key::Named(Named::Escape) => Some(Message::CloseOverlay),
+        keyboard::Key::Named(Named::F9) => Some(Message::ToggleMixer),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
