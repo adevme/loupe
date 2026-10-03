@@ -101,6 +101,7 @@ pub struct Project {
     pub master_muted: bool,
     pub tracks: Vec<Track>,
     pub sources: Vec<Arc<Source>>,
+    pub envelopes: Vec<crate::envelope::Envelope>,
     next_id: u64,
 }
 
@@ -132,6 +133,14 @@ pub enum Command {
     SetSendGain { from: TrackId, to: TrackId, gain: f32 },
     SetSendPreFader { from: TrackId, to: TrackId, pre_fader: bool },
     SetSendSidechain { from: TrackId, to: TrackId, sidechain: bool },
+    AddEnvelope { target: crate::envelope::Target },
+    RemoveEnvelope { target: crate::envelope::Target },
+    ArmEnvelope { target: crate::envelope::Target, mode: Option<crate::envelope::Mode> },
+    ShowEnvelopeLane { target: crate::envelope::Target, open: bool },
+    PutPoint { target: crate::envelope::Target, point: crate::envelope::Point },
+    DropPoint { target: crate::envelope::Target, which: usize },
+    ShapePoint { target: crate::envelope::Target, which: usize, shape: crate::envelope::Shape },
+    ClearPoints { target: crate::envelope::Target, from: Frames, to: Frames },
     AddClipFx { clip: ClipId, fx: Fx },
     RemoveClipFx { clip: ClipId, slot: usize },
     MoveClipFx { clip: ClipId, slot: usize, to: usize },
@@ -164,7 +173,55 @@ pub const MAX_BPM: f64 = 999.0;
 
 impl Project {
     pub fn new(rate: u32) -> Self {
-        Self { rate, bpm: 120.0, master: 1.0, master_muted: false, tracks: Vec::new(), sources: Vec::new(), next_id: 1 }
+        Self {
+            rate,
+            bpm: 120.0,
+            master: 1.0,
+            master_muted: false,
+            tracks: Vec::new(),
+            sources: Vec::new(),
+            envelopes: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+
+    fn envelope_mut(&mut self, target: crate::envelope::Target) -> Result<&mut crate::envelope::Envelope, CommandError> {
+        self.envelopes.iter_mut().find(|shape| shape.target == target).ok_or(CommandError::NoSuchTrack)
+    }
+
+    pub fn envelope(&self, target: crate::envelope::Target) -> Option<&crate::envelope::Envelope> {
+        self.envelopes.iter().find(|shape| shape.target == target)
+    }
+
+    pub fn range_of(&self, target: crate::envelope::Target) -> Option<(f32, f32, f32)> {
+        use crate::envelope::Target;
+        match target {
+            Target::MasterGain => Some((0.0, 1.25, self.master)),
+            Target::TrackGain(track) => {
+                let found = self.tracks.iter().find(|t| t.id == track)?;
+                Some((0.0, 2.0, found.gain))
+            }
+            Target::SendGain { from, to } => {
+                let found = self.tracks.iter().find(|t| t.id == from)?;
+                let send = found.sends.iter().find(|send| send.to == to)?;
+                Some((0.0, 1.25, send.gain))
+            }
+            Target::ClipGain(clip) => {
+                let found = self.clip(clip)?;
+                Some((0.0, 2.0, found.gain))
+            }
+            Target::TrackFx { track, slot, .. } => {
+                let found = self.tracks.iter().find(|t| t.id == track)?;
+                found.fx.get(slot)?;
+                Some((0.0, 1.0, 0.5))
+            }
+            Target::ClipFx { clip, slot, .. } => {
+                let found = self.clip(clip)?;
+                found.fx.get(slot)?;
+                Some((0.0, 1.0, 0.5))
+            }
+        }
     }
 
     pub fn length(&self) -> Frames {
@@ -405,6 +462,52 @@ impl Project {
                 let f = self.track_index(from)?;
                 let send = self.tracks[f].sends.iter_mut().find(|send| send.to == to).ok_or(CommandError::NoSuchTrack)?;
                 send.sidechain = sidechain;
+                Ok(Outcome::Done)
+            }
+            Command::AddEnvelope { target } => {
+                if self.envelopes.iter().any(|shape| shape.target == target) {
+                    return Err(CommandError::InvalidValue);
+                }
+                let (lowest, highest, resting) = self.range_of(target).ok_or(CommandError::NoSuchTrack)?;
+                self.envelopes.push(crate::envelope::Envelope::new(target, lowest, highest, resting));
+                Ok(Outcome::Done)
+            }
+            Command::RemoveEnvelope { target } => {
+                self.envelopes.retain(|shape| shape.target != target);
+                Ok(Outcome::Done)
+            }
+            Command::ArmEnvelope { target, mode } => {
+                let shape = self.envelope_mut(target)?;
+                shape.armed = mode;
+                Ok(Outcome::Done)
+            }
+            Command::ShowEnvelopeLane { target, open } => {
+                let shape = self.envelope_mut(target)?;
+                shape.lane_open = open;
+                Ok(Outcome::Done)
+            }
+            Command::PutPoint { target, point } => {
+                if !point.value.is_finite() {
+                    return Err(CommandError::InvalidValue);
+                }
+                let shape = self.envelope_mut(target)?;
+                shape.put(point);
+                Ok(Outcome::Done)
+            }
+            Command::DropPoint { target, which } => {
+                let shape = self.envelope_mut(target)?;
+                shape.drop_point(which);
+                Ok(Outcome::Done)
+            }
+            Command::ShapePoint { target, which, shape: how } => {
+                let shape = self.envelope_mut(target)?;
+                let point = shape.points.get_mut(which).ok_or(CommandError::InvalidValue)?;
+                point.shape = how;
+                Ok(Outcome::Done)
+            }
+            Command::ClearPoints { target, from, to } => {
+                let shape = self.envelope_mut(target)?;
+                shape.clear_between(from, to);
                 Ok(Outcome::Done)
             }
             Command::AddClipFx { clip, fx } => {

@@ -62,8 +62,11 @@ pub trait Chains: Send {
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
     mix_tracks(project, pos, out, None);
-    let level = if project.master_muted { 0.0 } else { project.master };
-    scale(out, level, level);
+    let target = crate::envelope::Target::MasterGain;
+    let opens = automated(project, target, pos, project.master);
+    let closes = automated(project, target, pos + out.len() as Frames, project.master);
+    let (opens, closes) = if project.master_muted { (0.0, 0.0) } else { (opens, closes) };
+    scale(out, opens, closes);
 }
 
 pub fn render_through(
@@ -74,8 +77,11 @@ pub fn render_through(
     chains: Option<&mut (dyn Chains + '_)>,
 ) {
     mix_tracks_metered(project, pos, out, None, None, scratch, chains);
-    let level = if project.master_muted { 0.0 } else { project.master };
-    scale(out, level, level);
+    let target = crate::envelope::Target::MasterGain;
+    let opens = automated(project, target, pos, project.master);
+    let closes = automated(project, target, pos + out.len() as Frames, project.master);
+    let (opens, closes) = if project.master_muted { (0.0, 0.0) } else { (opens, closes) };
+    scale(out, opens, closes);
 }
 
 pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
@@ -136,6 +142,11 @@ pub fn mix_tracks_metered(
     out.fill([0.0; 2]);
     let len = out.len();
     let count = project.tracks.len();
+    if let Some(racks) = chains.as_deref_mut() {
+        if !project.envelopes.is_empty() {
+            turn_knobs(project, pos, racks);
+        }
+    }
     scratch.room_for(count, len);
     scratch.order.clear();
     match project.render_order() {
@@ -158,7 +169,7 @@ pub fn mix_tracks_metered(
         scratch.sides[index][..len].fill([0.0; 2]);
         let buffer = &mut scratch.buffers[index][..len];
         buffer.fill([0.0; 2]);
-        lay_clips(track, pos + ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
+        lay_clips(project, track, pos + ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
     }
     for step in 0..scratch.order.len() {
         let index = scratch.index[step];
@@ -177,8 +188,13 @@ pub fn mix_tracks_metered(
         if keep_pre {
             scratch.pre[..len].copy_from_slice(&scratch.buffers[index][..len]);
         }
-        let gain = if silent { 0.0 } else { track.gain };
-        for frame in scratch.buffers[index][..len].iter_mut() {
+        let target = crate::envelope::Target::TrackGain(track.id);
+        let opens = automated(project, target, pos, track.gain);
+        let closes = automated(project, target, pos + len as Frames, track.gain);
+        let (opens, closes) = if silent { (0.0, 0.0) } else { (opens, closes) };
+        let step = (closes - opens) / len.max(1) as f32;
+        for (i, frame) in scratch.buffers[index][..len].iter_mut().enumerate() {
+            let gain = opens + step * (i + 1) as f32;
             frame[0] *= gain;
             frame[1] *= gain;
         }
@@ -193,7 +209,12 @@ pub fn mix_tracks_metered(
             let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
                 continue;
             };
-            let gain = send.gain;
+            let gain = automated(
+                project,
+                crate::envelope::Target::SendGain { from: track.id, to: send.to },
+                pos,
+                send.gain,
+            );
             for i in 0..len {
                 let from = if send.pre_fader { scratch.pre[i] } else { scratch.buffers[index][i] };
                 let dest = if send.sidechain { &mut scratch.sides[target][i] } else { &mut scratch.buffers[target][i] };
@@ -221,6 +242,7 @@ pub fn mix_tracks_metered(
 }
 
 fn lay_clips(
+    project: &Project,
     track: &Track,
     pos: Frames,
     out: &mut [[f32; 2]],
@@ -247,7 +269,7 @@ fn lay_clips(
         let source = &clip.source.frames;
         let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
         let count = ((to - from) as usize).min(source.len() - source_from);
-        let gain = clip.gain;
+        let gain = clip_automated(project, crate::envelope::Target::ClipGain(clip.id), pos, clip.start, clip.gain);
         let own = !clip.fx.is_empty() && chains.is_some();
         if own {
             apart.clear();
@@ -348,6 +370,49 @@ mod tests {
         assert_eq!(out[51], [1.0, -1.0]);
         assert_eq!(out[149], [99.0, -99.0]);
         assert_eq!(out[150], [0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_track_envelope_moves_the_level_while_it_plays() {
+        use crate::envelope::{Point, Shape, Target};
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        flat(&mut p, one, 1.0, 400);
+        let target = Target::TrackGain(one);
+        p.apply(Command::AddEnvelope { target }).unwrap();
+        p.apply(Command::ClearPoints { target, from: 0, to: 1_000_000 }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 0, value: 0.0, shape: Shape::Linear } }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 100, value: 1.0, shape: Shape::Linear } }).unwrap();
+        let mut out = vec![[0.0; 2]; 8];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, None);
+        let quiet = out[4][0];
+        mix_tracks_metered(&p, 50, &mut out, None, None, &mut scratch, None);
+        let middling = out[4][0];
+        mix_tracks_metered(&p, 150, &mut out, None, None, &mut scratch, None);
+        let loud = out[4][0];
+        assert!(quiet < 0.05, "it started at {quiet}");
+        assert!((middling - 0.5).abs() < 0.1, "halfway it read {middling}");
+        assert!((loud - 1.0).abs() < 0.01, "at the end it read {loud}");
+    }
+
+    #[test]
+    fn a_clip_envelope_travels_with_the_clip() {
+        use crate::envelope::{Point, Shape, Target};
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        let moved = clip(&mut p, one, counting(400), 200);
+        let target = Target::ClipGain(moved);
+        p.apply(Command::AddEnvelope { target }).unwrap();
+        p.apply(Command::ClearPoints { target, from: 0, to: 1_000_000 }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 0, value: 0.0, shape: Shape::Hold } }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 100, value: 1.0, shape: Shape::Linear } }).unwrap();
+        let mut out = vec![[0.0; 2]; 8];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 250, &mut out, None, None, &mut scratch, None);
+        assert_eq!(out[4][0], 0.0, "the hold did not follow the clip");
+        mix_tracks_metered(&p, 320, &mut out, None, None, &mut scratch, None);
+        assert!(out[4][0] > 0.0, "after the clip's own 100 frames it should be open");
     }
 
     struct ClipDoubler {
@@ -873,4 +938,29 @@ fn head_start(project: &Project, track: TrackId, racks: &dyn Chains) -> usize {
         }
     }
     total
+}
+
+fn automated(project: &Project, target: crate::envelope::Target, at: Frames, fallback: f32) -> f32 {
+    match project.envelope(target).and_then(|shape| shape.value_at(at)) {
+        Some(value) => value,
+        None => fallback,
+    }
+}
+
+fn clip_automated(project: &Project, target: crate::envelope::Target, at: Frames, start: Frames, fallback: f32) -> f32 {
+    match project.envelope(target) {
+        Some(shape) => shape.value_at(at.saturating_sub(start)).unwrap_or(fallback),
+        None => fallback,
+    }
+}
+
+fn turn_knobs(project: &Project, at: Frames, racks: &mut (dyn Chains + '_)) {
+    for shape in &project.envelopes {
+        let Some(value) = shape.value_at(at) else { continue };
+        match shape.target {
+            crate::envelope::Target::TrackFx { track, slot, knob } => racks.tweak(track, slot, knob, value),
+            crate::envelope::Target::ClipFx { clip, slot, knob } => racks.tweak_clip(clip, slot, knob, value),
+            _ => {}
+        }
+    }
 }

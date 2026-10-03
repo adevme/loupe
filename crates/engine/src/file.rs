@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::model::{Clip, Command, Edge, Fade, Frames, Outcome, Project, TrackId};
+use crate::model::{Clip, ClipId, Command, Edge, Fade, Frames, Outcome, Project, TrackId};
 use crate::source::Source;
 
 const HEADER: &str = "loupe project 1";
@@ -15,6 +15,17 @@ pub struct SavedProject {
     pub master_muted: bool,
     pub sources: Vec<PathBuf>,
     pub tracks: Vec<SavedTrack>,
+    pub envelopes: Vec<SavedEnvelope>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedEnvelope {
+    pub target: SavedTarget,
+    pub armed: Option<crate::envelope::Mode>,
+    pub lane_open: bool,
+    pub lowest: f32,
+    pub highest: f32,
+    pub points: Vec<crate::envelope::Point>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +75,31 @@ impl SavedProject {
             master: project.master,
             master_muted: project.master_muted,
             sources: project.sources.iter().map(|source| source.path.clone()).collect(),
+            envelopes: {
+                let place = |want: TrackId| project.tracks.iter().position(|t| t.id == want).unwrap_or(usize::MAX);
+                let spot = |want: ClipId| {
+                    for (at, found) in project.tracks.iter().enumerate() {
+                        if let Some(which) = found.clips.iter().position(|c| c.id == want) {
+                            return (at, which);
+                        }
+                    }
+                    (usize::MAX, usize::MAX)
+                };
+                project
+                    .envelopes
+                    .iter()
+                    .filter_map(|shape| {
+                        Some(SavedEnvelope {
+                            target: target_from(&target_text(shape.target, &place, &spot))?,
+                            armed: shape.armed,
+                            lane_open: shape.lane_open,
+                            lowest: shape.lowest,
+                            highest: shape.highest,
+                            points: shape.points.clone(),
+                        })
+                    })
+                    .collect()
+            },
             tracks: project
                 .tracks
                 .iter()
@@ -168,6 +204,23 @@ impl SavedProject {
                 }
             }
         }
+        for shape in &self.envelopes {
+            let armed = match shape.armed {
+                Some(crate::envelope::Mode::Touch) => "touch",
+                Some(crate::envelope::Mode::Latch) => "latch",
+                None => "-",
+            };
+            out.push_str(&format!(
+                "envelope on={} armed={armed} lane={} low={} high={}\n",
+                where_text(&shape.target),
+                shape.lane_open as u8,
+                shape.lowest,
+                shape.highest
+            ));
+            for point in &shape.points {
+                out.push_str(&format!("point at={} value={} shape={}\n", point.at, point.value, shape_text(point.shape)));
+            }
+        }
         out
     }
 
@@ -177,7 +230,8 @@ impl SavedProject {
             Some((_, HEADER)) => {}
             _ => return Err("this is not a Loupe project file".into()),
         }
-        let mut saved = Self { rate: 0, bpm: 120.0, master: 1.0, master_muted: false, sources: Vec::new(), tracks: Vec::new() };
+        let mut saved =
+            Self { rate: 0, bpm: 120.0, master: 1.0, master_muted: false, sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
         let mut held: Option<PathBuf> = None;
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -233,6 +287,31 @@ impl SavedProject {
                     } else {
                         track.fx.push(fx);
                     }
+                }
+                "envelope" => {
+                    let fields = fields_of(rest);
+                    let on = fields.get("on").copied().ok_or_else(|| bad("the envelope has no target"))?;
+                    let target = target_from(on).ok_or_else(|| bad("the envelope target is not readable"))?;
+                    saved.envelopes.push(SavedEnvelope {
+                        target,
+                        armed: match fields.get("armed").copied() {
+                            Some("touch") => Some(crate::envelope::Mode::Touch),
+                            Some("latch") => Some(crate::envelope::Mode::Latch),
+                            _ => None,
+                        },
+                        lane_open: fields.get("lane") != Some(&"0"),
+                        lowest: number_in(&fields, "low").unwrap_or(0.0),
+                        highest: number_in(&fields, "high").unwrap_or(1.0),
+                        points: Vec::new(),
+                    });
+                }
+                "point" => {
+                    let fields = fields_of(rest);
+                    let at = fields.get("at").and_then(|got| got.parse().ok()).ok_or_else(|| bad("the point has no time"))?;
+                    let value = number_in(&fields, "value").ok_or_else(|| bad("the point has no value"))?;
+                    let shape = shape_from(fields.get("shape").copied().unwrap_or("line"));
+                    let holder = saved.envelopes.last_mut().ok_or_else(|| bad("a point before any envelope"))?;
+                    holder.points.push(crate::envelope::Point { at, value, shape });
                 }
                 "clip" => {
                     let fields = fields_of(rest);
@@ -314,6 +393,12 @@ impl SavedProject {
             }
         }
         let ids: Vec<_> = project.tracks.iter().map(|t| t.id).collect();
+        let mut clip_ids: HashMap<(usize, usize), crate::model::ClipId> = HashMap::new();
+        for (at, found) in project.tracks.iter().enumerate() {
+            for (which, clip) in found.clips.iter().enumerate() {
+                clip_ids.insert((at, which), clip.id);
+            }
+        }
         for (saved, track) in self.tracks.iter().zip(&ids) {
             if let Some(parent) = saved.parent.and_then(|p| ids.get(p)) {
                 let _ = project.apply(Command::SetTrackParent { track: *track, parent: Some(*parent) });
@@ -339,6 +424,34 @@ impl SavedProject {
                 };
                 let _ = project.apply(Command::AddFx { track: *track, fx: added });
             }
+        }
+        for shape in &self.envelopes {
+            let target = match shape.target {
+                SavedTarget::Master => Some(crate::envelope::Target::MasterGain),
+                SavedTarget::Track(track) => ids.get(track).map(|id| crate::envelope::Target::TrackGain(*id)),
+                SavedTarget::Send(from, to) => match (ids.get(from), ids.get(to)) {
+                    (Some(from), Some(to)) => Some(crate::envelope::Target::SendGain { from: *from, to: *to }),
+                    _ => None,
+                },
+                SavedTarget::TrackFx(track, slot, knob) => {
+                    ids.get(track).map(|id| crate::envelope::Target::TrackFx { track: *id, slot, knob })
+                }
+                SavedTarget::Clip(track, at) => clip_ids.get(&(track, at)).map(|id| crate::envelope::Target::ClipGain(*id)),
+                SavedTarget::ClipFx(track, at, slot, knob) => {
+                    clip_ids.get(&(track, at)).map(|id| crate::envelope::Target::ClipFx { clip: *id, slot, knob })
+                }
+            };
+            let Some(target) = target else { continue };
+            if project.apply(Command::AddEnvelope { target }).is_err() {
+                continue;
+            }
+            let _ = project.apply(Command::ClearPoints { target, from: 0, to: Frames::MAX });
+            for point in &shape.points {
+                let point = crate::envelope::Point { at: rescale(point.at), ..*point };
+                let _ = project.apply(Command::PutPoint { target, point });
+            }
+            let _ = project.apply(Command::ArmEnvelope { target, mode: shape.armed });
+            let _ = project.apply(Command::ShowEnvelopeLane { target, open: shape.lane_open });
         }
         (project, heights)
     }
@@ -529,5 +642,107 @@ mod routing_round_trip {
         assert_eq!(chain[1].index, 1);
         assert!(chain[1].bypassed);
         assert!(chain[1].state.is_empty());
+    }
+
+    #[test]
+    fn envelopes_survive_a_save_and_open() {
+        use crate::envelope::{Mode, Point, Shape, Target};
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(one)) = p.apply(Command::AddTrack { name: "Vox".into() }) else {
+            panic!("no track")
+        };
+        let target = Target::TrackGain(one);
+        p.apply(Command::AddEnvelope { target }).unwrap();
+        p.apply(Command::ClearPoints { target, from: 0, to: Frames::MAX }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 0, value: 0.25, shape: Shape::Hold } }).unwrap();
+        p.apply(Command::PutPoint { target, point: Point { at: 4800, value: 1.5, shape: Shape::Curve(0.5) } }).unwrap();
+        p.apply(Command::ArmEnvelope { target, mode: Some(Mode::Latch) }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let read = SavedProject::parse(&text).unwrap();
+        let sources: Vec<Arc<Source>> = Vec::new();
+        let (back, _) = read.build(&sources, 48_000);
+        assert_eq!(back.envelopes.len(), 1);
+        let shape = &back.envelopes[0];
+        assert_eq!(shape.armed, Some(Mode::Latch));
+        assert_eq!(shape.points.len(), 2);
+        assert_eq!(shape.points[0].value, 0.25);
+        assert_eq!(shape.points[0].shape, Shape::Hold);
+        assert_eq!(shape.points[1].at, 4800);
+        assert_eq!(shape.points[1].shape, Shape::Curve(0.5));
+        assert_eq!(shape.highest, 2.0);
+    }
+}
+
+fn target_text(target: crate::envelope::Target, place: &dyn Fn(TrackId) -> usize, spot: &dyn Fn(ClipId) -> (usize, usize)) -> String {
+    use crate::envelope::Target;
+    match target {
+        Target::MasterGain => "master".to_string(),
+        Target::TrackGain(track) => format!("track:{}", place(track)),
+        Target::SendGain { from, to } => format!("send:{}:{}", place(from), place(to)),
+        Target::TrackFx { track, slot, knob } => format!("trackfx:{}:{slot}:{knob}", place(track)),
+        Target::ClipGain(clip) => {
+            let (track, at) = spot(clip);
+            format!("clip:{track}:{at}")
+        }
+        Target::ClipFx { clip, slot, knob } => {
+            let (track, at) = spot(clip);
+            format!("clipfx:{track}:{at}:{slot}:{knob}")
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SavedTarget {
+    Master,
+    Track(usize),
+    Send(usize, usize),
+    TrackFx(usize, usize, usize),
+    Clip(usize, usize),
+    ClipFx(usize, usize, usize, usize),
+}
+
+fn target_from(text: &str) -> Option<SavedTarget> {
+    let mut parts = text.split(':');
+    let kind = parts.next()?;
+    let mut number = || parts.next().and_then(|got| got.parse::<usize>().ok());
+    match kind {
+        "master" => Some(SavedTarget::Master),
+        "track" => Some(SavedTarget::Track(number()?)),
+        "send" => Some(SavedTarget::Send(number()?, number()?)),
+        "trackfx" => Some(SavedTarget::TrackFx(number()?, number()?, number()?)),
+        "clip" => Some(SavedTarget::Clip(number()?, number()?)),
+        "clipfx" => Some(SavedTarget::ClipFx(number()?, number()?, number()?, number()?)),
+        _ => None,
+    }
+}
+
+fn shape_text(shape: crate::envelope::Shape) -> String {
+    use crate::envelope::Shape;
+    match shape {
+        Shape::Linear => "line".to_string(),
+        Shape::Hold => "hold".to_string(),
+        Shape::Curve(bend) => format!("bend{bend}"),
+    }
+}
+
+fn shape_from(text: &str) -> crate::envelope::Shape {
+    use crate::envelope::Shape;
+    match text {
+        "hold" => Shape::Hold,
+        other => match other.strip_prefix("bend").and_then(|rest| rest.parse().ok()) {
+            Some(bend) => Shape::Curve(bend),
+            None => Shape::Linear,
+        },
+    }
+}
+
+fn where_text(target: &SavedTarget) -> String {
+    match target {
+        SavedTarget::Master => "master".to_string(),
+        SavedTarget::Track(track) => format!("track:{track}"),
+        SavedTarget::Send(from, to) => format!("send:{from}:{to}"),
+        SavedTarget::TrackFx(track, slot, knob) => format!("trackfx:{track}:{slot}:{knob}"),
+        SavedTarget::Clip(track, at) => format!("clip:{track}:{at}"),
+        SavedTarget::ClipFx(track, at, slot, knob) => format!("clipfx:{track}:{at}:{slot}:{knob}"),
     }
 }

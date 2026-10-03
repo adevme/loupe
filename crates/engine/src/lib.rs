@@ -1,5 +1,6 @@
 mod audio;
 mod clock;
+mod envelope;
 mod export;
 mod file;
 mod input;
@@ -16,5 +17,6 @@ pub use input::{input_devices, Input, InputChoice, Take};
 pub use model::{
     Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Fx, Outcome, Project, Send, Track, TrackId,
 };
-pub use render::{mix_tracks, render, scale, Chains, Mixdown};
+pub use envelope::{Envelope, Mode, Point, Shape, Target};
+pub use render::{mix_tracks, render, render_through, scale, Chains, Mixdown};
 pub use source::Source;
