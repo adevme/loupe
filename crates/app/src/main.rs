@@ -82,7 +82,6 @@ pub enum Message {
     Redo,
     ClipGain(f32),
     SetFade { clip: ClipId, edge: Edge, fade: Fade },
-    ClipGainDone,
     AddTrack,
     RemoveTrack(TrackId),
     ToggleMute(TrackId),
@@ -253,7 +252,7 @@ impl App {
             Message::MoveClip { clip, track, start } => {
                 self.edit(Some(Run::Move(clip)), Command::MoveClip { clip, track, start });
             }
-            Message::DragEnd | Message::ClipGainDone => self.run = None,
+            Message::DragEnd => self.run = None,
             Message::Split => self.split(),
             Message::Delete => {
                 if let Some(clip) = self.selected.take() {
@@ -624,7 +623,7 @@ impl App {
                 slider(MIN_SCALE..=MAX_SCALE, self.pending_scale, Message::ScaleDragged)
                     .step(0.05)
                     .on_release(Message::ScaleChosen)
-                    .style(move |_, status| palette.gain(status)),
+                    .style(move |_, status| palette.slider(status)),
                 text_input("", &self.scale_text)
                     .on_input(Message::ScaleTyped)
                     .on_submit(Message::ScaleEntered)
@@ -678,15 +677,7 @@ impl App {
                 row![
                     text(clip.source.name.as_str()).size(13).font(palette.medium),
                     text(format!("{seconds:.3} s")).size(12).font(palette.mono).color(palette.text_dim),
-                    Space::with_width(12),
-                    text("Clip gain").size(12).color(palette.text_dim),
-                    slider(MIN_GAIN_DB..=MAX_GAIN_DB, db, Message::ClipGain)
-                        .step(0.1)
-                        .default(0.0)
-                        .on_release(Message::ClipGainDone)
-                        .width(200)
-                        .style(move |_, status| palette.gain(status)),
-                    text(format!("{db:+.1} dB")).size(12).font(palette.mono).width(70),
+                    text(format!("{db:+.1} dB")).size(12).font(palette.mono).color(palette.text_dim).width(70),
                     split,
                     button(icon("trash-2", 14.0))
                         .padding([6, 10])

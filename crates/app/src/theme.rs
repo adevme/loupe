@@ -267,7 +267,7 @@ impl Palette {
         }
     }
 
-    pub fn gain(&self, status: slider::Status) -> slider::Style {
+    pub fn slider(&self, status: slider::Status) -> slider::Style {
         let handle = match status {
             slider::Status::Active => self.text,
             _ => Color::WHITE,
