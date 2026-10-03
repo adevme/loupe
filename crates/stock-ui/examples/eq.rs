@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::time::Duration;
 
 use iced::{Element, Subscription, Task, Theme};
