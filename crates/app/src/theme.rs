@@ -16,6 +16,7 @@ pub struct Palette {
     pub raised: Color,
     pub hover: Color,
     pub line: Color,
+    pub grid: Color,
     pub text: Color,
     pub text_dim: Color,
     pub text_faint: Color,
@@ -31,16 +32,17 @@ pub struct Palette {
 }
 
 const NEUTRAL: Palette = Palette {
-    background: Color::from_rgb(0.043, 0.043, 0.051),
-    panel: Color::from_rgb(0.067, 0.067, 0.082),
-    raised: Color::from_rgb(0.11, 0.11, 0.135),
-    hover: Color::from_rgb(0.15, 0.15, 0.18),
-    line: Color::from_rgb(0.125, 0.125, 0.155),
-    text: Color::from_rgb(0.906, 0.906, 0.925),
-    text_dim: Color::from_rgb(0.6, 0.6, 0.66),
-    text_faint: Color::from_rgb(0.4, 0.4, 0.46),
-    accent: Color::from_rgb(0.906, 0.906, 0.925),
-    on_accent: Color::from_rgb(0.043, 0.043, 0.051),
+    background: Color::from_rgb(0.2, 0.2, 0.208),
+    panel: Color::from_rgb(0.157, 0.157, 0.165),
+    raised: Color::from_rgb(0.25, 0.25, 0.26),
+    hover: Color::from_rgb(0.31, 0.31, 0.322),
+    line: Color::from_rgb(0.11, 0.11, 0.118),
+    grid: Color::from_rgb(0.37, 0.37, 0.384),
+    text: Color::from_rgb(0.925, 0.925, 0.933),
+    text_dim: Color::from_rgb(0.67, 0.67, 0.69),
+    text_faint: Color::from_rgb(0.47, 0.47, 0.49),
+    accent: Color::from_rgb(0.925, 0.925, 0.933),
+    on_accent: Color::from_rgb(0.11, 0.11, 0.118),
     danger: Color::from_rgb(0.984, 0.443, 0.522),
     tracks: [
         Color::from_rgb(0.45, 0.72, 0.95),
@@ -59,12 +61,13 @@ const NEUTRAL: Palette = Palette {
     track_height: 92.0,
 };
 
-const COLOUR_KEYS: [&str; 11] = [
+const COLOUR_KEYS: [&str; 12] = [
     "background",
     "panel",
     "raised",
     "hover",
     "line",
+    "grid",
     "text",
     "text_dim",
     "text_faint",
@@ -146,6 +149,7 @@ impl Palette {
             "raised" => &mut self.raised,
             "hover" => &mut self.hover,
             "line" => &mut self.line,
+            "grid" => &mut self.grid,
             "text" => &mut self.text,
             "text_dim" => &mut self.text_dim,
             "text_faint" => &mut self.text_faint,

@@ -702,16 +702,16 @@ impl Timeline<'_> {
                 break;
             }
             let strength = if beats % 4.0 == 0.0 {
-                0.085
+                1.0
             } else if beats % 1.0 == 0.0 {
-                0.045
+                0.55
             } else {
-                0.022
+                0.28
             };
             frame.fill_rectangle(
                 Point::new(x.round(), 0.0),
                 Size::new(1.0, size.height),
-                theme::mix(p.background, p.text, strength),
+                theme::mix(p.background, p.grid, strength),
             );
         }
 
