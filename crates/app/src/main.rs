@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod files;
+mod home;
 mod icons;
 mod knob;
 mod menus;
@@ -36,6 +37,7 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+const EMPTY_SONG_ZOOM: f64 = 100.0;
 const TOP_BAR_HEIGHT: f32 = 53.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -125,9 +127,14 @@ pub enum Message {
     TogglePool,
     PlaceSource(usize),
     OpenProject,
-    DiscardAndOpen,
+    Discard,
+    GoHome,
+    NewBlank,
+    NewFromTemplate(PathBuf),
+    OpenRecent(PathBuf),
+    SaveAsTemplate,
     ProjectPicked(Option<PathBuf>),
-    ProjectRead(PathBuf, Result<files::Opened, String>),
+    ProjectRead(PathBuf, bool, Result<files::Opened, String>),
     Save,
     SaveAs,
     SavePicked(Option<PathBuf>),
@@ -162,7 +169,20 @@ pub enum Overlay {
     TrackMenu { track: TrackId, at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
-    ConfirmDiscard,
+    ConfirmDiscard(Pending),
+    TemplateName,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pending {
+    Open,
+    Home,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Screen {
+    Home,
+    Song,
 }
 
 struct App {
@@ -199,6 +219,9 @@ struct App {
     pool_open: bool,
     path: Option<PathBuf>,
     dirty: bool,
+    screen: Screen,
+    templates: Vec<PathBuf>,
+    recent: Vec<PathBuf>,
     cache: Cache,
 }
 
@@ -230,7 +253,7 @@ impl App {
             playing: false,
             settle: 0,
             playhead: 0,
-            view: View { zoom: 100.0, scroll: 0.0, scroll_y: 0.0 },
+            view: View { zoom: EMPTY_SONG_ZOOM, scroll: 0.0, scroll_y: 0.0 },
             window: Size::new(START_SIZE.width / scale as f32, START_SIZE.height / scale as f32),
             loading: 0,
             scale,
@@ -245,6 +268,9 @@ impl App {
             pool_open: false,
             path: None,
             dirty: false,
+            screen: Screen::Song,
+            templates: Vec::new(),
+            recent: Vec::new(),
             cache: Cache::new(),
         };
         let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args_os()
@@ -252,7 +278,12 @@ impl App {
             .map(PathBuf::from)
             .partition(|path| path.extension().is_some_and(|extension| extension == files::EXTENSION));
         let task = match projects.into_iter().next() {
-            Some(project) => app.read_project(project),
+            Some(project) => app.read_project(project, false),
+            None if audio.is_empty() => {
+                app.screen = Screen::Home;
+                app.refresh_home();
+                Task::none()
+            }
             None => app.import(audio),
         };
         (app, task)
@@ -269,7 +300,7 @@ impl App {
                 | Message::Redo
                 | Message::Import
         );
-        if self.overlay != Overlay::None && belongs_to_the_song {
+        if (self.overlay != Overlay::None || self.screen == Screen::Home) && belongs_to_the_song {
             return Task::none();
         }
         match message {
@@ -453,6 +484,10 @@ impl App {
                         self.overlay = Overlay::None;
                     }
                 }
+                Overlay::TemplateName => {
+                    let name = self.entry.clone();
+                    self.save_template(&name);
+                }
                 _ => {}
             },
             Message::ColourPicked(track, colour) => {
@@ -570,16 +605,38 @@ impl App {
                 }
             }
             Message::OpenProject => return self.ask_to_open(),
-            Message::DiscardAndOpen => return self.pick_project(),
-            Message::ProjectPicked(path) => {
-                if let Some(path) = path {
-                    return self.read_project(path);
+            Message::Discard => match self.overlay {
+                Overlay::ConfirmDiscard(Pending::Open) => return self.pick_project(),
+                Overlay::ConfirmDiscard(Pending::Home) => self.go_home(),
+                _ => {}
+            },
+            Message::GoHome => {
+                if self.dirty && !self.project.tracks.is_empty() {
+                    self.overlay = Overlay::ConfirmDiscard(Pending::Home);
+                } else {
+                    self.go_home();
                 }
             }
-            Message::ProjectRead(path, result) => {
+            Message::NewBlank => {
+                self.replace_project(Project::new(self.project.rate), HashMap::new());
+                self.screen = Screen::Song;
+            }
+            Message::NewFromTemplate(template) => return self.read_project(template, true),
+            Message::OpenRecent(project) => return self.read_project(project, false),
+            Message::SaveAsTemplate => {
+                self.overlay = Overlay::TemplateName;
+                self.entry = self.path.as_deref().map(home::stem).unwrap_or_default();
+                return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
+            }
+            Message::ProjectPicked(path) => {
+                if let Some(path) = path {
+                    return self.read_project(path, false);
+                }
+            }
+            Message::ProjectRead(path, as_template, result) => {
                 self.loading = self.loading.saturating_sub(1);
                 match result {
-                    Ok(opened) => self.adopt(path, opened),
+                    Ok(opened) => self.adopt(path, opened, as_template),
                     Err(why) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         self.problem = Some(format!("Could not open {name}: {why}"));
@@ -745,7 +802,11 @@ impl App {
     fn show_whole_song(&mut self) {
         let seconds = self.project.length() as f64 / self.project.rate.max(1) as f64;
         let room = (self.canvas_width() - timeline::HEADER_W - 48.0).max(100.0) as f64;
-        self.view.zoom = (room / seconds.max(0.01)).clamp(timeline::MIN_ZOOM, View::max_zoom(self.project.rate));
+        self.view.zoom = if seconds > 0.0 {
+            (room / seconds).clamp(timeline::MIN_ZOOM, View::max_zoom(self.project.rate))
+        } else {
+            EMPTY_SONG_ZOOM
+        };
         self.view.scroll = 0.0;
         self.cache.clear();
     }
@@ -766,6 +827,7 @@ impl App {
         self.loading += paths.len();
         if !paths.is_empty() {
             self.problem = None;
+            self.screen = Screen::Song;
         }
         Task::batch(paths.into_iter().map(|path| {
             let (done, loaded) = oneshot::channel();
@@ -839,6 +901,9 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        if self.screen == Screen::Home {
+            return stack![self.home(), self.overlay()].into();
+        }
         let timeline = canvas(Timeline {
             project: &self.project,
             palette: &self.palette,

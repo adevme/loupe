@@ -126,3 +126,43 @@ pub fn entries(text: &str) -> impl Iterator<Item = (usize, &str, &str)> {
         Some((i + 1, key.trim(), value.trim()))
     })
 }
+
+const RECENT_FILE: &str = "recent";
+const RECENT_KEPT: usize = 12;
+
+pub fn recent() -> Vec<PathBuf> {
+    let Some(file) = config_dir().map(|dir| dir.join(RECENT_FILE)) else {
+        return Vec::new();
+    };
+    fs::read_to_string(file)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+pub fn remember(project: &Path) {
+    let Some(dir) = config_dir() else {
+        return;
+    };
+    let mut list = recent();
+    list.retain(|known| known != project);
+    list.insert(0, project.to_path_buf());
+    list.truncate(RECENT_KEPT);
+    let lines: Vec<String> = list.iter().map(|path| path.display().to_string()).collect();
+    let _ = fs::create_dir_all(&dir);
+    let _ = fs::write(dir.join(RECENT_FILE), lines.join("\n") + "\n");
+}
+
+pub fn templates(chosen: Option<&Path>) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(templates_folder(chosen)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "lp"))
+        .collect();
+    found.sort();
+    found
+}

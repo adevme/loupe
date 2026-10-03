@@ -7,7 +7,7 @@ use loupe_engine::TrackId;
 use crate::{rule, App, Message, Overlay};
 
 const MENU_WIDTH: f32 = 220.0;
-const TALLEST_MENU: f32 = 190.0;
+const TALLEST_MENU: f32 = 250.0;
 const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_AT: Point = Point::new(76.0, 44.0);
 const HELP_MENU_AT: Point = Point::new(134.0, 44.0);
@@ -18,7 +18,8 @@ impl App {
         match &self.overlay {
             Overlay::None => Space::new(0, 0).into(),
             Overlay::Settings => self.centred(self.settings_sheet()),
-            Overlay::ConfirmDiscard => self.centred(self.discard_sheet()),
+            Overlay::ConfirmDiscard(_) => self.centred(self.discard_sheet()),
+            Overlay::TemplateName => self.centred(self.template_sheet()),
             Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
             Overlay::HelpMenu => self.floating(HELP_MENU_AT, self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
             Overlay::About => self.centred(self.about_sheet()),
@@ -71,10 +72,14 @@ impl App {
 
     fn file_menu(&self) -> Element<'_, Message> {
         let has_song = !self.project.tracks.is_empty();
-        let mut items = vec![self.item("Open project…", "Ctrl+O", Some(Message::OpenProject))];
+        let mut items = vec![
+            self.item("New project", "", Some(Message::GoHome)),
+            self.item("Open project…", "Ctrl+O", Some(Message::OpenProject)),
+        ];
         if has_song {
             items.push(self.item("Save", "Ctrl+S", Some(Message::Save)));
             items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
+            items.push(self.item("Save as template…", "", Some(Message::SaveAsTemplate)));
         }
         items.push(rule(self.palette));
         let audio = if self.pool_open { "Hide all audio" } else { "Show all audio" };
@@ -160,6 +165,25 @@ impl App {
         .into()
     }
 
+    fn template_sheet(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        container(
+            column![
+                text("Save as template").size(16).font(palette.semibold),
+                text("The song as it is now becomes a starting point on the start screen.")
+                    .size(13)
+                    .color(palette.text_dim),
+                self.entry_field("Template name"),
+            ]
+            .spacing(12),
+        )
+        .padding(20)
+        .width(Length::Fill)
+        .max_width(420)
+        .style(move |_| palette.sheet())
+        .into()
+    }
+
     fn discard_sheet(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let choices = row![
@@ -168,16 +192,16 @@ impl App {
                 .padding([7, 14])
                 .style(move |_, status| palette.outlined(status))
                 .on_press(Message::CloseOverlay),
-            button(text("Discard and open").size(13).font(palette.medium).color(Color::WHITE))
+            button(text("Discard").size(13).font(palette.medium).color(Color::WHITE))
                 .padding([7, 14])
                 .style(move |_, status| palette.destructive(status))
-                .on_press(Message::DiscardAndOpen),
+                .on_press(Message::Discard),
         ]
         .spacing(10);
         container(
             column![
-                text("Open another project?").size(16).font(palette.semibold),
-                text("This song has changes that are not saved. Opening another project discards them.")
+                text("Discard changes?").size(16).font(palette.semibold),
+                text("This song has changes that are not saved. Carrying on discards them.")
                     .size(13)
                     .color(palette.text_dim),
                 choices,

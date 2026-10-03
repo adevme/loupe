@@ -1,11 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use iced::futures::channel::oneshot;
 use iced::Task;
-use loupe_engine::{SavedProject, Source};
+use loupe_engine::{Project, SavedProject, Source, TrackId};
 
-use crate::{App, Message, Overlay};
+use crate::{settings, App, Message, Overlay, Pending, Screen};
 
 pub const EXTENSION: &str = "lp";
 
@@ -18,6 +19,9 @@ pub struct Opened {
 
 impl App {
     pub(crate) fn title(&self) -> String {
+        if self.screen == Screen::Home {
+            return "Loupe".to_string();
+        }
         let unsaved = if self.dirty { " •" } else { "" };
         match self.path.as_deref().and_then(Path::file_stem) {
             Some(name) => format!("{}{unsaved} — Loupe", name.to_string_lossy()),
@@ -70,6 +74,7 @@ impl App {
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
         match std::fs::write(&path, saved.to_text()) {
             Ok(()) => {
+                settings::remember(&path);
                 self.path = Some(path);
                 self.dirty = false;
                 self.problem = None;
@@ -80,7 +85,7 @@ impl App {
 
     pub(crate) fn ask_to_open(&mut self) -> Task<Message> {
         if self.dirty && !self.project.tracks.is_empty() {
-            self.overlay = Overlay::ConfirmDiscard;
+            self.overlay = Overlay::ConfirmDiscard(Pending::Open);
             return Task::none();
         }
         self.pick_project()
@@ -103,7 +108,7 @@ impl App {
         )
     }
 
-    pub(crate) fn read_project(&mut self, path: PathBuf) -> Task<Message> {
+    pub(crate) fn read_project(&mut self, path: PathBuf, as_template: bool) -> Task<Message> {
         let rate = self.project.rate;
         self.loading += 1;
         self.problem = None;
@@ -114,14 +119,38 @@ impl App {
         });
         Task::perform(
             async move { opened.await.unwrap_or_else(|_| Err("opening stopped unexpectedly".into())) },
-            move |result| Message::ProjectRead(path.clone(), result),
+            move |result| Message::ProjectRead(path.clone(), as_template, result),
         )
     }
 
-    pub(crate) fn adopt(&mut self, path: PathBuf, opened: Opened) {
-        let (project, heights) = opened.saved.build(&opened.sources, self.project.rate);
+    pub(crate) fn refresh_home(&mut self) {
+        self.templates = settings::templates(self.folder.as_deref());
+        self.recent = settings::recent();
+    }
+
+    pub(crate) fn go_home(&mut self) {
+        self.replace_project(Project::new(self.project.rate), HashMap::new());
+        self.overlay = Overlay::None;
+        self.screen = Screen::Home;
+        self.refresh_home();
+    }
+
+    pub(crate) fn save_template(&mut self, typed: &str) {
+        let name: String = typed.trim().chars().filter(|c| !matches!(c, '/' | '\\' | ':')).collect();
+        if name.is_empty() {
+            return;
+        }
+        self.overlay = Overlay::None;
+        let folder = settings::templates_folder(self.folder.as_deref());
+        let file = folder.join(format!("{name}.{EXTENSION}"));
+        let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
+        let written = std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&file, saved.to_text()));
+        self.problem = written.err().map(|why| format!("Could not save the template {}: {why}", file.display()));
+    }
+
+    pub(crate) fn replace_project(&mut self, project: Project, heights: HashMap<TrackId, f32>) {
         self.project = project;
-        self.heights = heights.into_iter().collect();
+        self.heights = heights;
         self.undo.clear();
         self.redo.clear();
         self.run = None;
@@ -135,8 +164,18 @@ impl App {
         self.changed();
         self.seek(0);
         self.show_whole_song();
-        self.path = Some(path);
+        self.path = None;
         self.dirty = false;
+    }
+
+    pub(crate) fn adopt(&mut self, path: PathBuf, opened: Opened, as_template: bool) {
+        let (project, heights) = opened.saved.build(&opened.sources, self.project.rate);
+        self.replace_project(project, heights.into_iter().collect());
+        self.screen = Screen::Song;
+        if !as_template {
+            settings::remember(&path);
+            self.path = Some(path);
+        }
         self.problem = match opened.not_found.as_slice() {
             [] => None,
             [one] => Some(format!("Audio not found: {one}")),
