@@ -12,10 +12,28 @@ impl App {
             return text("This track is gone.").size(13).into();
         };
         let heading = text(format!("Routing for {}", track.name)).size(14).font(palette.semibold);
-        let goes_to = match track.parent.and_then(|id| self.project.tracks.iter().find(|t| t.id == id)) {
-            Some(parent) => format!("Output: {}", parent.name),
-            None => "Output: Master".to_string(),
+        let master = TrackChoice { id: TrackId(0), name: "Master".into() };
+        let mut homes = vec![master.clone()];
+        for other in &self.project.tracks {
+            if other.id != from && !self.project.descends_from(other.id, from) {
+                homes.push(TrackChoice { id: other.id, name: other.name.clone() });
+            }
+        }
+        let home = match track.parent.and_then(|id| self.project.tracks.iter().find(|t| t.id == id)) {
+            Some(parent) => TrackChoice { id: parent.id, name: parent.name.clone() },
+            None => master,
         };
+        let goes_to = row![
+            text("Goes into").size(12.5).color(palette.text_dim),
+            pick_list(homes, Some(home), move |choice: TrackChoice| Message::SetTrackParent {
+                track: from,
+                parent: (choice.id != TrackId(0)).then_some(choice.id),
+            })
+            .text_size(13)
+            .padding([5, 10]),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
         let mut rows = column![].spacing(10);
         for send in &track.sends {
             let Some(target) = self.project.tracks.iter().find(|t| t.id == send.to) else {
@@ -87,7 +105,7 @@ impl App {
         container(
             column![
                 heading,
-                text(goes_to).size(12.5).color(palette.text_dim),
+                goes_to,
                 rule(palette),
                 text("Sends out").size(12).font(palette.semibold),
                 scrollable(rows).height(Length::Shrink),

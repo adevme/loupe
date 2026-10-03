@@ -875,7 +875,9 @@ impl App {
                 self.edit(None, Command::ToggleCollapsed(track));
             }
             Message::SetTrackParent { track, parent } => {
-                self.overlay = Overlay::None;
+                if matches!(self.overlay, Overlay::TrackMenu { .. }) {
+                    self.overlay = Overlay::None;
+                }
                 self.edit(None, Command::SetTrackParent { track, parent });
             }
             Message::OpenRouting(track) => self.overlay = Overlay::Routing(track),
