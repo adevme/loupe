@@ -2,6 +2,7 @@
 
 mod files;
 mod icons;
+mod knob;
 mod menus;
 mod mixer;
 mod pointer;
@@ -106,6 +107,7 @@ pub enum Message {
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
     ToggleMixer,
+    MasterGain(f32),
     TrackGain(TrackId, f32),
     TogglePool,
     PlaceSource(usize),
@@ -129,6 +131,7 @@ enum Run {
     Gain(ClipId),
     Fade(ClipId, Edge),
     TrackGain(TrackId),
+    Master,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -432,6 +435,9 @@ impl App {
             Message::TrackGain(track, db) => {
                 let gain = mixer::gain_from_db(db);
                 self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
+            }
+            Message::MasterGain(db) => {
+                self.edit(Some(Run::Master), Command::SetMasterGain(mixer::gain_from_db(db)));
             }
             Message::TogglePool => {
                 self.pool_open = !self.pool_open;
@@ -751,6 +757,23 @@ impl App {
             .style(move |_, status| palette.toggled(mixer_open, status))
             .on_press(Message::ToggleMixer);
 
+        let master = row![
+            text("Master").size(11).font(palette.medium).color(palette.text_dim),
+            canvas(knob::Knob {
+                palette: &self.palette,
+                db: mixer::db_from_gain(self.project.master),
+                lowest: mixer::SILENT_DB,
+                highest: mixer::LOUDEST_DB,
+                resting: 0.0,
+                on_turn: Message::MasterGain,
+            })
+            .width(30)
+            .height(30),
+            text(mixer::level_text(self.project.master)).size(12).font(palette.mono).color(palette.text_dim).width(40),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
         let history = row![
             icon_button(palette, "undo-2", (!self.undo.is_empty()).then_some(Message::Undo)),
             icon_button(palette, "redo-2", (!self.redo.is_empty()).then_some(Message::Redo)),
@@ -779,6 +802,8 @@ impl App {
                 text(clock).size(13).font(palette.mono).color(palette.text_dim).width(84),
                 text("BPM").size(11).font(palette.medium).color(palette.text_dim),
                 tempo,
+                Space::with_width(10),
+                master,
                 horizontal_space(),
                 history,
                 mixer,

@@ -34,6 +34,12 @@ pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
             );
         }
     }
+    if project.master != 1.0 {
+        for frame in out.iter_mut() {
+            frame[0] *= project.master;
+            frame[1] *= project.master;
+        }
+    }
 }
 
 fn mix(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32) {
@@ -203,6 +209,18 @@ mod tests {
         let (left, right) = (p.clip(c).unwrap(), p.clip(right).unwrap());
         assert_eq!((left.fade_in.len, left.fade_out.len), (400, 0));
         assert_eq!((right.fade_in.len, right.fade_out.len), (0, 300));
+    }
+
+    #[test]
+    fn the_master_level_scales_everything() {
+        let mut p = Project::new(48_000);
+        let a = track(&mut p);
+        let b = track(&mut p);
+        clip(&mut p, a, counting(100), 0);
+        clip(&mut p, b, counting(100), 0);
+        p.apply(Command::SetMasterGain(0.25)).unwrap();
+        assert_eq!(whole(&p, 100)[10], [5.0, -5.0]);
+        assert!(p.apply(Command::SetMasterGain(-1.0)).is_err());
     }
 
     #[test]

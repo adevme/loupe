@@ -19,11 +19,19 @@ pub fn gain_from_db(db: f32) -> f32 {
     }
 }
 
-fn db_from_gain(gain: f32) -> f32 {
+pub fn db_from_gain(gain: f32) -> f32 {
     if gain <= 0.0 {
         SILENT_DB
     } else {
         (20.0 * gain.log10()).clamp(SILENT_DB, LOUDEST_DB)
+    }
+}
+
+pub fn level_text(gain: f32) -> String {
+    if gain <= 0.0 {
+        "-inf".to_string()
+    } else {
+        format!("{:+.1}", db_from_gain(gain))
     }
 }
 
@@ -40,7 +48,7 @@ impl App {
         let strips = self.project.tracks.iter().map(|track| {
             let id = track.id;
             let db = db_from_gain(track.gain);
-            let level = if track.gain <= 0.0 { "-inf".to_string() } else { format!("{db:+.1}") };
+            let level = level_text(track.gain);
             let colour = match track.colour {
                 Some([r, g, b]) => Color::from_rgb8(r, g, b),
                 None => palette.track(track.id.0.saturating_sub(1) as usize),

@@ -11,6 +11,7 @@ const HEADER: &str = "loupe project 1";
 pub struct SavedProject {
     pub rate: u32,
     pub bpm: f64,
+    pub master: f32,
     pub sources: Vec<PathBuf>,
     pub tracks: Vec<SavedTrack>,
 }
@@ -44,6 +45,7 @@ impl SavedProject {
         Self {
             rate: project.rate,
             bpm: project.bpm,
+            master: project.master,
             sources: project.sources.iter().map(|source| source.path.clone()).collect(),
             tracks: project
                 .tracks
@@ -73,7 +75,7 @@ impl SavedProject {
     }
 
     pub fn to_text(&self) -> String {
-        let mut out = format!("{HEADER}\nrate {}\nbpm {}\n", self.rate, self.bpm);
+        let mut out = format!("{HEADER}\nrate {}\nbpm {}\nmaster {}\n", self.rate, self.bpm, self.master);
         for path in &self.sources {
             out.push_str(&format!("source {}\n", path.display()));
         }
@@ -108,13 +110,14 @@ impl SavedProject {
             Some((_, HEADER)) => {}
             _ => return Err("this is not a Loupe project file".into()),
         }
-        let mut saved = Self { rate: 0, bpm: 120.0, sources: Vec::new(), tracks: Vec::new() };
+        let mut saved = Self { rate: 0, bpm: 120.0, master: 1.0, sources: Vec::new(), tracks: Vec::new() };
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
             let bad = |what: &str| format!("line {number}: {what}");
             match kind {
                 "rate" => saved.rate = rest.parse().map_err(|_| bad("the sample rate is not a number"))?,
                 "bpm" => saved.bpm = rest.parse().map_err(|_| bad("the tempo is not a number"))?,
+                "master" => saved.master = rest.parse().map_err(|_| bad("the master level is not a number"))?,
                 "source" => saved.sources.push(PathBuf::from(rest)),
                 "track" => {
                     let (fields, name) = rest.split_once("name=").ok_or_else(|| bad("the track has no name"))?;
@@ -160,6 +163,7 @@ impl SavedProject {
         let mut project = Project::new(rate);
         let mut heights = Vec::new();
         let _ = project.apply(Command::SetBpm(self.bpm));
+        let _ = project.apply(Command::SetMasterGain(self.master));
         for source in sources {
             let _ = project.apply(Command::AddSource(source.clone()));
         }
@@ -240,6 +244,7 @@ mod tests {
         p.apply(Command::SetTrackColour { track, colour: Some([12, 200, 255]) }).unwrap();
         p.apply(Command::AddSource(spare)).unwrap();
         p.apply(Command::SetBpm(93.5)).unwrap();
+        p.apply(Command::SetMasterGain(0.5)).unwrap();
         p
     }
 

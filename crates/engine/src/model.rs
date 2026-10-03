@@ -74,6 +74,7 @@ pub struct Track {
 pub struct Project {
     pub rate: u32,
     pub bpm: f64,
+    pub master: f32,
     pub tracks: Vec<Track>,
     pub sources: Vec<Arc<Source>>,
     next_id: u64,
@@ -97,6 +98,7 @@ pub enum Command {
     SetClipGain { clip: ClipId, gain: f32 },
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetBpm(f64),
+    SetMasterGain(f32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,7 +121,7 @@ pub const MAX_BPM: f64 = 999.0;
 
 impl Project {
     pub fn new(rate: u32) -> Self {
-        Self { rate, bpm: 120.0, tracks: Vec::new(), sources: Vec::new(), next_id: 1 }
+        Self { rate, bpm: 120.0, master: 1.0, tracks: Vec::new(), sources: Vec::new(), next_id: 1 }
     }
 
     pub fn length(&self) -> Frames {
@@ -282,6 +284,10 @@ impl Project {
                     Edge::In => target.fade_in = fade,
                     Edge::Out => target.fade_out = fade,
                 }
+                Ok(Outcome::Done)
+            }
+            Command::SetMasterGain(gain) => {
+                self.master = valid_gain(gain)?;
                 Ok(Outcome::Done)
             }
             Command::SetBpm(bpm) => {

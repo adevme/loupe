@@ -1,3 +1,5 @@
+use iced::Point;
+
 pub struct Anchor {
     #[cfg(windows)]
     screen: windows::Point,
@@ -64,5 +66,37 @@ mod windows {
         unsafe {
             ShowCursor(visible as i32);
         }
+    }
+}
+
+const LEASH_PX: f32 = 40.0;
+const HOME_SLACK_PX: f32 = 1.5;
+
+pub struct EndlessDrag {
+    origin: Point,
+    last: Point,
+    travel_up: f32,
+    awaiting_return: bool,
+    anchor: Option<Anchor>,
+}
+
+impl EndlessDrag {
+    pub fn start(at: Point, hold_pointer: bool) -> Self {
+        let anchor = if hold_pointer { Anchor::here() } else { None };
+        Self { origin: at, last: at, travel_up: 0.0, awaiting_return: false, anchor }
+    }
+
+    pub fn moved(&mut self, to: Point) -> Option<f32> {
+        if self.awaiting_return && to.distance(self.origin) <= HOME_SLACK_PX {
+            self.awaiting_return = false;
+            self.last = to;
+            return None;
+        }
+        self.travel_up += self.last.y - to.y;
+        self.last = to;
+        if to.distance(self.origin) > LEASH_PX && !self.awaiting_return {
+            self.awaiting_return = self.anchor.as_ref().is_some_and(Anchor::bring_pointer_back);
+        }
+        Some(self.travel_up)
     }
 }
