@@ -20,6 +20,10 @@ pub trait Chains: Send {
         let _ = (track, slot);
         Err("plugin windows are not wired up".into())
     }
+
+    fn tweak(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
+        let _ = (track, slot, knob, value);
+    }
 }
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {

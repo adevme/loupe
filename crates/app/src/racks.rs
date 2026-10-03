@@ -1,9 +1,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use loupe_engine::{Chains, Project, TrackId};
 use loupe_plugins::rack::{Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
+use loupe_stock::{History, Scopes};
+
+#[derive(Clone, Default)]
+pub struct Peek {
+    pub scopes: Option<Arc<Scopes>>,
+    pub history: Option<Arc<History>>,
+}
+
+pub type Peeks = Arc<Mutex<HashMap<(TrackId, usize), Peek>>>;
 
 pub struct Racks {
     host: PathBuf,
@@ -11,11 +21,12 @@ pub struct Racks {
     block: usize,
     chains: HashMap<TrackId, Rack>,
     scratch: Vec<[f32; 2]>,
+    peeks: Peeks,
 }
 
 impl Racks {
-    pub fn new(rate: u32, block: usize) -> Self {
-        Self { host: host_beside_us(), rate, block, chains: HashMap::new(), scratch: Vec::new() }
+    pub fn new(rate: u32, block: usize, peeks: Peeks) -> Self {
+        Self { host: host_beside_us(), rate, block, chains: HashMap::new(), scratch: Vec::new(), peeks }
     }
 
     fn settle(&mut self, project: &Project) -> Vec<String> {
@@ -43,7 +54,20 @@ impl Racks {
                 .or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
             troubles.extend(rack.reconcile(&want));
         }
+        self.publish();
         troubles
+    }
+
+    fn publish(&self) {
+        let Ok(mut held) = self.peeks.lock() else { return };
+        held.clear();
+        for (id, rack) in &self.chains {
+            for slot in 0..rack.len() {
+                if let Some(made) = rack.built_at(slot) {
+                    held.insert((*id, slot), Peek { scopes: made.scopes(), history: made.history() });
+                }
+            }
+        }
     }
 
     fn problems(&self) -> Vec<(TrackId, String, String)> {
@@ -72,6 +96,12 @@ impl Chains for Racks {
         match self.chains.get_mut(&track) {
             Some(rack) => rack.show(slot),
             None => Err("that track has no plugins".into()),
+        }
+    }
+
+    fn tweak(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
+        if let Some(rack) = self.chains.get_mut(&track) {
+            rack.tweak(slot, knob, value);
         }
     }
 

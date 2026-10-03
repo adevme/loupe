@@ -112,6 +112,14 @@ pub trait Effect: Send {
         0
     }
 
+    fn scopes(&self) -> Option<std::sync::Arc<Scopes>> {
+        None
+    }
+
+    fn history(&self) -> Option<std::sync::Arc<History>> {
+        None
+    }
+
     fn set_tempo(&mut self, _bpm: f32) {}
 
     fn set_by_id(&mut self, id: &str, value: f32) -> bool {

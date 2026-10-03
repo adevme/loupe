@@ -98,6 +98,16 @@ impl Rack {
         }
     }
 
+    pub fn tweak(&mut self, slot: usize, knob: usize, value: f32) {
+        if let Some(made) = self.slots.get_mut(slot).and_then(|found| found.built.as_mut()) {
+            made.set(knob, value);
+        }
+    }
+
+    pub fn built_at(&self, slot: usize) -> Option<&dyn loupe_stock::Effect> {
+        self.slots.get(slot)?.built.as_deref()
+    }
+
     pub fn bypass(&mut self, slot: usize, bypassed: bool) {
         if let Some(found) = self.slots.get_mut(slot) {
             found.bypassed = bypassed;

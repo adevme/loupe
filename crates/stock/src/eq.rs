@@ -323,6 +323,10 @@ impl Default for Equalizer {
 }
 
 impl Effect for Equalizer {
+    fn scopes(&self) -> Option<std::sync::Arc<Scopes>> {
+        Some(self.scopes())
+    }
+
     fn name(&self) -> &'static str {
         "Loupe EQ"
     }

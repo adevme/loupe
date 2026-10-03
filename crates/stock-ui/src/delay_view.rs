@@ -33,6 +33,12 @@ impl DelayEditor {
         self.bpm = bpm;
     }
 
+    pub fn load(&mut self, values: &[f32]) {
+        for (slot, value) in values.iter().enumerate().take(self.knobs.values.len()) {
+            self.knobs.values[slot] = *value;
+        }
+    }
+
     pub fn update(&mut self, change: Change) -> Vec<(usize, f32)> {
         self.knobs.apply(change)
     }

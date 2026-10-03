@@ -8,7 +8,7 @@ use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::clock;
-use crate::model::{ClipId, Frames, Project};
+use crate::model::{ClipId, Frames, Project, TrackId};
 use crate::render::{mix_tracks_metered, scale, Chains, Mixdown};
 
 const MAX_BLOCK: usize = 4096;
@@ -26,6 +26,7 @@ pub enum Output {
 enum Msg {
     Project(Arc<Project>),
     Chains(Option<Box<dyn Chains>>),
+    Tweak { track: TrackId, slot: usize, knob: usize, value: f32 },
     Play,
     Stop,
     Seek(Frames),
@@ -125,6 +126,11 @@ impl Rt {
                 Msg::Chains(racks) => {
                     if let Some(old) = std::mem::replace(&mut self.chains, racks) {
                         let _ = self.hand_back.push(old);
+                    }
+                }
+                Msg::Tweak { track, slot, knob, value } => {
+                    if let Some(racks) = self.chains.as_deref_mut() {
+                        racks.tweak(track, slot, knob, value);
                     }
                 }
                 Msg::Play => self.playing = true,
@@ -315,6 +321,10 @@ impl Engine {
 
     pub fn use_chains(&mut self, chains: Box<dyn Chains>) {
         self.send(Msg::Chains(Some(chains)));
+    }
+
+    pub fn tweak(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
+        self.send(Msg::Tweak { track, slot, knob, value });
     }
 
     pub fn drop_chains(&mut self) {

@@ -14,6 +14,7 @@ mod pool;
 mod routing;
 mod plugins;
 mod racks;
+mod stockwin;
 mod recording;
 mod selection;
 mod settings;
@@ -164,6 +165,8 @@ pub enum Message {
     BypassPlugin(TrackId, usize),
     WheelOverFader(mixer::Level, iced::mouse::ScrollDelta),
     ShowPlugin(TrackId, usize),
+    StockTurned(loupe_stock_ui::Change),
+    StockTold(loupe_stock_ui::EqMessage),
     OpenMatrix,
     AddSend { from: TrackId, to: TrackId },
     RemoveSend { from: TrackId, to: TrackId },
@@ -270,6 +273,7 @@ pub enum Overlay {
     Clip(ClipId),
     Routing(TrackId),
     Plugins(TrackId),
+    Stock,
     Matrix,
 }
 
@@ -309,6 +313,8 @@ struct App {
     engine: Engine,
     racks: Option<Box<dyn Chains>>,
     fx_was: u64,
+    peeks: racks::Peeks,
+    stock: Option<stockwin::Window>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
     plugin_filter: String,
@@ -431,6 +437,8 @@ impl App {
             cache: Cache::new(),
             racks: None,
             fx_was: 0,
+            peeks: racks::Peeks::default(),
+            stock: None,
             found: Vec::new(),
             scanning: true,
             plugin_filter: String::new(),
@@ -536,6 +544,9 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                if let Some(window) = self.stock.as_mut() {
+                    window.tick();
+                }
                 if self.copied.is_some_and(|at| at.elapsed() > COPIED_SHOWN_FOR) {
                     self.copied = None;
                 }
@@ -707,6 +718,7 @@ impl App {
                     self.choose(None);
                 }
                 self.overlay = Overlay::None;
+                self.stock = None;
                 self.editing_level = None;
                 self.stop_preview();
             }
@@ -954,14 +966,14 @@ impl App {
             Message::RemovePlugin(track, slot) => {
                 self.edit(None, Command::RemoveFx { track, slot });
             }
-            Message::ShowPlugin(track, slot) => {
-                if let Some(mut racks) = self.borrow_racks() {
-                    if let Err(why) = racks.show(track, slot) {
-                        self.problem = Some(why);
-                    }
-                    self.racks = Some(racks);
-                    self.hand_racks_over();
-                }
+            Message::ShowPlugin(track, slot) => self.open_plugin_window(track, slot),
+            Message::StockTurned(change) => {
+                let changes = self.stock.as_mut().map(|window| window.turned(change)).unwrap_or_default();
+                self.plugin_changed(changes);
+            }
+            Message::StockTold(told) => {
+                let changes = self.stock.as_mut().map(|window| window.told(told)).unwrap_or_default();
+                self.plugin_changed(changes);
             }
             Message::BypassPlugin(track, slot) => {
                 let bypassed = self
@@ -1136,7 +1148,7 @@ impl App {
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
             _ => None,
         });
-        let watching = self.exporting || self.copied.is_some() || self.input.is_some() || self.opening.is_some() || self.master_level > 0.0005;
+        let watching = self.exporting || self.copied.is_some() || self.input.is_some() || self.opening.is_some() || self.stock.is_some() || self.master_level > 0.0005;
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
@@ -1239,6 +1251,61 @@ impl App {
         }
     }
 
+    fn open_plugin_window(&mut self, track: TrackId, slot: usize) {
+        let Some(fx) = self.project.tracks.iter().find(|t| t.id == track).and_then(|t| t.fx.get(slot)).cloned() else {
+            return;
+        };
+        if !loupe_plugins::rack::is_built_in(&fx.path) {
+            if let Some(mut racks) = self.borrow_racks() {
+                if let Err(why) = racks.show(track, slot) {
+                    self.problem = Some(why);
+                }
+                self.racks = Some(racks);
+                self.hand_racks_over();
+            }
+            return;
+        }
+        let values: Vec<f32> = fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect();
+        let peek = self.peeks.lock().ok().and_then(|held| held.get(&(track, slot)).cloned()).unwrap_or_default();
+        let rate = self.engine.rate() as f32;
+        let bpm = self.project.bpm as f32;
+        match stockwin::Window::open(track, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
+            Some(window) => {
+                self.stock = Some(window);
+                self.overlay = Overlay::Stock;
+            }
+            None => self.problem = Some("Loupe has no window for that plugin".into()),
+        }
+    }
+
+    fn plugin_changed(&mut self, changes: Vec<(usize, f32)>) {
+        let Some(window) = self.stock.as_ref() else { return };
+        let (track, slot) = (window.track, window.slot);
+        if changes.is_empty() {
+            return;
+        }
+        for (knob, value) in &changes {
+            self.engine.tweak(track, slot, *knob, *value);
+        }
+        let mut state = self
+            .project
+            .tracks
+            .iter()
+            .find(|t| t.id == track)
+            .and_then(|t| t.fx.get(slot))
+            .map(|fx| fx.state.clone())
+            .unwrap_or_default();
+        for (knob, value) in changes {
+            let at = knob * 4;
+            if state.len() < at + 4 {
+                state.resize(at + 4, 0);
+            }
+            state[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let _ = self.project.apply(Command::SetFxState { track, slot, state });
+        self.dirty = true;
+    }
+
     fn fx_shape(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1259,7 +1326,7 @@ impl App {
     fn follow_chains(&mut self) {
         let mut racks = match self.borrow_racks() {
             Some(racks) => racks,
-            None => Box::new(racks::Racks::new(self.engine.rate(), 512)) as Box<dyn Chains>,
+            None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone())) as Box<dyn Chains>,
         };
         let troubles = racks.follow(&self.project);
         if let Some(first) = troubles.first() {

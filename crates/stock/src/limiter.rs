@@ -148,6 +148,10 @@ impl Default for Limiter {
 }
 
 impl Effect for Limiter {
+    fn history(&self) -> Option<std::sync::Arc<History>> {
+        Some(self.history())
+    }
+
     fn name(&self) -> &'static str {
         "Loupe Limiter"
     }

@@ -82,6 +82,12 @@ impl EqEditor {
         &self.values
     }
 
+    pub fn load(&mut self, values: &[f32]) {
+        for (slot, value) in values.iter().enumerate().take(self.values.len()) {
+            self.values[slot] = *value;
+        }
+    }
+
     fn get(&self, band: usize, which: Knob) -> f32 {
         self.values[knob(band, which)]
     }

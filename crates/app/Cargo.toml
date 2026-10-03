@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 loupe-engine = { path = "../engine" }
 loupe-plugins = { path = "../plugins" }
+loupe-stock = { path = "../stock" }
+loupe-stock-ui = { path = "../stock-ui" }
 iced = { version = "0.13", features = ["tokio", "canvas", "advanced", "image"] }
 rfd = "0.14"
 iced_runtime = "0.13"

@@ -20,7 +20,7 @@ fn main() {
         Err(why) => println!("trouble: {why}"),
     }
     let mut audio: Vec<[f32; 2]> = vec![[0.25, 0.25]; 512];
-    for _ in 0..200 {
+    for _ in 0..900 {
         let mut copy = audio.clone();
         rack.process(&mut copy);
         audio = vec![[0.25, 0.25]; 512];

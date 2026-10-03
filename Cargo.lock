@@ -2206,6 +2206,8 @@ dependencies = [
  "iced_runtime",
  "loupe-engine",
  "loupe-plugins",
+ "loupe-stock",
+ "loupe-stock-ui",
  "rfd",
  "winresource",
 ]
