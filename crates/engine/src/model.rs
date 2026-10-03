@@ -75,6 +75,7 @@ pub struct Project {
     pub rate: u32,
     pub bpm: f64,
     pub tracks: Vec<Track>,
+    pub sources: Vec<Arc<Source>>,
     next_id: u64,
 }
 
@@ -116,7 +117,7 @@ pub const MAX_BPM: f64 = 999.0;
 
 impl Project {
     pub fn new(rate: u32) -> Self {
-        Self { rate, bpm: 120.0, tracks: Vec::new(), next_id: 1 }
+        Self { rate, bpm: 120.0, tracks: Vec::new(), sources: Vec::new(), next_id: 1 }
     }
 
     pub fn length(&self) -> Frames {
@@ -190,6 +191,7 @@ impl Project {
                 let t = self.track_index(track)?;
                 let id = ClipId(self.fresh());
                 let len = source.frames.len() as Frames;
+                self.keep(&source);
                 self.tracks[t].clips.push(Clip {
                     id,
                     source,
@@ -269,6 +271,12 @@ impl Project {
                 self.bpm = bpm;
                 Ok(Outcome::Done)
             }
+        }
+    }
+
+    fn keep(&mut self, source: &Arc<Source>) {
+        if !self.sources.iter().any(|kept| Arc::ptr_eq(kept, source)) {
+            self.sources.push(source.clone());
         }
     }
 

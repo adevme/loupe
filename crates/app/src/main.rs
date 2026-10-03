@@ -4,6 +4,7 @@ mod icons;
 mod menus;
 mod mixer;
 mod pointer;
+mod pool;
 mod settings;
 mod theme;
 mod timeline;
@@ -94,6 +95,7 @@ pub enum Message {
     CloseOverlay,
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
+    OpenFileMenu,
     StartRename(TrackId),
     StartColour(TrackId),
     EntryTyped(String),
@@ -102,6 +104,8 @@ pub enum Message {
     DuplicateTrack(TrackId),
     ToggleMixer,
     TrackGain(TrackId, f32),
+    TogglePool,
+    PlaceSource(usize),
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -121,6 +125,7 @@ enum Run {
 pub enum Overlay {
     None,
     Settings,
+    FileMenu,
     TrackMenu { track: TrackId, at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
@@ -151,6 +156,7 @@ struct App {
     overlay: Overlay,
     entry: String,
     mixer_open: bool,
+    pool_open: bool,
     cache: Cache,
 }
 
@@ -186,6 +192,7 @@ impl App {
             overlay: Overlay::None,
             entry: String::new(),
             mixer_open: false,
+            pool_open: false,
             cache: Cache::new(),
         };
         let task = app.import(std::env::args_os().skip(1).map(PathBuf::from).collect());
@@ -355,6 +362,7 @@ impl App {
                 self.edit(None, Command::DeleteClip(clip));
             }
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
+            Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::StartRename(track) => {
                 if let (Overlay::TrackMenu { at, .. }, Some(found)) = (&self.overlay, self.project.track(track)) {
                     self.entry = found.name.clone();
@@ -398,6 +406,16 @@ impl App {
             Message::TrackGain(track, db) => {
                 let gain = mixer::gain_from_db(db);
                 self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
+            }
+            Message::TogglePool => {
+                self.pool_open = !self.pool_open;
+                self.overlay = Overlay::None;
+                self.cache.clear();
+            }
+            Message::PlaceSource(index) => {
+                if let Some(source) = self.project.sources.get(index).cloned() {
+                    self.place(source);
+                }
             }
             Message::ScaleDragged(scale) => {
                 self.pending_scale = scale;
@@ -492,6 +510,19 @@ impl App {
         }
     }
 
+    fn canvas_width(&self) -> f32 {
+        let beside = if self.pool_open { pool::POOL_WIDTH + 1.0 } else { 0.0 };
+        (self.window.width - beside).max(timeline::HEADER_W + 1.0)
+    }
+
+    fn show_whole_song(&mut self) {
+        let seconds = self.project.length() as f64 / self.project.rate.max(1) as f64;
+        let room = (self.canvas_width() - timeline::HEADER_W - 48.0).max(100.0) as f64;
+        self.view.zoom = (room / seconds.max(0.01)).clamp(timeline::MIN_ZOOM, View::max_zoom(self.project.rate));
+        self.view.scroll = 0.0;
+        self.cache.clear();
+    }
+
     fn set_loop(&mut self, range: LoopRange) {
         self.loop_range = range;
         self.engine.set_loop(range);
@@ -527,7 +558,6 @@ impl App {
     fn place(&mut self, source: Arc<Source>) {
         let first = self.project.tracks.is_empty();
         let start = self.playhead;
-        let seconds = source.frames.len() as f64 / self.project.rate as f64;
         let name = source.name.clone();
         let placed = self.transact(None, |project| {
             let Outcome::Track(track) = project.apply(Command::AddTrack { name })? else {
@@ -538,10 +568,7 @@ impl App {
         if let Some(Outcome::Clip(clip)) = placed {
             self.selected = Some(clip);
             if first {
-                let room = (self.window.width - timeline::HEADER_W - 48.0).max(100.0) as f64;
-                self.view.zoom = (room / seconds.max(0.01))
-                    .clamp(timeline::MIN_ZOOM, View::max_zoom(self.project.rate));
-                self.view.scroll = 0.0;
+                self.show_whole_song();
             }
         }
     }
@@ -575,7 +602,7 @@ impl App {
     }
 
     fn follow(&mut self) {
-        let width = (self.window.width - timeline::HEADER_W) as f64;
+        let width = (self.canvas_width() - timeline::HEADER_W) as f64;
         let x = (self.playhead as f64 / self.project.rate as f64 - self.view.scroll) * self.view.zoom;
         if self.playing && (x > width - 24.0 || x < 0.0) {
             let lead = width * 0.1 / self.view.zoom;
@@ -593,14 +620,18 @@ impl App {
             selected: self.selected,
             playhead: self.playhead,
             loop_range: self.loop_range,
-            width: self.window.width,
+            width: self.canvas_width(),
             cache: &self.cache,
         })
         .width(Length::Fill)
         .height(Length::Fill);
 
         let palette = self.palette;
-        let mut song = column![self.transport(), rule(palette), timeline];
+        let mut middle = row![timeline];
+        if self.pool_open {
+            middle = middle.push(upright_rule(palette)).push(self.pool());
+        }
+        let mut song = column![self.transport(), rule(palette), middle];
         if self.mixer_open {
             song = song.push(rule(palette)).push(self.mixer());
         }
@@ -636,7 +667,17 @@ impl App {
             .width(46)
             .style(move |_, status| palette.field(status));
 
+        let file_menu_open = self.overlay == Overlay::FileMenu;
         let mixer_open = self.mixer_open;
+        let file = button(
+            row![text("File").size(13).font(palette.medium), icon("chevron-down", 12.0)]
+                .spacing(5)
+                .align_y(Alignment::Center),
+        )
+        .padding([6, 10])
+        .style(move |_, status| palette.toggled(file_menu_open, status))
+        .on_press(Message::OpenFileMenu);
+
         let mixer = button(container(icon("sliders-vertical", 15.0)).center(30))
             .padding(0)
             .style(move |_, status| palette.toggled(mixer_open, status))
@@ -660,7 +701,8 @@ impl App {
         container(
             row![
                 text("Loupe").size(16).font(palette.semibold),
-                Space::with_width(18),
+                file,
+                Space::with_width(6),
                 icon_button(palette, "skip-back", Some(Message::ToStart)),
                 play,
                 Space::with_width(10),
@@ -851,6 +893,10 @@ fn icon_button(palette: Palette, name: &str, on_press: Option<Message>) -> Eleme
         .style(move |_, status| palette.ghost(status))
         .on_press_maybe(on_press)
         .into()
+}
+
+fn upright_rule(palette: Palette) -> Element<'static, Message> {
+    container(Space::new(1, Length::Fill)).style(move |_| palette.rule()).into()
 }
 
 fn rule(palette: Palette) -> Element<'static, Message> {

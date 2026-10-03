@@ -11,6 +11,8 @@ pub fn glyph(name: &str) -> char {
         "x" => '\u{e1b2}',
         "settings" => '\u{e154}',
         "sliders-vertical" => '\u{e162}',
+        "chevron-down" => '\u{e06d}',
+        "plus" => '\u{e13d}',
         _ => '?',
     }
 }

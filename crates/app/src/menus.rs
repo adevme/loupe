@@ -9,6 +9,7 @@ use crate::{App, Message, Overlay};
 const MENU_WIDTH: f32 = 220.0;
 const TALLEST_MENU: f32 = 190.0;
 const EDGE_GAP: f32 = 8.0;
+const FILE_MENU_AT: Point = Point::new(76.0, 44.0);
 pub const ENTRY_ID: &str = "overlay-entry";
 
 impl App {
@@ -16,6 +17,7 @@ impl App {
         match &self.overlay {
             Overlay::None => Space::new(0, 0).into(),
             Overlay::Settings => self.centred(self.settings_sheet()),
+            Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
@@ -61,6 +63,11 @@ impl App {
         .style(move |_, status| palette.menu_item(status))
         .on_press_maybe(message)
         .into()
+    }
+
+    fn file_menu(&self) -> Element<'_, Message> {
+        let audio = if self.pool_open { "Hide all audio" } else { "Show all audio" };
+        self.menu(vec![self.item(audio, "", Some(Message::TogglePool))])
     }
 
     fn track_menu(&self, track: TrackId) -> Element<'_, Message> {
