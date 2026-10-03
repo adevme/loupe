@@ -90,7 +90,12 @@ impl App {
     fn master_strip(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let muted = self.project.master_muted;
-        let percent = self.project.master * 100.0;
+        let heard = self
+            .project
+            .envelope(loupe_engine::Target::MasterGain)
+            .and_then(|shape| shape.value_at(self.playhead))
+            .unwrap_or(self.project.master);
+        let percent = heard * 100.0;
         container(
             column![
                 container(Space::new(Length::Fill, 3)).style(move |_| container::Style {
@@ -113,7 +118,7 @@ impl App {
                 .spacing(10)
                 .height(Length::Fill)
                 .align_y(Alignment::Center),
-                self.level_readout(Level::Master, self.project.master),
+                self.level_readout(Level::Master, heard),
                 button(text("M").size(11.5).font(palette.semibold))
                     .padding([3, 9])
                     .style(move |_, status| palette.mute(muted, status))
@@ -141,7 +146,12 @@ impl App {
         let strips = self.project.tracks.iter().enumerate().map(|(index, track)| {
             let id = track.id;
             let level = self.track_levels.get(index).copied().unwrap_or(0.0);
-            let db = db_from_gain(track.gain);
+            let shown = self
+                .project
+                .envelope(loupe_engine::Target::TrackGain(id))
+                .and_then(|shape| shape.value_at(self.playhead))
+                .unwrap_or(track.gain);
+            let db = db_from_gain(shown);
             let colour = match track.colour {
                 Some([r, g, b]) => Color::from_rgb8(r, g, b),
                 None => palette.track(track.id.0.saturating_sub(1) as usize),
@@ -174,7 +184,7 @@ impl App {
                     .spacing(10)
                     .height(Length::Fill)
                     .align_y(Alignment::Center),
-                    self.level_readout(Level::Track(id), track.gain),
+                    self.level_readout(Level::Track(id), shown),
                     hrow![
                         button(text("M").size(11.5).font(palette.semibold))
                             .padding([3, 9])
