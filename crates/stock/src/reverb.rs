@@ -349,6 +349,16 @@ mod tests {
     }
 
     #[test]
+    fn the_decay_curve_is_a_real_time_everywhere() {
+        let values: Vec<f32> = PARAMS.iter().map(|param| param.default).collect();
+        for step in 0..=200 {
+            let hz = 20.0 * 1000f32.powf(step as f32 / 200.0);
+            let seconds = decay_seconds(&values, hz);
+            assert!(seconds.is_finite() && seconds >= 0.0, "{hz} Hz gave {seconds}");
+        }
+    }
+
+    #[test]
     fn bass_decay_lets_the_lows_ring_longer() {
         let measure = |bass: f32| {
             let rate = 48_000.0;

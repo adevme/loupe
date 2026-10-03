@@ -53,7 +53,7 @@ pub struct Param {
 impl Param {
     pub const fn new(id: &'static str, name: &'static str, min: f32, max: f32, default: f32, unit: Unit) -> Self {
         let skew = match unit {
-            Unit::Hertz | Unit::Milliseconds | Unit::Seconds | Unit::Ratio => Skew::Logarithmic,
+            Unit::Hertz | Unit::Milliseconds | Unit::Seconds | Unit::Ratio if min > 0.0 => Skew::Logarithmic,
             _ => Skew::Linear,
         };
         Self { id, name, min, max, default, unit, skew, choices: &[] }
@@ -262,6 +262,20 @@ mod tests {
             assert!(audio.iter().flatten().all(|sample| sample.is_finite()), "{name} made a bad sample");
         }
         assert!(make("Fog").is_none());
+    }
+
+    #[test]
+    fn every_knob_maps_to_a_real_position() {
+        for name in NAMES {
+            let effect = make(name).unwrap();
+            for param in effect.params() {
+                for value in [param.min, param.default, param.max] {
+                    let position = param.to_position(value);
+                    assert!(position.is_finite(), "{name} {} at {value}", param.id);
+                    assert!((param.from_position(position) - value).abs() <= (param.max - param.min) * 1e-4, "{name} {}", param.id);
+                }
+            }
+        }
     }
 
     #[test]

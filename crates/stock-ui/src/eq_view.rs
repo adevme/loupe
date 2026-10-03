@@ -1,12 +1,13 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::{button, column, container, horizontal_space, pick_list, row, slider, text};
-use iced::{alignment, keyboard, mouse, Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+use iced::{keyboard, mouse, Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use loupe_stock::{band_design, knob, BandShape, Effect, Equalizer, Knob, Param, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
 
 use crate::look::{fade, Look};
+use crate::kit::{hertz, put_text};
 use crate::spectrum::Spectrum;
 
 const LOWEST_HZ: f32 = 10.0;
@@ -207,7 +208,7 @@ impl EqEditor {
             band_row = band_row.push(choose(Knob::Slope, &SLOPES));
         }
         band_row = band_row.push(choose(Knob::Place, &PLACES));
-        let mut readout = format!("{}", hertz_text(self.get(band, Knob::Freq)));
+        let mut readout = format!("{}", hertz(self.get(band, Knob::Freq)));
         if shape.has_gain() {
             readout.push_str(&format!("   {:+.1} dB", self.get(band, Knob::Gain)));
         }
@@ -537,7 +538,7 @@ impl canvas::Program<EqMessage> for Graph<'_> {
         let told = grip.drag.as_ref().map(|drag| drag.band).or(hovered);
         if let Some(band) = told {
             let at = self.node(size, band);
-            let mut label = hertz_text(editor.get(band, Knob::Freq));
+            let mut label = hertz(editor.get(band, Knob::Freq));
             if editor.shape(band).has_gain() {
                 label.push_str(&format!("  {:+.1} dB", editor.get(band, Knob::Gain)));
             }
@@ -568,33 +569,3 @@ impl canvas::Program<EqMessage> for Graph<'_> {
     }
 }
 
-fn put_text(frame: &mut Frame, content: &str, at: Point, size: f32, color: Color, anchor: (f32, f32)) {
-    let across = match anchor.0 {
-        a if a <= 0.0 => alignment::Horizontal::Left,
-        a if a >= 1.0 => alignment::Horizontal::Right,
-        _ => alignment::Horizontal::Center,
-    };
-    let down = match anchor.1 {
-        a if a <= 0.0 => alignment::Vertical::Top,
-        a if a >= 1.0 => alignment::Vertical::Bottom,
-        _ => alignment::Vertical::Center,
-    };
-    let text = Text {
-        content: content.to_string(),
-        position: Point::new(at.x.round(), at.y.round()),
-        color,
-        size: size.into(),
-        horizontal_alignment: across,
-        vertical_alignment: down,
-        ..Text::default()
-    };
-    text.draw_with(|glyph, colour| frame.fill(&glyph, colour));
-}
-
-fn hertz_text(hz: f32) -> String {
-    if hz >= 1000.0 {
-        format!("{:.2} kHz", hz / 1000.0)
-    } else {
-        format!("{hz:.0} Hz")
-    }
-}
