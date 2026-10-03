@@ -23,10 +23,11 @@ impl App {
             return "Loupe".to_string();
         }
         let unsaved = if self.dirty { " •" } else { "" };
-        match self.path.as_deref().and_then(Path::file_stem) {
-            Some(name) => format!("{}{unsaved} — Loupe", name.to_string_lossy()),
-            None => format!("Loupe{unsaved}"),
-        }
+        let name = match self.path.as_deref().and_then(Path::file_stem) {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => "Untitled".to_string(),
+        };
+        format!("{name}{unsaved} - Loupe")
     }
 
     fn dialog_folder(&self) -> PathBuf {
