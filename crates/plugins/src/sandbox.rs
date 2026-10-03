@@ -9,6 +9,7 @@ use crate::wire::{next_line, read_block, write_block, Ask, Reply};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 const BLOCK_PATIENCE: Duration = Duration::from_millis(500);
+const FIRST_BLOCK_PATIENCE: Duration = Duration::from_secs(10);
 
 enum Want {
     Line,
@@ -28,6 +29,7 @@ pub struct Sandbox {
     gets: Receiver<Got>,
     reader: Option<JoinHandle<()>>,
     lost: bool,
+    ran: bool,
 }
 
 impl Sandbox {
@@ -43,7 +45,7 @@ impl Sandbox {
         let (wants, asked) = channel::<Want>();
         let (sends, gets) = channel::<Got>();
         let reader = std::thread::spawn(move || read_for(out, asked, sends));
-        Ok(Self { child, writing, wants: Some(wants), gets, reader: Some(reader), lost: false })
+        Ok(Self { child, writing, wants: Some(wants), gets, reader: Some(reader), lost: false, ran: false })
     }
 
     pub fn ask(&mut self, ask: Ask) -> Result<Reply, String> {
@@ -75,7 +77,9 @@ impl Sandbox {
         if self.wants.as_ref().is_none_or(|w| w.send(Want::Block).is_err()) {
             return Err(self.give_up("the plugin host stopped listening"));
         }
-        match self.gets.recv_timeout(BLOCK_PATIENCE) {
+        let waiting = if self.ran { BLOCK_PATIENCE } else { FIRST_BLOCK_PATIENCE };
+        self.ran = true;
+        match self.gets.recv_timeout(waiting) {
             Ok(Got::Block(came)) => {
                 audio.clear();
                 audio.extend_from_slice(&came);

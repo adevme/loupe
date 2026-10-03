@@ -219,6 +219,18 @@ impl Effect {
         }
     }
 
+    pub fn latency(&self) -> usize {
+        unsafe {
+            let Some(get) = (*self.plugin).get_extension else { return 0 };
+            let found = get(self.plugin, clap_sys::ext::latency::CLAP_EXT_LATENCY.as_ptr());
+            if found.is_null() {
+                return 0;
+            }
+            let part = found as *const clap_sys::ext::latency::clap_plugin_latency;
+            (*part).get.map(|get| get(self.plugin) as usize).unwrap_or(0)
+        }
+    }
+
     fn state_part(&self) -> Option<*const clap_plugin_state> {
         unsafe {
             let get = (*self.plugin).get_extension?;

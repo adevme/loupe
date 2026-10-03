@@ -9,6 +9,7 @@ pub struct Slot {
     pub name: String,
     pub bypassed: bool,
     pub trouble: Option<String>,
+    pub latency: usize,
     host: Option<Sandbox>,
     built: Option<Box<dyn loupe_stock::Effect>>,
 }
@@ -63,17 +64,24 @@ impl Rack {
             name: name.to_string(),
             bypassed: false,
             trouble: None,
+            latency: 0,
             host: None,
             built: None,
         };
         if is_built_in(&slot.path) {
             match self.make_built(slot.index) {
-                Ok(made) => slot.built = Some(made),
+                Ok(made) => {
+                    slot.latency = made.latency();
+                    slot.built = Some(made);
+                }
                 Err(why) => slot.trouble = Some(why),
             }
         } else {
             match self.open(&slot.path, slot.index) {
-                Ok(host) => slot.host = Some(host),
+                Ok((host, latency)) => {
+                    slot.host = Some(host);
+                    slot.latency = latency;
+                }
                 Err(why) => slot.trouble = Some(why),
             }
         }
@@ -96,6 +104,10 @@ impl Rack {
             let moved = self.slots.remove(slot);
             self.slots.insert(to, moved);
         }
+    }
+
+    pub fn latency(&self) -> usize {
+        self.slots.iter().filter(|slot| !slot.bypassed && slot.trouble.is_none()).map(|slot| slot.latency).sum()
     }
 
     pub fn tweak(&mut self, slot: usize, knob: usize, value: f32) {
@@ -123,8 +135,9 @@ impl Rack {
         let path = found.path.clone();
         let index = found.index;
         match self.open(&path, index) {
-            Ok(host) => {
+            Ok((host, latency)) => {
                 self.slots[slot].host = Some(host);
+                self.slots[slot].latency = latency;
                 Ok(())
             }
             Err(why) => {
@@ -221,17 +234,20 @@ impl Rack {
                         name: name.clone(),
                         bypassed: *bypassed,
                         trouble: None,
+                        latency: 0,
                         host: None,
                         built: None,
                     };
                     let opened = if is_built_in(path) {
                         self.make_built(*index).map(|mut made| {
                             put_knobs(made.as_mut(), state);
+                            slot.latency = made.latency();
                             slot.built = Some(made);
                         })
                     } else {
-                        self.open(path, *index).and_then(|mut host| {
+                        self.open(path, *index).and_then(|(mut host, latency)| {
                             settle(&mut host, state)?;
+                            slot.latency = latency;
                             slot.host = Some(host);
                             Ok(())
                         })
@@ -254,7 +270,7 @@ impl Rack {
         Ok(made)
     }
 
-    fn open(&self, path: &Path, index: usize) -> Result<Sandbox, String> {
+    fn open(&self, path: &Path, index: usize) -> Result<(Sandbox, usize), String> {
         let mut host = Sandbox::start(&self.host)?;
         let ask = Ask::Load {
             path: path.to_string_lossy().to_string(),
@@ -263,7 +279,7 @@ impl Rack {
             block: self.block,
         };
         match host.ask(ask)? {
-            Reply::Loaded { .. } => Ok(host),
+            Reply::Loaded { latency, .. } => Ok((host, latency)),
             Reply::Trouble(why) => Err(why),
             other => Err(format!("the plugin host answered out of turn: {other:?}")),
         }

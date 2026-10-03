@@ -15,7 +15,7 @@ pub enum Ask {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     Classes(Vec<String>),
-    Loaded { inputs: usize, outputs: usize },
+    Loaded { inputs: usize, outputs: usize, latency: usize },
     State(Vec<u8>),
     Fine,
     Trouble(String),
@@ -62,7 +62,7 @@ impl Reply {
     pub fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         let line = match self {
             Reply::Classes(names) => format!("classes\t{}", names.join("\x1f")),
-            Reply::Loaded { inputs, outputs } => format!("loaded\t{inputs}\t{outputs}"),
+            Reply::Loaded { inputs, outputs, latency } => format!("loaded\t{inputs}\t{outputs}\t{latency}"),
             Reply::State(state) => format!("state\t{}", hex_of(state)),
             Reply::Fine => "fine".to_string(),
             Reply::Trouble(why) => format!("trouble\t{}", why.replace('\n', " ")),
@@ -79,7 +79,11 @@ impl Reply {
                 let names = if rest.is_empty() { Vec::new() } else { rest.split('\x1f').map(str::to_string).collect() };
                 Some(Reply::Classes(names))
             }
-            "loaded" => Some(Reply::Loaded { inputs: parts.next()?.parse().ok()?, outputs: parts.next()?.parse().ok()? }),
+            "loaded" => Some(Reply::Loaded {
+                inputs: parts.next()?.parse().ok()?,
+                outputs: parts.next()?.parse().ok()?,
+                latency: parts.next().and_then(|got| got.parse().ok()).unwrap_or(0),
+            }),
             "state" => Some(Reply::State(bytes_of(parts.next().unwrap_or(""))?)),
             "fine" => Some(Reply::Fine),
             "trouble" => Some(Reply::Trouble(parts.next().unwrap_or("something went wrong").to_string())),
@@ -178,7 +182,7 @@ mod tests {
     fn every_reply_survives_the_wire() {
         let replies = [
             Reply::Classes(vec!["One".into(), "Two".into()]),
-            Reply::Loaded { inputs: 2, outputs: 2 },
+            Reply::Loaded { inputs: 2, outputs: 2, latency: 64 },
             Reply::State(vec![1, 2, 3, 250]),
             Reply::Fine,
             Reply::Trouble("it broke".into()),

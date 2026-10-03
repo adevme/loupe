@@ -105,6 +105,10 @@ impl Chains for Racks {
         }
     }
 
+    fn latency(&self, track: TrackId) -> usize {
+        self.chains.get(&track).map(|rack| rack.latency()).unwrap_or(0)
+    }
+
     fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
         let mut out = Vec::new();
         for (id, rack) in self.chains.iter_mut() {

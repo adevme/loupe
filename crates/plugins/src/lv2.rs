@@ -327,6 +327,10 @@ impl Effect {
         }
     }
 
+    pub fn latency(&self) -> usize {
+        0
+    }
+
     pub fn save(&self) -> Result<Vec<u8>, String> {
         let mut out = Vec::with_capacity(self.controls.len() * 4);
         for value in &self.controls {

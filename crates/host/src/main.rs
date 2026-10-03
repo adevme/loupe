@@ -1,3 +1,4 @@
+mod channel;
 mod window;
 
 use std::io::{BufReader, Write};
@@ -59,6 +60,16 @@ impl Open {
             Open::Lv2(effect) => effect.save(),
             #[cfg(target_os = "macos")]
             Open::Au(effect) => effect.save(),
+        }
+    }
+
+    fn latency(&self) -> usize {
+        match self {
+            Open::Vst3(effect) => effect.latency(),
+            Open::Clap(effect) => effect.latency(),
+            Open::Lv2(effect) => effect.latency(),
+            #[cfg(target_os = "macos")]
+            Open::Au(_) => 0,
         }
     }
 
@@ -136,7 +147,7 @@ fn main() {
         let _ = sends.send(Came::Done);
     });
 
-    let mut out = std::io::stdout();
+    let mut out = channel::take_stdout();
     let mut open: Option<Open> = None;
     let mut editor: Option<(loupe_plugins::editor::Editor, window::Window)> = None;
     'living: loop {
@@ -197,8 +208,9 @@ fn main() {
                 editor = None;
                 match open_one(&PathBuf::from(&path), index, rate as f64, block) {
                     Ok(effect) => {
+                        let latency = effect.latency();
                         open = Some(effect);
-                        Reply::Loaded { inputs: 2, outputs: 2 }
+                        Reply::Loaded { inputs: 2, outputs: 2, latency }
                     }
                     Err(why) => Reply::Trouble(why),
                 }

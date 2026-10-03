@@ -24,6 +24,11 @@ pub trait Chains: Send {
     fn tweak(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
         let _ = (track, slot, knob, value);
     }
+
+    fn latency(&self, track: TrackId) -> usize {
+        let _ = track;
+        0
+    }
 }
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
@@ -95,10 +100,18 @@ pub fn mix_tracks_metered(
     for id in &scratch.order {
         scratch.index.push(project.tracks.iter().position(|t| t.id == *id).unwrap_or(usize::MAX));
     }
+    let ahead: Vec<Frames> = project
+        .tracks
+        .iter()
+        .map(|track| match chains.as_deref() {
+            Some(racks) => head_start(project, track.id, racks) as Frames,
+            None => 0,
+        })
+        .collect();
     for (index, track) in project.tracks.iter().enumerate() {
         let buffer = &mut scratch.buffers[index][..len];
         buffer.fill([0.0; 2]);
-        lay_clips(track, pos, buffer, only);
+        lay_clips(track, pos + ahead[index], buffer, only);
         if let Some(racks) = chains.as_deref_mut() {
             if !track.fx.is_empty() {
                 racks.process(track.id, buffer);
@@ -267,6 +280,70 @@ mod tests {
         assert_eq!(out[51], [1.0, -1.0]);
         assert_eq!(out[149], [99.0, -99.0]);
         assert_eq!(out[150], [0.0, 0.0]);
+    }
+
+    struct Late {
+        on: TrackId,
+        by: usize,
+        held: Vec<[f32; 2]>,
+    }
+
+    impl Chains for Late {
+        fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
+            if track != self.on {
+                return;
+            }
+            self.held.resize(self.by, [0.0; 2]);
+            let mut out = Vec::with_capacity(audio.len());
+            for frame in audio.iter() {
+                self.held.push(*frame);
+                out.push(self.held.remove(0));
+            }
+            audio.copy_from_slice(&out);
+        }
+
+        fn latency(&self, track: TrackId) -> usize {
+            if track == self.on {
+                self.by
+            } else {
+                0
+            }
+        }
+    }
+
+    #[test]
+    fn a_slow_plugin_does_not_push_its_track_late() {
+        let mut p = Project::new(48_000);
+        let slow = track(&mut p);
+        let plain = track(&mut p);
+        clip(&mut p, slow, counting(400), 100);
+        clip(&mut p, plain, counting(400), 100);
+        let fx = crate::model::Fx {
+            path: std::path::PathBuf::from("slow.vst3"),
+            index: 0,
+            name: "slow".into(),
+            bypassed: false,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddFx { track: slow, fx }).unwrap();
+        let mut racks = Late { on: slow, by: 32, held: Vec::new() };
+        let mut out = vec![[0.0; 2]; 300];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(out[101], [2.0, -2.0], "the two tracks did not land together");
+        assert_eq!(out[150], [100.0, -100.0]);
+    }
+
+    #[test]
+    fn with_no_plugins_nothing_moves() {
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        clip(&mut p, one, counting(400), 100);
+        let mut racks = Late { on: one, by: 32, held: Vec::new() };
+        let mut out = vec![[0.0; 2]; 300];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(out[101], [1.0, -1.0]);
     }
 
     struct Doubler {
@@ -619,4 +696,23 @@ mod routing {
         p.apply(Command::SetTrackParent { track: child, parent: Some(parent) }).unwrap();
         assert!(p.apply(Command::SetTrackParent { track: parent, parent: Some(child) }).is_err());
     }
+}
+
+fn head_start(project: &Project, track: TrackId, racks: &dyn Chains) -> usize {
+    let running = |id: TrackId| match project.tracks.iter().find(|t| t.id == id) {
+        Some(found) if !found.fx.is_empty() => racks.latency(id),
+        _ => 0,
+    };
+    let mut total = running(track);
+    let mut at = track;
+    let mut guard = 0;
+    while let Some(parent) = project.tracks.iter().find(|t| t.id == at).and_then(|t| t.parent) {
+        total += running(parent);
+        at = parent;
+        guard += 1;
+        if guard > project.tracks.len() {
+            break;
+        }
+    }
+    total
 }

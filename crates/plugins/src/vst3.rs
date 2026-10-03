@@ -193,6 +193,10 @@ impl Effect {
         }
     }
 
+    pub fn latency(&self) -> usize {
+        unsafe { self.processor.getLatencySamples() as usize }
+    }
+
     pub fn save(&self) -> Result<Vec<u8>, String> {
         let wrapper = crate::stream::Bytes::empty();
         let stream = wrapper.as_com_ref::<vst3::Steinberg::IBStream>().ok_or("no stream")?;
