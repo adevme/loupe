@@ -66,6 +66,7 @@ impl App {
             page = page.push(status);
         }
         container(container(page).width(Length::Fill).max_width(PAGE_WIDTH))
+            .style(move |_| container::Style { background: Some(palette.background.into()), ..Default::default() })
             .center_x(Length::Fill)
             .padding(iced::Padding { top: PAGE_TOP, right: PAGE_SIDE, bottom: PAGE_SIDE, left: PAGE_SIDE })
             .height(Length::Fill)

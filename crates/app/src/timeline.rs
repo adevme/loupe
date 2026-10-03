@@ -97,6 +97,7 @@ pub struct Timeline<'a> {
     pub tool: Tool,
     pub armed: &'a HashSet<TrackId>,
     pub input_level: f32,
+    pub opening: bool,
     pub width: f32,
     pub cache: &'a Cache,
 }
@@ -946,6 +947,9 @@ impl Timeline<'_> {
             );
         }
 
+        if self.project.tracks.is_empty() && self.opening {
+            return;
+        }
         if self.project.tracks.is_empty() {
             frame.fill_text(Text {
                 content: "Import audio to begin".into(),

@@ -169,6 +169,7 @@ impl App {
         let rate = self.project.rate;
         self.loading += 1;
         self.problem = None;
+        self.opening = Some((crate::home::stem(&path), std::time::Instant::now()));
         let (done, opened) = oneshot::channel();
         let file = path.clone();
         std::thread::spawn(move || {

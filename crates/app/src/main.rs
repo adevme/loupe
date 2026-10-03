@@ -12,6 +12,7 @@ mod mixer;
 mod pointer;
 mod pool;
 mod settings;
+mod spinner;
 mod theme;
 mod timeline;
 
@@ -271,6 +272,7 @@ struct App {
     path: Option<PathBuf>,
     dirty: bool,
     screen: Screen,
+    opening: Option<(String, Instant)>,
     song_size: Size,
     song_maximized: bool,
     templates: Vec<PathBuf>,
@@ -337,6 +339,7 @@ impl App {
             path: None,
             dirty: false,
             screen: Screen::Song,
+            opening: None,
             song_size: START_SIZE,
             song_maximized: false,
             templates: Vec::new(),
@@ -814,6 +817,7 @@ impl App {
             }
             Message::ProjectRead(path, as_template, result) => {
                 self.loading = self.loading.saturating_sub(1);
+                self.opening = None;
                 match result {
                     Ok(opened) => self.adopt(path, opened, as_template),
                     Err(why) => {
@@ -917,7 +921,7 @@ impl App {
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
             _ => None,
         });
-        let watching = self.exporting || self.copied.is_some() || self.input.is_some();
+        let watching = self.exporting || self.copied.is_some() || self.input.is_some() || self.opening.is_some();
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
@@ -1145,7 +1149,7 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         if self.screen == Screen::Home {
-            return stack![self.home(), self.overlay()].into();
+            return stack![self.home(), self.overlay(), self.opening_layer()].into();
         }
         let timeline = canvas(Timeline {
             project: &self.project,
@@ -1158,6 +1162,7 @@ impl App {
             tool: self.tool,
             armed: &self.armed,
             input_level: self.input_level,
+            opening: self.opening.is_some(),
             width: self.canvas_width(),
             cache: &self.cache,
         })
@@ -1176,7 +1181,22 @@ impl App {
         if let Some(status) = self.status() {
             song = song.push(rule(palette)).push(status);
         }
-        stack![song, self.overlay()].into()
+        stack![song, self.overlay(), self.opening_layer()].into()
+    }
+
+    fn opening_layer(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let Some((name, since)) = &self.opening else {
+            return Space::new(0, 0).into();
+        };
+        let notice = column![
+            canvas(spinner::Spinner { palette: &self.palette, since: *since }).width(44).height(44),
+            text(format!("Opening {name}")).size(14).font(palette.medium),
+        ]
+        .spacing(16)
+        .align_x(Alignment::Center);
+        let card = container(notice).padding([26, 40]).style(move |_| palette.sheet());
+        iced::widget::opaque(iced::widget::center(card).style(move |_| palette.backdrop()))
     }
 
     fn transport(&self) -> Element<'_, Message> {
