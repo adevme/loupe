@@ -22,6 +22,7 @@ mod spinner;
 mod theme;
 mod theming;
 mod timeline;
+mod usage;
 mod versions;
 
 use std::collections::{HashMap, HashSet};
@@ -92,7 +93,9 @@ fn main() -> iced::Result {
     if let Some(font) = icon_font {
         loupe = loupe.font(font);
     }
-    loupe.run_with(move || App::new(loaded, settings))
+    let ran = loupe.run_with(move || App::new(loaded, settings));
+    usage::finish();
+    ran
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
@@ -199,6 +202,7 @@ pub enum Message {
     InstallUpdate,
     UpdateDownloaded(Result<PathBuf, String>),
     UpdateLater,
+    UsageToggled(bool),
     CheckUpdatesOnStart(bool),
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
@@ -256,16 +260,18 @@ pub enum SettingsTab {
     Display,
     File,
     Recording,
+    Privacy,
 }
 
 impl SettingsTab {
-    const ALL: [Self; 3] = [Self::Display, Self::File, Self::Recording];
+    const ALL: [Self; 4] = [Self::Display, Self::File, Self::Recording, Self::Privacy];
 
     fn label(self) -> &'static str {
         match self {
             Self::Display => "Display",
             Self::File => "File",
             Self::Recording => "Recording",
+            Self::Privacy => "Privacy",
         }
     }
 }
@@ -397,6 +403,7 @@ struct App {
     quiet_check: bool,
     check_updates: bool,
     update_dismissed: bool,
+    usage: usage::Usage,
 }
 
 impl App {
@@ -408,6 +415,7 @@ impl App {
         engine.set_project(&project);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
+        let (usage_now, first_usage) = usage::Usage::begin(&settings);
         let mut app = Self {
             palette: loaded.palette,
             heights: HashMap::new(),
@@ -476,6 +484,7 @@ impl App {
             quiet_check: false,
             check_updates: settings.check_updates,
             update_dismissed: false,
+            usage: usage_now,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -501,6 +510,9 @@ impl App {
             }
             None => app.import(audio),
         };
+        if first_usage {
+            app.notice = Some(usage::NOTICE.to_string());
+        }
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
         let look = if app.check_updates {
             app.quiet_check = true;
@@ -1300,6 +1312,7 @@ impl App {
             }
             Message::InstallUpdate => return self.install_update(),
             Message::UpdateLater => self.update_dismissed = true,
+            Message::UsageToggled(on) => self.set_usage(on),
             Message::CheckUpdatesOnStart(on) => {
                 self.check_updates = on;
                 if let Err(why) = settings::save("check_updates", if on { "on" } else { "off" }) {
@@ -2069,6 +2082,7 @@ impl App {
             SettingsTab::Display => column![self.theme_picker(), rule(palette), scale].spacing(16),
             SettingsTab::File => folder,
             SettingsTab::Recording => recording,
+            SettingsTab::Privacy => column![self.privacy_settings()],
         };
         let body = column![tabs, rule(palette), container(page).height(SETTINGS_PAGE_HEIGHT)].spacing(14);
         self.window("Settings".to_string(), body.into(), 560.0)

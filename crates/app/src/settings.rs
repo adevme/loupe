@@ -13,6 +13,9 @@ pub struct Settings {
     pub mixer_open: bool,
     pub input: Option<String>,
     pub check_updates: bool,
+    pub usage: Option<bool>,
+    pub install_id: Option<String>,
+    pub last_version: Option<String>,
 }
 
 impl Settings {
@@ -27,6 +30,9 @@ impl Settings {
             mixer_open: value_of("mixer") == Some("open"),
             input: value_of("input").map(str::to_string),
             check_updates: value_of("check_updates") != Some("off"),
+            usage: value_of("usage").map(|value| value != "off"),
+            install_id: value_of("install_id").map(str::to_string),
+            last_version: value_of("last_version").map(str::to_string),
         }
     }
 }
