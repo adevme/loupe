@@ -73,10 +73,7 @@ impl App {
 
     fn file_menu(&self) -> Element<'_, Message> {
         let has_song = !self.project.tracks.is_empty();
-        let mut items = vec![
-            self.item("New project", "", Some(Message::GoHome)),
-            self.item("Open project…", "Ctrl+O", Some(Message::OpenProject)),
-        ];
+        let mut items = vec![self.item("Open project…", "Ctrl+O", Some(Message::OpenProject))];
         if has_song {
             items.push(self.item("Save", "Ctrl+S", Some(Message::Save)));
             items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
@@ -85,6 +82,8 @@ impl App {
         items.push(rule(self.palette));
         let audio = if self.pool_open { "Hide all audio" } else { "Show all audio" };
         items.push(self.item(audio, "", Some(Message::TogglePool)));
+        items.push(rule(self.palette));
+        items.push(self.item("Close project", "Ctrl+W", Some(Message::GoHome)));
         self.menu(items)
     }
 
