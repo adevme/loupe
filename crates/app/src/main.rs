@@ -11,6 +11,7 @@ mod menus;
 mod mixer;
 mod pointer;
 mod pool;
+mod recording;
 mod selection;
 mod settings;
 mod spinner;
@@ -89,6 +90,8 @@ const HOME_SIZE: Size = Size::new(940.0, 600.0);
 #[derive(Debug, Clone)]
 pub enum Message {
     TogglePlay,
+    ToggleRecord,
+    TakeReady { tracks: Vec<TrackId>, start: i64, warning: Option<String>, result: Result<Arc<Source>, String> },
     ToStart,
     Seek(Frames),
     Tick,
@@ -259,6 +262,7 @@ struct App {
     preview: Option<clip_window::Preview>,
     copied: Option<Instant>,
     armed: HashSet<TrackId>,
+    recording: Option<recording::Recording>,
     input: Option<Input>,
     input_level: f32,
     input_name: Option<String>,
@@ -328,6 +332,7 @@ impl App {
             preview: None,
             copied: None,
             armed: HashSet::new(),
+            recording: None,
             input: None,
             input_level: 0.0,
             input_name: settings.input.clone(),
@@ -423,6 +428,7 @@ impl App {
         let belongs_to_the_song = matches!(
             message,
             Message::TogglePlay
+                | Message::ToggleRecord
                 | Message::ToStart
                 | Message::Split
                 | Message::Delete
@@ -433,8 +439,34 @@ impl App {
         if (self.overlay != Overlay::None || self.screen == Screen::Home) && belongs_to_the_song {
             return Task::none();
         }
+        let would_break_the_take = matches!(
+            message,
+            Message::ToggleArm(_)
+                | Message::RemoveTrack(_)
+                | Message::InputChosen(_)
+                | Message::GoHome
+                | Message::OpenProject
+                | Message::OpenRecent(_)
+                | Message::NewBlank
+                | Message::NewFromTemplate(_)
+                | Message::ProjectPicked(_)
+        );
+        if self.recording.is_some() && would_break_the_take {
+            self.notice = Some("Stop recording first.".into());
+            return Task::none();
+        }
         match message {
+            Message::ToggleRecord => return self.toggle_recording(),
+            Message::TakeReady { tracks, start, warning, result } => {
+                self.place_take(tracks, start, result);
+                if warning.is_some() {
+                    self.problem = warning;
+                }
+            }
             Message::TogglePlay => {
+                if self.recording.is_some() {
+                    return self.finish_recording();
+                }
                 if self.playing {
                     self.engine.stop();
                     self.playing = false;
@@ -1083,6 +1115,9 @@ impl App {
     }
 
     fn seek(&mut self, to: Frames) {
+        if self.recording.is_some() {
+            return;
+        }
         self.engine.seek(to);
         self.playhead = to;
         self.cache.clear();
@@ -1184,6 +1219,7 @@ impl App {
             loop_range: self.loop_range,
             tool: self.tool,
             armed: &self.armed,
+            recording_from: self.recording.as_ref().map(|recording| recording.from),
             input_level: self.input_level,
             opening: self.opening.is_some(),
             width: self.canvas_width(),
@@ -1240,6 +1276,12 @@ impl App {
         .padding(0)
         .style(move |_, status| palette.solid(status))
         .on_press(Message::TogglePlay);
+
+        let recording = self.recording.is_some();
+        let record = button(container(container(Space::new(11, 11)).style(move |_| palette.record_mark(recording))).center(30))
+            .padding(0)
+            .style(move |_, status| palette.record(recording, status))
+            .on_press(Message::ToggleRecord);
 
         let tempo = text_input("", &self.bpm)
             .on_input(Message::BpmTyped)
@@ -1312,6 +1354,7 @@ impl App {
                 Space::with_width(6),
                 icon_button(palette, "skip-back", Some(Message::ToStart)),
                 play,
+                record,
                 Space::with_width(10),
                 text(position).size(13).font(palette.mono).width(52),
                 text(clock).size(13).font(palette.mono).color(palette.text_dim).width(84),
@@ -1460,6 +1503,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
+                ("r", false, _) => Some(Message::ToggleRecord),
                 ("p", false, _) => Some(Message::SetTool(Tool::Pencil)),
                 ("c", false, _) => Some(Message::SetTool(Tool::Razor)),
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),

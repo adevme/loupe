@@ -99,6 +99,7 @@ pub struct Timeline<'a> {
     pub loop_range: LoopRange,
     pub tool: Tool,
     pub armed: &'a HashSet<TrackId>,
+    pub recording_from: Option<Frames>,
     pub input_level: f32,
     pub opening: bool,
     pub width: f32,
@@ -901,6 +902,18 @@ impl canvas::Program<Message> for Timeline<'_> {
                 overlay.fill_rectangle(Point::new(start.x.round() - 0.5, start.y.min(end.y)), upright, p.accent);
             } else if !rows.is_empty() && start.x >= HEADER_W {
                 overlay.stroke(&Path::line(start, end), Stroke::default().with_color(p.accent).with_width(1.0));
+            }
+        }
+        if let Some(from) = self.recording_from {
+            let left = self.x_of(from as f64).max(HEADER_W);
+            let right = self.x_of(self.playhead as f64).min(bounds.width);
+            for (i, track) in self.project.tracks.iter().enumerate() {
+                let top = self.track_top(i).max(LANES_TOP);
+                let bottom = (self.track_top(i) + self.height_of(track)).min(bounds.height);
+                if self.armed.contains(&track.id) && right > left && bottom > top {
+                    let taken = Size::new(right - left, bottom - top);
+                    overlay.fill_rectangle(Point::new(left, top), taken, theme::alpha(p.danger, 0.3));
+                }
             }
         }
         for (i, track) in self.project.tracks.iter().enumerate() {

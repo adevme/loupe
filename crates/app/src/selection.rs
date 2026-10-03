@@ -5,7 +5,7 @@ use loupe_engine::{render_to_wav, ClipId, Command, Frames, Outcome, Source, Trac
 
 use crate::{App, Run};
 
-const TAKES_FOLDER: &str = "Audio";
+pub(crate) const TAKES_FOLDER: &str = "Audio";
 const CONSOLIDATED_MARK: &str = " (consolidated";
 
 impl App {

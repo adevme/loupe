@@ -296,6 +296,19 @@ impl Palette {
         }
     }
 
+    pub fn record(&self, on: bool, status: button::Status) -> button::Style {
+        if on {
+            button::Style { background: Some(self.danger.into()), border: Border::default().rounded(6), ..Default::default() }
+        } else {
+            self.ghost(status)
+        }
+    }
+
+    pub fn record_mark(&self, on: bool) -> container::Style {
+        let (colour, corner) = if on { (self.on_accent, 2) } else { (self.danger, 6) };
+        container::Style { background: Some(colour.into()), border: Border::default().rounded(corner), ..Default::default() }
+    }
+
     pub fn title_bar(&self) -> container::Style {
         container::Style {
             background: Some(self.raised.into()),
