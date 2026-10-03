@@ -43,10 +43,10 @@ enum Open {
 }
 
 impl Open {
-    fn process(&mut self, audio: &mut [[f32; 2]]) {
+    fn process_with(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         match self {
-            Open::Vst3(effect) => effect.process(audio),
-            Open::Clap(effect) => effect.process(audio),
+            Open::Vst3(effect) => effect.process_with(audio, side),
+            Open::Clap(effect) => effect.process_with(audio, side),
             Open::Lv2(effect) => effect.process(audio),
             #[cfg(target_os = "macos")]
             Open::Au(effect) => effect.process(audio),
@@ -130,14 +130,18 @@ fn main() {
                 }
                 continue;
             };
-            let process = ask == Ask::Process;
+            let blocks = match ask {
+                Ask::Process => 1,
+                Ask::ProcessWithSide => 2,
+                _ => 0,
+            };
             if sends.send(Came::Ask(ask)).is_err() {
                 return;
             }
-            if process {
+            for _ in 0..blocks {
                 let mut audio = Vec::new();
                 if read_block(&mut input, &mut audio).is_err() {
-                    break;
+                    return;
                 }
                 if sends.send(Came::Audio(audio)).is_err() {
                     return;
@@ -176,13 +180,22 @@ fn main() {
             Came::Done => break,
         };
         let reply = match ask {
-            Ask::Process => {
+            Ask::Process | Ask::ProcessWithSide => {
+                let wants_side = ask == Ask::ProcessWithSide;
                 let mut audio = match came.recv() {
                     Ok(Came::Audio(audio)) => audio,
                     _ => break 'living,
                 };
+                let side = if wants_side {
+                    match came.recv() {
+                        Ok(Came::Audio(side)) => side,
+                        _ => break 'living,
+                    }
+                } else {
+                    Vec::new()
+                };
                 if let Some(effect) = open.as_mut() {
-                    effect.process(&mut audio);
+                    effect.process_with(&mut audio, &side);
                 }
                 if write_block(&mut out, &audio).is_err() {
                     break;

@@ -196,6 +196,10 @@ impl Rack {
     }
 
     pub fn process(&mut self, audio: &mut Vec<[f32; 2]>) {
+        self.process_with(audio, &[]);
+    }
+
+    pub fn process_with(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) {
         for slot in self.slots.iter_mut() {
             if slot.bypassed || slot.trouble.is_some() {
                 continue;
@@ -205,7 +209,7 @@ impl Rack {
                 continue;
             }
             let Some(host) = slot.host.as_mut() else { continue };
-            if let Err(why) = host.run(audio) {
+            if let Err(why) = host.run_with(audio, side) {
                 slot.trouble = Some(why);
                 slot.host = None;
             }

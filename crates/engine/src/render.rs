@@ -1,7 +1,14 @@
 use crate::model::{Clip, ClipId, Frames, Project, Track, TrackId};
 
 pub trait Chains: Send {
-    fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]);
+    fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
+        self.process_with(track, audio, &[]);
+    }
+
+    fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+        let _ = side;
+        self.process(track, audio);
+    }
 
     fn follow(&mut self, project: &Project) -> Vec<String> {
         let _ = project;
@@ -52,6 +59,7 @@ pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
 #[derive(Default)]
 pub struct Mixdown {
     buffers: Vec<Vec<[f32; 2]>>,
+    sides: Vec<Vec<[f32; 2]>>,
     pre: Vec<[f32; 2]>,
     order: Vec<TrackId>,
     index: Vec<usize>,
@@ -62,7 +70,10 @@ impl Mixdown {
         if self.buffers.len() < tracks {
             self.buffers.resize_with(tracks, Vec::new);
         }
-        for buffer in self.buffers.iter_mut().take(tracks) {
+        if self.sides.len() < tracks {
+            self.sides.resize_with(tracks, Vec::new);
+        }
+        for buffer in self.buffers.iter_mut().take(tracks).chain(self.sides.iter_mut().take(tracks)) {
             if buffer.len() < frames {
                 buffer.resize(frames, [0.0; 2]);
             }
@@ -109,14 +120,10 @@ pub fn mix_tracks_metered(
         })
         .collect();
     for (index, track) in project.tracks.iter().enumerate() {
+        scratch.sides[index][..len].fill([0.0; 2]);
         let buffer = &mut scratch.buffers[index][..len];
         buffer.fill([0.0; 2]);
         lay_clips(track, pos + ahead[index], buffer, only);
-        if let Some(racks) = chains.as_deref_mut() {
-            if !track.fx.is_empty() {
-                racks.process(track.id, buffer);
-            }
-        }
     }
     for step in 0..scratch.order.len() {
         let index = scratch.index[step];
@@ -124,6 +131,12 @@ pub fn mix_tracks_metered(
             continue;
         }
         let track = &project.tracks[index];
+        if let Some(racks) = chains.as_deref_mut() {
+            if !track.fx.is_empty() {
+                let (mains, sides) = (&mut scratch.buffers, &scratch.sides);
+                racks.process_with(track.id, &mut mains[index][..len], &sides[index][..len]);
+            }
+        }
         let silent = track.muted && only.is_none();
         let keep_pre = track.sends.iter().any(|send| send.pre_fader);
         if keep_pre {
@@ -146,20 +159,11 @@ pub fn mix_tracks_metered(
                 continue;
             };
             let gain = send.gain;
-            if send.pre_fader {
-                for i in 0..len {
-                    let from = scratch.pre[i];
-                    let dest = &mut scratch.buffers[target][i];
-                    dest[0] += from[0] * gain;
-                    dest[1] += from[1] * gain;
-                }
-            } else {
-                for i in 0..len {
-                    let from = scratch.buffers[index][i];
-                    let dest = &mut scratch.buffers[target][i];
-                    dest[0] += from[0] * gain;
-                    dest[1] += from[1] * gain;
-                }
+            for i in 0..len {
+                let from = if send.pre_fader { scratch.pre[i] } else { scratch.buffers[index][i] };
+                let dest = if send.sidechain { &mut scratch.sides[target][i] } else { &mut scratch.buffers[target][i] };
+                dest[0] += from[0] * gain;
+                dest[1] += from[1] * gain;
             }
         }
         match track.parent.and_then(|parent| project.tracks.iter().position(|t| t.id == parent)) {
@@ -280,6 +284,52 @@ mod tests {
         assert_eq!(out[51], [1.0, -1.0]);
         assert_eq!(out[149], [99.0, -99.0]);
         assert_eq!(out[150], [0.0, 0.0]);
+    }
+
+    struct Ducker {
+        on: TrackId,
+        heard: f32,
+    }
+
+    impl Chains for Ducker {
+        fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+            if track != self.on {
+                return;
+            }
+            self.heard = side.iter().fold(0.0f32, |most, frame| most.max(frame[0].abs()));
+            let duck = 1.0 - self.heard.min(1.0);
+            for frame in audio.iter_mut() {
+                frame[0] *= duck;
+                frame[1] *= duck;
+            }
+        }
+    }
+
+    #[test]
+    fn a_sidechain_send_reaches_the_plugin_and_stays_out_of_the_mix() {
+        let mut p = Project::new(48_000);
+        let beat = track(&mut p);
+        let vox = track(&mut p);
+        flat(&mut p, beat, 0.8, 64);
+        flat(&mut p, vox, 0.5, 64);
+        p.apply(Command::AddSend { from: vox, to: beat }).unwrap();
+        p.apply(Command::SetSendSidechain { from: vox, to: beat, sidechain: true }).unwrap();
+        p.apply(Command::SetSendPreFader { from: vox, to: beat, pre_fader: true }).unwrap();
+        p.apply(Command::SetTrackMuted { track: vox, muted: true }).unwrap();
+        let fx = crate::model::Fx {
+            path: std::path::PathBuf::from("duck.vst3"),
+            index: 0,
+            name: "duck".into(),
+            bypassed: false,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddFx { track: beat, fx }).unwrap();
+        let mut racks = Ducker { on: beat, heard: 0.0 };
+        let mut out = vec![[0.0; 2]; 32];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 1, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert!((racks.heard - 0.5).abs() < 1e-6, "the plugin heard {}", racks.heard);
+        assert!((out[8][0] - 0.4).abs() < 1e-6, "the mix came out at {}", out[8][0]);
     }
 
     struct Late {

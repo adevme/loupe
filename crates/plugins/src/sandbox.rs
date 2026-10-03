@@ -68,10 +68,18 @@ impl Sandbox {
     }
 
     pub fn run(&mut self, audio: &mut Vec<[f32; 2]>) -> Result<(), String> {
+        self.run_with(audio, &[])
+    }
+
+    pub fn run_with(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) -> Result<(), String> {
         if self.lost {
             return Err("the plugin host is gone".into());
         }
-        if Ask::Process.write(&mut self.writing).is_err() || write_block(&mut self.writing, audio).is_err() {
+        let ask = if side.is_empty() { Ask::Process } else { Ask::ProcessWithSide };
+        if ask.write(&mut self.writing).is_err() || write_block(&mut self.writing, audio).is_err() {
+            return Err(self.give_up("the plugin host stopped listening"));
+        }
+        if !side.is_empty() && write_block(&mut self.writing, side).is_err() {
             return Err(self.give_up("the plugin host stopped listening"));
         }
         if self.wants.as_ref().is_none_or(|w| w.send(Want::Block).is_err()) {

@@ -66,6 +66,7 @@ pub struct Send {
     pub to: TrackId,
     pub gain: f32,
     pub pre_fader: bool,
+    pub sidechain: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +130,7 @@ pub enum Command {
     RemoveSend { from: TrackId, to: TrackId },
     SetSendGain { from: TrackId, to: TrackId, gain: f32 },
     SetSendPreFader { from: TrackId, to: TrackId, pre_fader: bool },
+    SetSendSidechain { from: TrackId, to: TrackId, sidechain: bool },
     AddFx { track: TrackId, fx: Fx },
     RemoveFx { track: TrackId, slot: usize },
     MoveFx { track: TrackId, slot: usize, to: usize },
@@ -367,7 +369,7 @@ impl Project {
                 if self.tracks[f].sends.iter().any(|send| send.to == to) {
                     return Err(CommandError::InvalidValue);
                 }
-                self.tracks[f].sends.push(Send { to, gain: 1.0, pre_fader: false });
+                self.tracks[f].sends.push(Send { to, gain: 1.0, pre_fader: false, sidechain: false });
                 if self.feeds_back() {
                     self.tracks[f].sends.pop();
                     return Err(CommandError::InvalidValue);
@@ -390,6 +392,12 @@ impl Project {
                 let f = self.track_index(from)?;
                 let send = self.tracks[f].sends.iter_mut().find(|send| send.to == to).ok_or(CommandError::NoSuchTrack)?;
                 send.pre_fader = pre_fader;
+                Ok(Outcome::Done)
+            }
+            Command::SetSendSidechain { from, to, sidechain } => {
+                let f = self.track_index(from)?;
+                let send = self.tracks[f].sends.iter_mut().find(|send| send.to == to).ok_or(CommandError::NoSuchTrack)?;
+                send.sidechain = sidechain;
                 Ok(Outcome::Done)
             }
             Command::AddFx { track, fx } => {

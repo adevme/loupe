@@ -172,6 +172,7 @@ pub enum Message {
     RemoveSend { from: TrackId, to: TrackId },
     SendGain { from: TrackId, to: TrackId, gain: f32 },
     SendPreFader { from: TrackId, to: TrackId, pre_fader: bool },
+    SendSidechain { from: TrackId, to: TrackId, sidechain: bool },
     LevelPressed(mixer::Level),
     OpenClip(ClipId),
     ClipToTrack(ClipId, TrackId),
@@ -998,6 +999,9 @@ impl App {
             }
             Message::SendPreFader { from, to, pre_fader } => {
                 self.edit(None, Command::SetSendPreFader { from, to, pre_fader });
+            }
+            Message::SendSidechain { from, to, sidechain } => {
+                self.edit(None, Command::SetSendSidechain { from, to, sidechain });
             }
             Message::TogglePool => {
                 self.pool_open = !self.pool_open;

@@ -53,6 +53,10 @@ impl App {
                         .size(14)
                         .text_size(12)
                         .on_toggle(move |pre_fader| Message::SendPreFader { from, to, pre_fader }),
+                    checkbox("Sidechain", send.sidechain)
+                        .size(14)
+                        .text_size(12)
+                        .on_toggle(move |sidechain| Message::SendSidechain { from, to, sidechain }),
                     button(text("Remove").size(12))
                         .padding([3, 8])
                         .style(move |_, status| palette.outlined(status))

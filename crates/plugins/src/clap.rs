@@ -135,6 +135,8 @@ pub struct Effect {
     host: Box<clap_host>,
     left: Vec<f32>,
     right: Vec<f32>,
+    side_left: Vec<f32>,
+    side_right: Vec<f32>,
     _library: Library,
 }
 
@@ -175,18 +177,36 @@ impl Effect {
             if let Some(go) = (*plugin).start_processing {
                 go(plugin);
             }
-            Ok(Self { plugin, host, left: vec![0.0; block], right: vec![0.0; block], _library: library })
+            Ok(Self {
+                plugin,
+                host,
+                left: vec![0.0; block],
+                right: vec![0.0; block],
+                side_left: vec![0.0; block],
+                side_right: vec![0.0; block],
+                _library: library,
+            })
         }
     }
 
     pub fn process(&mut self, audio: &mut [[f32; 2]]) {
+        self.process_with(audio, &[]);
+    }
+
+    pub fn process_with(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         let frames = audio.len().min(self.left.len());
         for (i, frame) in audio.iter().take(frames).enumerate() {
             self.left[i] = frame[0];
             self.right[i] = frame[1];
         }
+        for i in 0..frames {
+            let frame = side.get(i).copied().unwrap_or([0.0; 2]);
+            self.side_left[i] = frame[0];
+            self.side_right[i] = frame[1];
+        }
         unsafe {
             let mut channels = [self.left.as_mut_ptr(), self.right.as_mut_ptr()];
+            let mut side_channels = [self.side_left.as_mut_ptr(), self.side_right.as_mut_ptr()];
             let mut bus = clap_sys::audio_buffer::clap_audio_buffer {
                 data32: channels.as_mut_ptr(),
                 data64: std::ptr::null_mut(),
@@ -194,15 +214,23 @@ impl Effect {
                 latency: 0,
                 constant_mask: 0,
             };
+            let side_bus = clap_sys::audio_buffer::clap_audio_buffer {
+                data32: side_channels.as_mut_ptr(),
+                data64: std::ptr::null_mut(),
+                channel_count: 2,
+                latency: 0,
+                constant_mask: 0,
+            };
+            let ins = [bus, side_bus];
             let coming = clap_input_events { ctx: std::ptr::null_mut(), size: Some(no_events), get: Some(no_event) };
             let going = clap_output_events { ctx: std::ptr::null_mut(), try_push: Some(drop_event) };
             let data = clap_process {
                 steady_time: -1,
                 frames_count: frames as u32,
                 transport: std::ptr::null(),
-                audio_inputs: &bus,
+                audio_inputs: ins.as_ptr(),
                 audio_outputs: &mut bus,
-                audio_inputs_count: 1,
+                audio_inputs_count: if side.is_empty() { 1 } else { 2 },
                 audio_outputs_count: 1,
                 in_events: &coming,
                 out_events: &going,

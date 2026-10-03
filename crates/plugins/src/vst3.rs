@@ -135,6 +135,9 @@ pub struct Effect {
     component: ComPtr<IComponent>,
     left: Vec<f32>,
     right: Vec<f32>,
+    side_left: Vec<f32>,
+    side_right: Vec<f32>,
+    pub side_bus: bool,
     _library: Library,
 }
 
@@ -173,6 +176,9 @@ impl Effect {
                 component,
                 left: vec![0.0; block],
                 right: vec![0.0; block],
+                side_left: vec![0.0; block],
+                side_right: vec![0.0; block],
+                side_bus: ins > 1,
                 _library: library,
             })
         }
@@ -223,25 +229,44 @@ impl Effect {
     }
 
     pub fn process(&mut self, audio: &mut [[f32; 2]]) {
+        self.process_with(audio, &[]);
+    }
+
+    pub fn process_with(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         let frames = audio.len().min(self.left.len());
         for (i, frame) in audio.iter().take(frames).enumerate() {
             self.left[i] = frame[0];
             self.right[i] = frame[1];
         }
+        for i in 0..frames {
+            let frame = side.get(i).copied().unwrap_or([0.0; 2]);
+            self.side_left[i] = frame[0];
+            self.side_right[i] = frame[1];
+        }
         unsafe {
             let mut channels = [self.left.as_mut_ptr(), self.right.as_mut_ptr()];
+            let mut side_channels = [self.side_left.as_mut_ptr(), self.side_right.as_mut_ptr()];
             let mut bus = AudioBusBuffers {
                 numChannels: 2,
                 silenceFlags: 0,
                 __field0: vst3::Steinberg::Vst::AudioBusBuffers__type0 { channelBuffers32: channels.as_mut_ptr() },
             };
+            let mut both = [
+                bus,
+                AudioBusBuffers {
+                    numChannels: 2,
+                    silenceFlags: 0,
+                    __field0: vst3::Steinberg::Vst::AudioBusBuffers__type0 { channelBuffers32: side_channels.as_mut_ptr() },
+                },
+            ];
+            let ins = if self.side_bus { 2 } else { 1 };
             let mut data = ProcessData {
                 processMode: ProcessModes_::kRealtime as i32,
                 symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
                 numSamples: frames as i32,
-                numInputs: 1,
+                numInputs: ins,
                 numOutputs: 1,
-                inputs: &mut bus,
+                inputs: both.as_mut_ptr(),
                 outputs: &mut bus,
                 inputParameterChanges: std::ptr::null_mut(),
                 outputParameterChanges: std::ptr::null_mut(),

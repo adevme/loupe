@@ -121,14 +121,14 @@ impl Chains for Racks {
         out
     }
 
-    fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
+    fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         let Some(rack) = self.chains.get_mut(&track) else { return };
         if rack.is_empty() {
             return;
         }
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
-        rack.process(&mut self.scratch);
+        rack.process_with(&mut self.scratch, side);
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }

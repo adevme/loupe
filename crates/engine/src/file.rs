@@ -27,7 +27,7 @@ pub struct SavedTrack {
     pub clips: Vec<SavedClip>,
     pub parent: Option<usize>,
     pub collapsed: bool,
-    pub sends: Vec<(usize, f32, bool)>,
+    pub sends: Vec<(usize, f32, bool, bool)>,
     pub fx: Vec<SavedFx>,
 }
 
@@ -78,7 +78,7 @@ impl SavedProject {
                         .sends
                         .iter()
                         .filter_map(|send| {
-                            project.tracks.iter().position(|t| t.id == send.to).map(|to| (to, send.gain, send.pre_fader))
+                            project.tracks.iter().position(|t| t.id == send.to).map(|to| (to, send.gain, send.pre_fader, send.sidechain))
                         })
                         .collect(),
                     fx: track
@@ -124,8 +124,8 @@ impl SavedProject {
                 "track gain={} muted={} colour={colour} height={height} parent={parent} collapsed={} name={}\n",
                 track.gain, track.muted as u8, track.collapsed as u8, track.name
             ));
-            for (to, gain, pre) in &track.sends {
-                out.push_str(&format!("send to={to} gain={gain} pre={}\n", *pre as u8));
+            for (to, gain, pre, side) in &track.sends {
+                out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
             }
             for fx in &track.fx {
                 out.push_str(&format!("fxpath {}\n", fx.path.display()));
@@ -192,7 +192,7 @@ impl SavedProject {
                     let track = saved.tracks.last_mut().ok_or_else(|| bad("a send before any track"))?;
                     let to = fields.get("to").and_then(|v| v.parse::<usize>().ok()).ok_or_else(|| bad("the send has no target"))?;
                     let gain = number_in(&fields, "gain").unwrap_or(1.0);
-                    track.sends.push((to, gain, fields.get("pre") == Some(&"1")));
+                    track.sends.push((to, gain, fields.get("pre") == Some(&"1"), fields.get("side") == Some(&"1")));
                 }
                 "fxpath" => held = Some(PathBuf::from(rest)),
                 "fx" => {
@@ -288,11 +288,12 @@ impl SavedProject {
             if saved.collapsed {
                 let _ = project.apply(Command::ToggleCollapsed(*track));
             }
-            for (to, gain, pre) in &saved.sends {
+            for (to, gain, pre, side) in &saved.sends {
                 let Some(to) = ids.get(*to) else { continue };
                 if project.apply(Command::AddSend { from: *track, to: *to }).is_ok() {
                     let _ = project.apply(Command::SetSendGain { from: *track, to: *to, gain: *gain });
                     let _ = project.apply(Command::SetSendPreFader { from: *track, to: *to, pre_fader: *pre });
+                    let _ = project.apply(Command::SetSendSidechain { from: *track, to: *to, sidechain: *side });
                 }
             }
             for fx in &saved.fx {
