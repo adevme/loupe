@@ -8,6 +8,8 @@ use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::clock;
+use crate::instrument::Note;
+use crate::midi_in::{KeyEvent, KeySender};
 use crate::model::{ClipId, Frames, Project, TrackId};
 use crate::render::{mix_tracks_metered, scale, Chains, Mixdown};
 
@@ -34,6 +36,10 @@ enum Msg {
     Loop(Option<(Frames, Frames)>),
     Audition(Option<ClipId>),
     Endless(bool),
+    NoteOn { track: TrackId, key: u8, velocity: f32 },
+    NoteOff { track: TrackId, key: u8 },
+    Silence,
+    KeysGoTo(Option<TrackId>),
 }
 
 impl Default for Shared {
@@ -79,9 +85,23 @@ struct Rt {
     fade: u32,
     fade_len: u32,
     block: Vec<[f32; 2]>,
+    live: Vec<Live>,
+    keys: Consumer<KeyEvent>,
+    keys_go_to: Option<TrackId>,
+}
+
+const MOST_LIVE_NOTES: usize = 32;
+const HELD: Frames = Frames::MAX / 4;
+
+#[derive(Clone, Copy)]
+struct Live {
+    track: TrackId,
+    note: Note,
+    played: Frames,
 }
 
 struct Remote {
+    keys: KeySender,
     outbox: Producer<Msg>,
     retired: Consumer<Arc<Project>>,
     handed_back: Consumer<Box<dyn Chains>>,
@@ -89,11 +109,15 @@ struct Remote {
 }
 
 fn pair(rate: u32) -> (Rt, Remote) {
+    let (keys_in, keys_out) = RingBuffer::new(QUEUE);
     let (outbox, inbox) = RingBuffer::new(QUEUE);
     let (retired_tx, retired_rx) = RingBuffer::new(QUEUE);
     let (back_tx, back_rx) = RingBuffer::new(QUEUE);
     let shared = Arc::new(Shared::default());
     let rt = Rt {
+        live: Vec::with_capacity(MOST_LIVE_NOTES),
+        keys: keys_out,
+        keys_go_to: None,
         scratch: Mixdown::default(),
         chains: None,
         peaks: [0.0; METERS],
@@ -113,7 +137,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
     };
-    (rt, Remote { outbox, retired: retired_rx, handed_back: back_rx, shared })
+    (rt, Remote { keys: Arc::new(std::sync::Mutex::new(keys_in)), outbox, retired: retired_rx, handed_back: back_rx, shared })
 }
 
 impl Rt {
@@ -145,6 +169,38 @@ impl Rt {
                 Msg::Loop(range) => self.loop_range = range,
                 Msg::Audition(clip) => self.audition = clip,
                 Msg::Endless(endless) => self.endless = endless,
+                Msg::NoteOn { track, key, velocity } => {
+                    if self.live.len() == MOST_LIVE_NOTES {
+                        self.live.remove(0);
+                    }
+                    self.live.push(Live { track, note: Note { key, start: 0, len: HELD, velocity }, played: 0 });
+                }
+                Msg::NoteOff { track, key } => {
+                    for voice in self.live.iter_mut().filter(|v| v.track == track && v.note.key == key && v.note.len == HELD) {
+                        voice.note.len = voice.played.max(1);
+                    }
+                }
+                Msg::Silence => self.live.clear(),
+                Msg::KeysGoTo(track) => {
+                    if track != self.keys_go_to {
+                        self.live.retain(|voice| Some(voice.track) != self.keys_go_to || voice.note.len != HELD);
+                    }
+                    self.keys_go_to = track;
+                }
+            }
+        }
+
+        while let Ok(event) = self.keys.pop() {
+            let Some(track) = self.keys_go_to else { continue };
+            if event.velocity > 0.0 {
+                if self.live.len() == MOST_LIVE_NOTES {
+                    self.live.remove(0);
+                }
+                self.live.push(Live { track, note: Note { key: event.key, start: 0, len: HELD, velocity: event.velocity }, played: 0 });
+            } else {
+                for voice in self.live.iter_mut().filter(|v| v.track == track && v.note.key == event.key && v.note.len == HELD) {
+                    voice.note.len = voice.played.max(1);
+                }
             }
         }
 
@@ -210,8 +266,29 @@ impl Rt {
                 self.pos = go_round_to;
             }
         }
+        self.play_live(frames);
         self.shared.pos.store(self.pos, Ordering::Relaxed);
-        out
+        &self.block[..frames]
+    }
+
+    fn play_live(&mut self, frames: usize) {
+        if self.live.is_empty() {
+            return;
+        }
+        let rate = self.project.rate;
+        let master = if self.project.master_muted { 0.0 } else { self.project.master };
+        let project = &self.project;
+        let out = &mut self.block[..frames];
+        self.live.retain_mut(|voice| {
+            let Some(track) = project.track(voice.track) else {
+                return false;
+            };
+            let instrument = track.instrument;
+            let gain = if track.muted { 0.0 } else { track.gain * master };
+            instrument.play(&voice.note, voice.played, out, |_| gain, rate);
+            voice.played += frames as Frames;
+            voice.note.len == HELD || voice.played < voice.note.len + instrument.tail(rate)
+        });
     }
 
     fn heard(&self, at: Instant) {
@@ -291,6 +368,26 @@ impl Engine {
 
     pub fn audition(&mut self, clip: Option<ClipId>) {
         self.send(Msg::Audition(clip));
+    }
+
+    pub fn note_on(&mut self, track: TrackId, key: u8, velocity: f32) {
+        self.send(Msg::NoteOn { track, key, velocity });
+    }
+
+    pub fn note_off(&mut self, track: TrackId, key: u8) {
+        self.send(Msg::NoteOff { track, key });
+    }
+
+    pub fn silence_notes(&mut self) {
+        self.send(Msg::Silence);
+    }
+
+    pub fn key_sender(&self) -> KeySender {
+        self.remote.keys.clone()
+    }
+
+    pub fn keys_go_to(&mut self, track: Option<TrackId>) {
+        self.send(Msg::KeysGoTo(track));
     }
 
     pub fn position(&self) -> Frames {
@@ -637,6 +734,50 @@ mod tests {
         remote.outbox.push(Msg::Project(Arc::new(steady(2000)))).ok().unwrap();
         rt.process(64);
         assert_eq!(std::iter::from_fn(|| remote.retired.pop().ok()).count(), 2);
+    }
+
+    #[test]
+    fn a_key_sounds_while_held_even_when_stopped_and_fades_after() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Keys".into() }) else { panic!() };
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        assert!(rt.process(480).iter().all(|f| *f == [0.0, 0.0]));
+        remote.outbox.push(Msg::NoteOn { track, key: 60, velocity: 1.0 }).ok().unwrap();
+        let loud = rt.process(4_000).iter().map(|f| f[0].abs()).fold(0.0, f32::max);
+        assert!(loud > 0.05, "{loud}");
+        remote.outbox.push(Msg::NoteOff { track, key: 60 }).ok().unwrap();
+        for _ in 0..12 {
+            rt.process(4_000);
+        }
+        assert!(rt.process(480).iter().all(|f| *f == [0.0, 0.0]), "silent after the release");
+        assert!(rt.live.is_empty());
+        for key in 0..40 {
+            remote.outbox.push(Msg::NoteOn { track, key, velocity: 1.0 }).ok().unwrap();
+        }
+        rt.process(64);
+        assert_eq!(rt.live.len(), MOST_LIVE_NOTES);
+        remote.outbox.push(Msg::Silence).ok().unwrap();
+        rt.process(64);
+        assert!(rt.live.is_empty());
+    }
+
+    #[test]
+    fn keyboard_notes_play_on_the_chosen_track_only() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Keys".into() }) else { panic!() };
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.keys.lock().unwrap().push(KeyEvent { key: 60, velocity: 1.0 }).unwrap();
+        assert!(rt.process(2_000).iter().all(|f| *f == [0.0, 0.0]), "no track chosen yet");
+        remote.outbox.push(Msg::KeysGoTo(Some(track))).ok().unwrap();
+        remote.keys.lock().unwrap().push(KeyEvent { key: 60, velocity: 1.0 }).unwrap();
+        assert!(rt.process(2_000).iter().any(|f| f[0].abs() > 0.01));
+        remote.keys.lock().unwrap().push(KeyEvent { key: 60, velocity: 0.0 }).unwrap();
+        for _ in 0..10 {
+            rt.process(4_000);
+        }
+        assert!(rt.live.is_empty());
     }
 
     #[test]

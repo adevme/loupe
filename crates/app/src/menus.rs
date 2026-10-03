@@ -37,6 +37,7 @@ impl App {
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
             Overlay::Recover => self.recover_layer(),
+            Overlay::Roll(clip) => self.centred(self.roll_sheet(*clip)),
         }
     }
 
@@ -169,6 +170,11 @@ impl App {
             items.push(self.item("Take out of its folder", "", Some(Message::SetTrackParent { track, parent: None })));
         }
         items.push(self.item("Routing…", "", Some(Message::OpenRouting(track))));
+        items.push(self.item("New note clip", "", Some(Message::NewNotesClip(track))));
+        let playing = self.project.track(track).map(|t| t.instrument);
+        let synth = matches!(playing, Some(loupe_engine::Instrument::Synth(_)));
+        items.push(self.item(if synth { "Instrument: Loupe Synth ✓" } else { "Instrument: Loupe Synth" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::default()))));
+        items.push(self.item(if synth { "Instrument: Loupe Drums" } else { "Instrument: Loupe Drums ✓" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::Drums))));
         self.menu(items)
     }
 

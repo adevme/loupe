@@ -1399,7 +1399,10 @@ impl Timeline<'_> {
         let wave_top = top + self.palette.clip_title_height + 2.0;
         let wave_height = height - self.palette.clip_title_height - 5.0;
         if wave_height > 4.0 {
-            self.draw_waveform(frame, clip, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour);
+            match &clip.notes {
+                Some(notes) => self.draw_notes(frame, clip, notes, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
+                None => self.draw_waveform(frame, clip, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
+            }
         }
 
         let outline = if selected {
@@ -1430,6 +1433,41 @@ impl Timeline<'_> {
                     ..Text::default()
                 });
             });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_notes(
+        &self,
+        frame: &mut Frame,
+        clip: &Clip,
+        notes: &[loupe_engine::Note],
+        clip_left: f32,
+        from_x: f32,
+        to_x: f32,
+        top: f32,
+        height: f32,
+        colour: Color,
+    ) {
+        let shown: Vec<&loupe_engine::Note> = notes.iter().filter(|note| note.end() > clip.offset && note.start < clip.offset + clip.len).collect();
+        let (Some(low), Some(high)) = (shown.iter().map(|n| n.key).min(), shown.iter().map(|n| n.key).max()) else {
+            return;
+        };
+        let rows = (high - low) as f32 + 1.0;
+        let row_h = (height / rows.max(6.0)).clamp(1.5, 6.0);
+        let span = row_h * rows;
+        let first_y = top + (height - span) / 2.0;
+        let px_per_frame = (self.view.zoom / self.rate()) as f32;
+        for note in shown {
+            let start = note.start.max(clip.offset) - clip.offset;
+            let end = note.end().min(clip.offset + clip.len) - clip.offset;
+            let x0 = (clip_left + start as f32 * px_per_frame).max(from_x);
+            let x1 = (clip_left + end as f32 * px_per_frame).min(to_x);
+            if x1 <= x0 {
+                continue;
+            }
+            let y = first_y + (high - note.key) as f32 * row_h;
+            frame.fill_rectangle(Point::new(x0, y), Size::new((x1 - x0 - 1.0).max(1.5), (row_h - 0.5).max(1.0)), colour);
         }
     }
 

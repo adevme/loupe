@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::instrument::{Instrument, Note, Synth, Wave};
 use crate::model::{Clip, ClipId, Command, Edge, Fade, Frames, Outcome, Project, TrackId};
 use crate::source::Source;
 
@@ -40,6 +41,7 @@ pub struct SavedTrack {
     pub collapsed: bool,
     pub sends: Vec<(usize, f32, bool, bool)>,
     pub fx: Vec<SavedFx>,
+    pub instrument: Instrument,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +64,7 @@ pub struct SavedClip {
     pub muted: bool,
     pub fade_in: Fade,
     pub fade_out: Fade,
+    pub notes: Option<(String, Vec<Note>)>,
 }
 
 impl SavedProject {
@@ -111,6 +114,7 @@ impl SavedProject {
                     height: height_of(track.id),
                     parent: track.parent.and_then(|id| project.tracks.iter().position(|t| t.id == id)),
                     collapsed: track.collapsed,
+                    instrument: track.instrument,
                     sends: track
                         .sends
                         .iter()
@@ -141,6 +145,7 @@ impl SavedProject {
                             muted: clip.muted,
                             fade_in: clip.fade_in,
                             fade_out: clip.fade_out,
+                            notes: clip.notes.as_ref().map(|notes| (clip.source.name.clone(), notes.to_vec())),
                             fx: clip
                                 .fx
                                 .iter()
@@ -169,8 +174,8 @@ impl SavedProject {
             let height = track.height.map_or("-".to_string(), |h| h.to_string());
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} colour={colour} height={height} parent={parent} collapsed={} name={}\n",
-                track.gain, track.muted as u8, track.collapsed as u8, track.name
+                "track gain={} muted={} colour={colour} height={height} parent={parent} collapsed={} instrument={} name={}\n",
+                track.gain, track.muted as u8, track.collapsed as u8, instrument_text(&track.instrument), track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -184,9 +189,12 @@ impl SavedProject {
                 ));
             }
             for clip in &track.clips {
+                let opening = match &clip.notes {
+                    Some(_) => "notes".to_string(),
+                    None => format!("clip source={}", clip.source),
+                };
                 out.push_str(&format!(
-                    "clip source={} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}\n",
-                    clip.source,
+                    "{opening} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}{}\n",
                     clip.start,
                     clip.offset,
                     clip.len,
@@ -195,8 +203,12 @@ impl SavedProject {
                     clip.fade_in.len,
                     clip.fade_in.curve,
                     clip.fade_out.len,
-                    clip.fade_out.curve
+                    clip.fade_out.curve,
+                    clip.notes.as_ref().map_or(String::new(), |(name, _)| format!(" name={name}"))
                 ));
+                for note in clip.notes.iter().flat_map(|(_, notes)| notes) {
+                    out.push_str(&format!("note key={} start={} len={} velocity={}\n", note.key, note.start, note.len, note.velocity));
+                }
                 for fx in &clip.fx {
                     out.push_str(&format!("clipfxpath {}\n", fx.path.display()));
                     let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
@@ -256,6 +268,7 @@ impl SavedProject {
                         collapsed: fields.get("collapsed") == Some(&"1"),
                         sends: Vec::new(),
                         fx: Vec::new(),
+                        instrument: fields.get("instrument").and_then(|text| instrument_from(text)).unwrap_or_default(),
                     });
                 }
                 "send" => {
@@ -313,12 +326,28 @@ impl SavedProject {
                     let holder = saved.envelopes.last_mut().ok_or_else(|| bad("a point before any envelope"))?;
                     holder.points.push(crate::envelope::Point { at, value, shape });
                 }
-                "clip" => {
+                "note" => {
+                    let fields = fields_of(rest);
+                    let whole = |key: &str| fields.get(key).and_then(|v| v.parse::<u64>().ok()).ok_or_else(|| bad(&format!("the note has no {key}")));
+                    let note = Note {
+                        key: whole("key")?.min(127) as u8,
+                        start: whole("start")?,
+                        len: whole("len")?,
+                        velocity: number_in(&fields, "velocity").unwrap_or(0.8),
+                    };
+                    let clip = saved.tracks.last_mut().and_then(|track| track.clips.last_mut()).ok_or_else(|| bad("a note before any clip"))?;
+                    clip.notes.as_mut().ok_or_else(|| bad("a note in an audio clip"))?.1.push(note);
+                }
+                "clip" | "notes" => {
+                    let (rest, name) = match kind {
+                        "notes" => rest.split_once(" name=").map_or((rest, "Notes"), |(fields, name)| (fields, name)),
+                        _ => (rest, ""),
+                    };
                     let fields = fields_of(rest);
                     let need = |key: &str| fields.get(key).copied().ok_or_else(|| bad(&format!("the clip has no {key}")));
                     let whole = |key: &str| need(key)?.parse::<u64>().map_err(|_| bad(&format!("{key} is not a number")));
                     let clip = SavedClip {
-                        source: whole("source")? as usize,
+                        source: if kind == "notes" { 0 } else { whole("source")? as usize },
                         start: whole("start")?,
                         offset: whole("offset")?,
                         len: whole("len")?,
@@ -327,8 +356,9 @@ impl SavedProject {
                         fade_in: fade_from(need("fade_in")?).ok_or_else(|| bad("the fade in is not readable"))?,
                         fade_out: fade_from(need("fade_out")?).ok_or_else(|| bad("the fade out is not readable"))?,
                         fx: Vec::new(),
+                        notes: (kind == "notes").then(|| (name.to_string(), Vec::new())),
                     };
-                    if clip.source >= saved.sources.len() {
+                    if clip.notes.is_none() && clip.source >= saved.sources.len() {
                         return Err(bad("the clip points at audio the file does not list"));
                     }
                     saved.tracks.last_mut().ok_or_else(|| bad("a clip comes before any track"))?.clips.push(clip);
@@ -361,14 +391,22 @@ impl SavedProject {
             let _ = project.apply(Command::SetTrackGain { track, gain: saved.gain });
             let _ = project.apply(Command::SetTrackMuted { track, muted: saved.muted });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
+            let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
             if let Some(height) = saved.height {
                 heights.push((track, height));
             }
             for clip in &saved.clips {
-                let Some(source) = sources.get(clip.source) else {
-                    continue;
+                let placed = match (&clip.notes, sources.get(clip.source)) {
+                    (Some((name, notes)), _) => Command::AddNotesClip {
+                        track,
+                        name: name.clone(),
+                        start: rescale(clip.start),
+                        len: rescale(clip.len).max(1),
+                        notes: notes.iter().map(|note| Note { start: rescale(note.start), len: rescale(note.len).max(1), ..*note }).collect(),
+                    },
+                    (None, Some(source)) => Command::AddClip { track, source: source.clone(), start: rescale(clip.start) },
+                    (None, None) => continue,
                 };
-                let placed = Command::AddClip { track, source: source.clone(), start: rescale(clip.start) };
                 let Ok(Outcome::Clip(id)) = project.apply(placed) else {
                     continue;
                 };
@@ -455,6 +493,38 @@ impl SavedProject {
         }
         (project, heights)
     }
+}
+
+fn instrument_text(instrument: &Instrument) -> String {
+    match instrument {
+        Instrument::Drums => "drums".to_string(),
+        Instrument::Synth(synth) => format!(
+            "synth:{}:{}:{}:{}:{}:{}",
+            synth.wave.name(),
+            synth.attack,
+            synth.decay,
+            synth.sustain,
+            synth.release,
+            synth.detune
+        ),
+    }
+}
+
+fn instrument_from(text: &str) -> Option<Instrument> {
+    if text == "drums" {
+        return Some(Instrument::Drums);
+    }
+    let mut parts = text.strip_prefix("synth:")?.split(':');
+    let wave = Wave::named(parts.next()?)?;
+    let mut number = || parts.next()?.parse::<f32>().ok().filter(|n| n.is_finite() && *n >= 0.0);
+    Some(Instrument::Synth(Synth {
+        wave,
+        attack: number()?,
+        decay: number()?,
+        sustain: number()?.min(1.0),
+        release: number()?,
+        detune: number()?,
+    }))
 }
 
 fn hex_of(bytes: &[u8]) -> String {
