@@ -244,24 +244,35 @@ impl App {
 fn read_file(path: &Path, rate: u32) -> Result<Opened, String> {
     let text = std::fs::read_to_string(path).map_err(|why| why.to_string())?;
     let saved = SavedProject::parse(&text)?;
+    let mut files: Vec<&PathBuf> = Vec::new();
+    for audio in &saved.sources {
+        if !files.contains(&audio) {
+            files.push(audio);
+        }
+    }
     let loaded: Vec<Result<Source, String>> = std::thread::scope(|scope| {
-        let loading: Vec<_> =
-            saved.sources.iter().map(|audio| scope.spawn(move || Source::load(audio, rate))).collect();
+        let loading: Vec<_> = files.iter().map(|audio| scope.spawn(move || Source::load(audio, rate))).collect();
         loading
             .into_iter()
             .map(|thread| thread.join().unwrap_or_else(|_| Err("the audio could not be read".into())))
             .collect()
     });
     let mut not_found = Vec::new();
-    let sources = loaded
+    let read_once: Vec<Arc<Source>> = loaded
         .into_iter()
-        .zip(&saved.sources)
+        .zip(&files)
         .map(|(source, audio)| {
             Arc::new(source.unwrap_or_else(|_| {
                 not_found.push(audio.display().to_string());
                 Source::missing(audio)
             }))
         })
+        .collect();
+    let sources = saved
+        .sources
+        .iter()
+        .filter_map(|audio| files.iter().position(|file| *file == audio))
+        .map(|index| read_once[index].clone())
         .collect();
     Ok(Opened { saved, sources, not_found })
 }

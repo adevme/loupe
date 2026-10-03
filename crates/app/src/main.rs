@@ -419,7 +419,11 @@ impl App {
             Message::Loaded(path, result) => {
                 self.loading = self.loading.saturating_sub(1);
                 match result {
-                    Ok(source) => self.place(source),
+                    Ok(source) => {
+                        let already_here = self.project.sources.iter().find(|kept| kept.path == source.path && !kept.frames.is_empty());
+                        let source = already_here.cloned().unwrap_or(source);
+                        self.place(source);
+                    }
                     Err(why) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         self.problem = Some(format!("Could not import {name}: {why}"));
@@ -979,6 +983,10 @@ impl App {
             self.screen = Screen::Song;
         }
         Task::batch(paths.into_iter().map(|path| {
+            let already_here = self.project.sources.iter().find(|kept| kept.path == path && !kept.frames.is_empty());
+            if let Some(source) = already_here {
+                return Task::done(Message::Loaded(path, Ok(source.clone())));
+            }
             let (done, loaded) = oneshot::channel();
             let file = path.clone();
             std::thread::spawn(move || {
