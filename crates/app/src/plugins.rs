@@ -11,7 +11,7 @@ pub const FILTER_ID: &str = "plugin-filter";
 const NAME_LENGTH: usize = 9;
 
 pub fn find_plugins() -> Vec<Found> {
-    let mut found = loupe_plugins::scan(&loupe_plugins::folders());
+    let mut found = loupe_plugins::everything();
     found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     found
 }
@@ -28,7 +28,7 @@ impl App {
             let on = !fx.bypassed;
             rows = rows.push(
                 row![
-                    button(text(short).size(10.5))
+                    button(text(short).size(10.5).wrapping(iced::widget::text::Wrapping::None))
                         .padding([1, 3])
                         .width(Length::Fill)
                         .style(move |_, status| palette.toggled(on, status))
@@ -115,7 +115,9 @@ fn shorten(name: &str) -> String {
         }
     }
     let tail = words.last().copied().unwrap_or(name);
-    tail.chars().take(NAME_LENGTH).collect()
+    let mut cut: String = tail.chars().take(NAME_LENGTH - 1).collect();
+    cut.push('…');
+    cut
 }
 
 #[cfg(test)]
@@ -127,7 +129,7 @@ mod tests {
         assert_eq!(shorten("FabFilter Pro-Q 4"), "Pro-Q 4");
         assert_eq!(shorten("FabFilter Saturn 2"), "Saturn 2");
         assert_eq!(shorten("Loupe EQ"), "Loupe EQ");
-        assert_eq!(shorten("Valhalla Supermassive"), "Supermass");
+        assert_eq!(shorten("Valhalla Supermassive"), "Supermas\u{2026}");
         assert_eq!(shorten("Pro-Q 4"), "Pro-Q 4");
     }
 }

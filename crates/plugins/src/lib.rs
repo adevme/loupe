@@ -9,7 +9,7 @@ pub mod rack;
 pub mod stream;
 pub mod wire;
 
-pub use scan::{folders, scan, Format, Found};
+pub use scan::{everything, folders, scan, Format, Found, BUILT_IN};
 
 pub const CHANNELS: usize = 2;
 

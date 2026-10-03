@@ -7,3 +7,4 @@ edition = "2021"
 clap-sys = "0.5.0"
 libloading = "0.8"
 vst3 = "0.3"
+loupe-stock = { path = "../stock" }

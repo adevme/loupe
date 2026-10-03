@@ -10,11 +10,16 @@ pub struct Slot {
     pub bypassed: bool,
     pub trouble: Option<String>,
     host: Option<Sandbox>,
+    built: Option<Box<dyn loupe_stock::Effect>>,
 }
 
 impl Slot {
     pub fn working(&self) -> bool {
-        self.host.is_some() && self.trouble.is_none()
+        (self.host.is_some() || self.built.is_some()) && self.trouble.is_none()
+    }
+
+    pub fn built_in(&self) -> bool {
+        self.built.is_some()
     }
 }
 
@@ -59,10 +64,18 @@ impl Rack {
             bypassed: false,
             trouble: None,
             host: None,
+            built: None,
         };
-        match self.open(&slot.path, slot.index) {
-            Ok(host) => slot.host = Some(host),
-            Err(why) => slot.trouble = Some(why),
+        if is_built_in(&slot.path) {
+            match self.make_built(slot.index) {
+                Ok(made) => slot.built = Some(made),
+                Err(why) => slot.trouble = Some(why),
+            }
+        } else {
+            match self.open(&slot.path, slot.index) {
+                Ok(host) => slot.host = Some(host),
+                Err(why) => slot.trouble = Some(why),
+            }
         }
         let trouble = slot.trouble.clone();
         self.slots.push(slot);
@@ -121,6 +134,9 @@ impl Rack {
 
     fn tell(&mut self, slot: usize, ask: Ask) -> Result<(), String> {
         let found = self.slots.get_mut(slot).ok_or("there is no such slot")?;
+        if found.built.is_some() {
+            return Err("the built in plugins do not have their own window yet".into());
+        }
         let host = found.host.as_mut().ok_or("that plugin is not loaded")?;
         match host.ask(ask) {
             Ok(Reply::Fine) => Ok(()),
@@ -136,6 +152,9 @@ impl Rack {
 
     pub fn save(&mut self, slot: usize) -> Option<Vec<u8>> {
         let found = self.slots.get_mut(slot)?;
+        if let Some(made) = found.built.as_ref() {
+            return Some(take_knobs(made.as_ref()));
+        }
         let host = found.host.as_mut()?;
         match host.ask(Ask::Save) {
             Ok(Reply::State(state)) => Some(state),
@@ -158,6 +177,10 @@ impl Rack {
             if slot.bypassed || slot.trouble.is_some() {
                 continue;
             }
+            if let Some(made) = slot.built.as_mut() {
+                made.process(audio);
+                continue;
+            }
             let Some(host) = slot.host.as_mut() else { continue };
             if let Err(why) = host.run(audio) {
                 slot.trouble = Some(why);
@@ -176,6 +199,9 @@ impl Rack {
                     let mut slot = pool.remove(at);
                     slot.name = name.clone();
                     slot.bypassed = *bypassed;
+                    if let Some(made) = slot.built.as_mut() {
+                        put_knobs(made.as_mut(), state);
+                    }
                     self.slots.push(slot);
                 }
                 None => {
@@ -186,22 +212,36 @@ impl Rack {
                         bypassed: *bypassed,
                         trouble: None,
                         host: None,
+                        built: None,
                     };
-                    match self.open(path, *index).and_then(|mut host| {
-                        settle(&mut host, state)?;
-                        Ok(host)
-                    }) {
-                        Ok(host) => slot.host = Some(host),
-                        Err(why) => {
-                            troubles.push(format!("{name}: {why}"));
-                            slot.trouble = Some(why);
-                        }
+                    let opened = if is_built_in(path) {
+                        self.make_built(*index).map(|mut made| {
+                            put_knobs(made.as_mut(), state);
+                            slot.built = Some(made);
+                        })
+                    } else {
+                        self.open(path, *index).and_then(|mut host| {
+                            settle(&mut host, state)?;
+                            slot.host = Some(host);
+                            Ok(())
+                        })
+                    };
+                    if let Err(why) = opened {
+                        troubles.push(format!("{name}: {why}"));
+                        slot.trouble = Some(why);
                     }
                     self.slots.push(slot);
                 }
             }
         }
         troubles
+    }
+
+    fn make_built(&self, index: usize) -> Result<Box<dyn loupe_stock::Effect>, String> {
+        let name = loupe_stock::NAMES.get(index).ok_or("Loupe has no such built in plugin")?;
+        let mut made = loupe_stock::make(name).ok_or("Loupe has no such built in plugin")?;
+        made.prepare(self.rate as f32);
+        Ok(made)
     }
 
     fn open(&self, path: &Path, index: usize) -> Result<Sandbox, String> {
@@ -306,5 +346,61 @@ fn settle(host: &mut Sandbox, state: &[u8]) -> Result<(), String> {
         Reply::Fine => Ok(()),
         Reply::Trouble(why) => Err(why),
         other => Err(format!("the plugin host answered out of turn: {other:?}")),
+    }
+}
+
+pub fn is_built_in(path: &Path) -> bool {
+    path.as_os_str() == crate::BUILT_IN
+}
+
+fn take_knobs(effect: &dyn loupe_stock::Effect) -> Vec<u8> {
+    let mut out = Vec::with_capacity(effect.params().len() * 4);
+    for index in 0..effect.params().len() {
+        out.extend_from_slice(&effect.value(index).to_le_bytes());
+    }
+    out
+}
+
+fn put_knobs(effect: &mut dyn loupe_stock::Effect, state: &[u8]) {
+    if state.len() != effect.params().len() * 4 {
+        return;
+    }
+    for (index, four) in state.chunks_exact(4).enumerate() {
+        effect.set(index, f32::from_le_bytes([four[0], four[1], four[2], four[3]]));
+    }
+}
+
+#[cfg(test)]
+mod built_in_tests {
+    use super::*;
+
+    #[test]
+    fn a_built_in_loads_and_changes_the_sound() {
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), 48_000, 512);
+        let slot = rack.add(Path::new(crate::BUILT_IN), 1, "Loupe Compressor").expect("it loads");
+        assert!(rack.slots()[slot].working());
+        assert!(rack.slots()[slot].built_in());
+        let mut audio = vec![[0.9, 0.9]; 512];
+        rack.process(&mut audio);
+        let loudest = audio.iter().fold(0.0f32, |top, frame| top.max(frame[0].abs()));
+        assert!(loudest < 0.9, "the compressor left it at {loudest}");
+    }
+
+    #[test]
+    fn a_built_in_remembers_its_knobs() {
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), 48_000, 512);
+        rack.add(Path::new(crate::BUILT_IN), 0, "Loupe EQ").expect("it loads");
+        let first = rack.save(0).expect("it saves");
+        assert!(!first.is_empty());
+        let want = vec![Wanted {
+            path: PathBuf::from(crate::BUILT_IN),
+            index: 0,
+            name: "Loupe EQ".into(),
+            bypassed: false,
+            state: first.clone(),
+        }];
+        let mut fresh = Rack::new(PathBuf::from("no-host-here"), 48_000, 512);
+        assert!(fresh.reconcile(&want).is_empty());
+        assert_eq!(fresh.save(0), Some(first));
     }
 }

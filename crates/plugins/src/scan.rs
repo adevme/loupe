@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Format {
+    Stock,
     Vst3,
     Clap,
     Lv2,
@@ -12,6 +13,7 @@ pub enum Format {
 impl Format {
     pub fn label(self) -> &'static str {
         match self {
+            Format::Stock => "Built in",
             Format::Vst3 => "VST3",
             Format::Clap => "CLAP",
             Format::Lv2 => "LV2",
@@ -21,6 +23,7 @@ impl Format {
 
     fn extension(self) -> &'static str {
         match self {
+            Format::Stock => "loupe",
             Format::Vst3 => "vst3",
             Format::Clap => "clap",
             Format::Lv2 => "lv2",
@@ -75,15 +78,21 @@ pub fn folders() -> Vec<(Format, PathBuf)> {
     places
 }
 
+pub fn everything() -> Vec<Found> {
+    let mut found = built_in();
+    found.extend(scan(&folders()));
+    found.extend(audio_units());
+    found
+}
+
 pub fn scan(places: &[(Format, PathBuf)]) -> Vec<Found> {
     let mut found = Vec::new();
     for (format, place) in places {
-        if *format == Format::Au {
+        if matches!(format, Format::Au | Format::Stock) {
             continue;
         }
         look(*format, place, place, &mut found, 0);
     }
-    found.extend(audio_units());
     found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.format.cmp(&b.format)));
     found.dedup_by(|a, b| a.path == b.path && a.index == b.index);
     found
@@ -183,4 +192,20 @@ fn audio_units() -> Vec<Found> {
 #[cfg(not(target_os = "macos"))]
 fn audio_units() -> Vec<Found> {
     Vec::new()
+}
+
+pub const BUILT_IN: &str = "loupe.loupe";
+
+fn built_in() -> Vec<Found> {
+    loupe_stock::NAMES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| Found {
+            name: name.to_string(),
+            path: PathBuf::from(BUILT_IN),
+            format: Format::Stock,
+            vendor: None,
+            index,
+        })
+        .collect()
 }
