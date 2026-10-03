@@ -153,9 +153,13 @@ impl Timeline<'_> {
 
     fn grid_beats(&self) -> f64 {
         let beat_px = 60.0 / self.project.bpm * self.view.zoom;
-        let mut beats = 1.0 / 16.0;
+        let frames_per_beat = 60.0 / self.project.bpm * self.rate();
+        let mut beats = 1.0;
         while beats * beat_px < MIN_GRID_PX {
             beats *= 2.0;
+        }
+        while beats * beat_px >= MIN_GRID_PX * 2.0 && beats * frames_per_beat >= 2.0 {
+            beats /= 2.0;
         }
         beats
     }
