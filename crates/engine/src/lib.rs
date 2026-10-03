@@ -10,7 +10,7 @@ mod source;
 mod wav;
 
 pub use audio::{Engine, Output, METERS};
-pub use export::{export, next_version_folder, render_to_wav, ExportPlan};
+pub use export::{export, export_through, next_version_folder, render_to_wav, render_to_wav_through, ExportPlan};
 pub use file::{SavedClip, SavedFx, SavedProject, SavedTrack};
 pub use input::{input_devices, Input, InputChoice, Take};
 pub use model::{

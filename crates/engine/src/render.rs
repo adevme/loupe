@@ -49,10 +49,31 @@ pub trait Chains: Send {
     fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {
         Vec::new()
     }
+
+    fn tweak_clip(&mut self, clip: ClipId, slot: usize, knob: usize, value: f32) {
+        let _ = (clip, slot, knob, value);
+    }
+
+    fn show_clip(&mut self, clip: ClipId, slot: usize) -> Result<(), String> {
+        let _ = (clip, slot);
+        Err("plugin windows are not wired up".into())
+    }
 }
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
     mix_tracks(project, pos, out, None);
+    let level = if project.master_muted { 0.0 } else { project.master };
+    scale(out, level, level);
+}
+
+pub fn render_through(
+    project: &Project,
+    pos: Frames,
+    out: &mut [[f32; 2]],
+    scratch: &mut Mixdown,
+    chains: Option<&mut (dyn Chains + '_)>,
+) {
+    mix_tracks_metered(project, pos, out, None, None, scratch, chains);
     let level = if project.master_muted { 0.0 } else { project.master };
     scale(out, level, level);
 }

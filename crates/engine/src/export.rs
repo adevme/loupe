@@ -3,7 +3,6 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::model::{Frames, Project, Track};
-use crate::render::render;
 use crate::wav;
 
 const BLOCK: usize = 16_384;
@@ -20,6 +19,15 @@ pub struct ExportPlan {
 }
 
 pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> Result<(), String> {
+    export_through(project, plan, progress, None)
+}
+
+pub fn export_through(
+    project: &Project,
+    plan: &ExportPlan,
+    progress: &dyn Fn(f32),
+    mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
+) -> Result<(), String> {
     let (from, to) = plan.range.unwrap_or((0, project.length()));
     if to <= from {
         return Err("there is nothing to export".into());
@@ -37,7 +45,7 @@ pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> R
     };
 
     let mix = plan.folder.join(format!("{}.wav", plan.name));
-    write_wav(&mix, project, from, to, &mut count).map_err(|why| failed(&mix, why))?;
+    write_wav(&mix, project, from, to, &mut count, chains.as_deref_mut()).map_err(|why| failed(&mix, why))?;
     let copy = plan.folder.join(format!("{}.lp", plan.name));
     fs::write(&copy, &plan.project_file).map_err(|why| failed(&copy, why))?;
 
@@ -50,17 +58,27 @@ pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> R
             alone.tracks.retain(|other| other.id == track.id);
             alone.master = 1.0;
             let file = stems_folder.join(format!("{}.wav", unused_name(&track.name, &mut used)));
-            write_wav(&file, &alone, from, to, &mut count).map_err(|why| failed(&file, why))?;
+            write_wav(&file, &alone, from, to, &mut count, chains.as_deref_mut()).map_err(|why| failed(&file, why))?;
         }
     }
     Ok(())
 }
 
 pub fn render_to_wav(project: &Project, path: &Path, from: Frames, to: Frames) -> Result<(), String> {
+    render_to_wav_through(project, path, from, to, None)
+}
+
+pub fn render_to_wav_through(
+    project: &Project,
+    path: &Path,
+    from: Frames,
+    to: Frames,
+    chains: Option<&mut (dyn crate::render::Chains + '_)>,
+) -> Result<(), String> {
     if to <= from {
         return Err("there is nothing to write".into());
     }
-    write_wav(path, project, from, to, &mut |_| {}).map_err(|why| format!("{}: {why}", path.display()))
+    write_wav(path, project, from, to, &mut |_| {}, chains).map_err(|why| format!("{}: {why}", path.display()))
 }
 
 pub fn next_version_folder(exports: &Path) -> PathBuf {
@@ -93,6 +111,7 @@ fn write_wav(
     from: Frames,
     to: Frames,
     wrote: &mut dyn FnMut(Frames),
+    mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
 ) -> io::Result<()> {
     let frames = to - from;
     if frames > wav::most_frames(CHANNELS) {
@@ -102,10 +121,11 @@ fn write_wav(
     out.write_all(&wav::float_header(CHANNELS, project.rate, frames as u32))?;
 
     let mut block = vec![[0.0f32; 2]; BLOCK];
+    let mut spare = crate::render::Mixdown::default();
     let mut pos = from;
     while pos < to {
         let count = BLOCK.min((to - pos) as usize);
-        render(project, pos, &mut block[..count]);
+        crate::render::render_through(project, pos, &mut block[..count], &mut spare, chains.as_deref_mut());
         for frame in &block[..count] {
             out.write_all(&frame[0].to_le_bytes())?;
             out.write_all(&frame[1].to_le_bytes())?;
@@ -148,7 +168,7 @@ mod tests {
 
     fn heard(project: &Project) -> Vec<[f32; 2]> {
         let mut out = vec![[0.0; 2]; project.length() as usize];
-        render(project, 0, &mut out);
+        crate::render::render(project, 0, &mut out);
         out
     }
 

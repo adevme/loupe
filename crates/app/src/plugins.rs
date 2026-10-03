@@ -170,7 +170,19 @@ impl App {
             let on = !fx.bypassed;
             rows = rows.push(
                 row![
-                    text(fx.name.clone()).size(12.5).width(Length::Fill),
+                    button(text(fx.name.clone()).size(12.5))
+                        .padding([2, 8])
+                        .width(Length::Fill)
+                        .style(move |_, status| palette.ghost(status))
+                        .on_press(Message::ShowClipPlugin(clip, slot)),
+                    button(text("Up").size(11.5))
+                        .padding([2, 8])
+                        .style(move |_, status| palette.outlined(status))
+                        .on_press(Message::MoveClipPlugin(clip, slot, slot.saturating_sub(1))),
+                    button(text("Down").size(11.5))
+                        .padding([2, 8])
+                        .style(move |_, status| palette.outlined(status))
+                        .on_press(Message::MoveClipPlugin(clip, slot, slot + 1)),
                     button(text(if on { "On" } else { "Bypassed" }).size(11.5))
                         .padding([2, 8])
                         .style(move |_, status| palette.toggled(on, status))

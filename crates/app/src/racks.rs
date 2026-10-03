@@ -13,7 +13,13 @@ pub struct Peek {
     pub history: Option<Arc<History>>,
 }
 
-pub type Peeks = Arc<Mutex<HashMap<(TrackId, usize), Peek>>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Spot {
+    Track(TrackId, usize),
+    Clip(ClipId, usize),
+}
+
+pub type Peeks = Arc<Mutex<HashMap<Spot, Peek>>>;
 
 pub struct Racks {
     host: PathBuf,
@@ -91,7 +97,14 @@ impl Racks {
         for (id, rack) in &self.chains {
             for slot in 0..rack.len() {
                 if let Some(made) = rack.built_at(slot) {
-                    held.insert((*id, slot), Peek { scopes: made.scopes(), history: made.history() });
+                    held.insert(Spot::Track(*id, slot), Peek { scopes: made.scopes(), history: made.history() });
+                }
+            }
+        }
+        for (id, rack) in &self.clips {
+            for slot in 0..rack.len() {
+                if let Some(made) = rack.built_at(slot) {
+                    held.insert(Spot::Clip(*id, slot), Peek { scopes: made.scopes(), history: made.history() });
                 }
             }
         }
@@ -150,6 +163,19 @@ impl Chains for Racks {
 
     fn clip_latency(&self, clip: ClipId) -> usize {
         self.clips.get(&clip).map(|rack| rack.latency()).unwrap_or(0)
+    }
+
+    fn tweak_clip(&mut self, clip: ClipId, slot: usize, knob: usize, value: f32) {
+        if let Some(rack) = self.clips.get_mut(&clip) {
+            rack.tweak(slot, knob, value);
+        }
+    }
+
+    fn show_clip(&mut self, clip: ClipId, slot: usize) -> Result<(), String> {
+        match self.clips.get_mut(&clip) {
+            Some(rack) => rack.show(slot),
+            None => Err("that clip has no plugins".into()),
+        }
     }
 
     fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {

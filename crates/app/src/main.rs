@@ -166,6 +166,8 @@ pub enum Message {
     WheelOverFader(mixer::Level, iced::mouse::ScrollDelta),
     ShowPlugin(TrackId, usize),
     OpenClipPlugins(ClipId),
+    ShowClipPlugin(ClipId, usize),
+    MoveClipPlugin(ClipId, usize, usize),
     AddClipPlugin(ClipId, usize),
     RemoveClipPlugin(ClipId, usize),
     BypassClipPlugin(ClipId, usize),
@@ -996,6 +998,13 @@ impl App {
                     self.edit(None, Command::AddClipFx { clip, fx });
                 }
             }
+            Message::MoveClipPlugin(clip, slot, to) => {
+                let most = self.project.clip(clip).map(|found| found.fx.len()).unwrap_or(0);
+                if to < most && to != slot {
+                    self.edit(None, Command::MoveClipFx { clip, slot, to });
+                }
+            }
+            Message::ShowClipPlugin(clip, slot) => self.open_clip_plugin_window(clip, slot),
             Message::RemoveClipPlugin(clip, slot) => {
                 self.edit(None, Command::RemoveClipFx { clip, slot });
             }
@@ -1296,6 +1305,13 @@ impl App {
         self.hand_racks_over();
     }
 
+    pub(crate) fn offline_racks(&self, project: &Project) -> Box<dyn Chains> {
+        let mut racks: Box<dyn Chains> =
+            Box::new(racks::Racks::new(self.engine.rate(), 512, racks::Peeks::default()));
+        racks.follow(project);
+        racks
+    }
+
     fn borrow_racks(&mut self) -> Option<Box<dyn Chains>> {
         if let Some(racks) = self.racks.take() {
             return Some(racks);
@@ -1331,10 +1347,42 @@ impl App {
             return;
         }
         let values: Vec<f32> = fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect();
-        let peek = self.peeks.lock().ok().and_then(|held| held.get(&(track, slot)).cloned()).unwrap_or_default();
+        let peek = self.peek_at(racks::Spot::Track(track, slot));
         let rate = self.engine.rate() as f32;
         let bpm = self.project.bpm as f32;
-        match stockwin::Window::open(track, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
+        match stockwin::Window::open(stockwin::Spot::Track(track), slot, fx.index, &fx.name, &values, peek, rate, bpm) {
+            Some(window) => {
+                self.stock = Some(window);
+                self.overlay = Overlay::Stock;
+            }
+            None => self.problem = Some("Loupe has no window for that plugin".into()),
+        }
+    }
+
+    fn peek_at(&self, spot: racks::Spot) -> racks::Peek {
+        self.peeks.lock().ok().and_then(|held| held.get(&spot).cloned()).unwrap_or_default()
+    }
+
+    pub(crate) fn open_clip_plugin_window(&mut self, clip: ClipId, slot: usize) {
+        let Some(fx) = self.project.clip(clip).and_then(|found| found.fx.get(slot)).cloned() else {
+            return;
+        };
+        if !loupe_plugins::rack::is_built_in(&fx.path) {
+            if let Some(mut racks) = self.borrow_racks() {
+                if let Err(why) = racks.show_clip(clip, slot) {
+                    self.problem = Some(why);
+                }
+                self.racks = Some(racks);
+                self.hand_racks_over();
+            }
+            return;
+        }
+        let values: Vec<f32> = fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect();
+        let peek = self.peek_at(racks::Spot::Clip(clip, slot));
+        let rate = self.engine.rate() as f32;
+        let bpm = self.project.bpm as f32;
+        let spot = stockwin::Spot::Clip(clip);
+        match stockwin::Window::open(spot, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
             Some(window) => {
                 self.stock = Some(window);
                 self.overlay = Overlay::Stock;
@@ -1345,29 +1393,41 @@ impl App {
 
     fn plugin_changed(&mut self, changes: Vec<(usize, f32)>) {
         let Some(window) = self.stock.as_ref() else { return };
-        let (track, slot) = (window.track, window.slot);
+        let (spot, slot) = (window.spot, window.slot);
         if changes.is_empty() {
             return;
         }
+        let mut state = match spot {
+            stockwin::Spot::Track(track) => self
+                .project
+                .tracks
+                .iter()
+                .find(|t| t.id == track)
+                .and_then(|t| t.fx.get(slot))
+                .map(|fx| fx.state.clone())
+                .unwrap_or_default(),
+            stockwin::Spot::Clip(clip) => self
+                .project
+                .clip(clip)
+                .and_then(|found| found.fx.get(slot))
+                .map(|fx| fx.state.clone())
+                .unwrap_or_default(),
+        };
         for (knob, value) in &changes {
-            self.engine.tweak(track, slot, *knob, *value);
-        }
-        let mut state = self
-            .project
-            .tracks
-            .iter()
-            .find(|t| t.id == track)
-            .and_then(|t| t.fx.get(slot))
-            .map(|fx| fx.state.clone())
-            .unwrap_or_default();
-        for (knob, value) in changes {
+            match spot {
+                stockwin::Spot::Track(track) => self.engine.tweak(track, slot, *knob, *value),
+                stockwin::Spot::Clip(clip) => self.engine.tweak_clip(clip, slot, *knob, *value),
+            }
             let at = knob * 4;
             if state.len() < at + 4 {
                 state.resize(at + 4, 0);
             }
             state[at..at + 4].copy_from_slice(&value.to_le_bytes());
         }
-        let _ = self.project.apply(Command::SetFxState { track, slot, state });
+        let _ = match spot {
+            stockwin::Spot::Track(track) => self.project.apply(Command::SetFxState { track, slot, state }),
+            stockwin::Spot::Clip(clip) => self.project.apply(Command::SetClipFxState { clip, slot, state }),
+        };
         self.dirty = true;
     }
 

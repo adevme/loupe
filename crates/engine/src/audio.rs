@@ -27,6 +27,7 @@ enum Msg {
     Project(Arc<Project>),
     Chains(Option<Box<dyn Chains>>),
     Tweak { track: TrackId, slot: usize, knob: usize, value: f32 },
+    TweakClip { clip: ClipId, slot: usize, knob: usize, value: f32 },
     Play,
     Stop,
     Seek(Frames),
@@ -131,6 +132,11 @@ impl Rt {
                 Msg::Tweak { track, slot, knob, value } => {
                     if let Some(racks) = self.chains.as_deref_mut() {
                         racks.tweak(track, slot, knob, value);
+                    }
+                }
+                Msg::TweakClip { clip, slot, knob, value } => {
+                    if let Some(racks) = self.chains.as_deref_mut() {
+                        racks.tweak_clip(clip, slot, knob, value);
                     }
                 }
                 Msg::Play => self.playing = true,
@@ -325,6 +331,10 @@ impl Engine {
 
     pub fn tweak(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
         self.send(Msg::Tweak { track, slot, knob, value });
+    }
+
+    pub fn tweak_clip(&mut self, clip: ClipId, slot: usize, knob: usize, value: f32) {
+        self.send(Msg::TweakClip { clip, slot, knob, value });
     }
 
     pub fn drop_chains(&mut self) {

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use loupe_engine::{render_to_wav, ClipId, Command, Frames, Outcome, Source, TrackId};
+use loupe_engine::{ClipId, Command, Frames, Outcome, Source, TrackId};
 
 use crate::{App, Run};
 
@@ -134,12 +134,15 @@ impl App {
         for only in &mut alone.tracks {
             only.gain = 1.0;
             only.muted = false;
+            only.fx.clear();
             only.clips.retain(|clip| clips.contains(&clip.id));
         }
 
         std::fs::create_dir_all(&folder).map_err(|why| format!("{}: {why}", folder.display()))?;
         let file = unused_file(&folder, &name);
-        render_to_wav(&alone, &file, from, to)?;
+        let mut baked = self.offline_racks(&alone);
+        loupe_engine::render_to_wav_through(&alone, &file, from, to, Some(baked.as_mut()))?;
+        drop(baked);
         let source = Arc::new(Source::load(&file, self.project.rate)?);
 
         let joined = self.transact(None, |project| {

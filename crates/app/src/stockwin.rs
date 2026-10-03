@@ -14,15 +14,21 @@ pub enum Face {
     Reverb(Box<ReverbEditor>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Spot {
+    Track(TrackId),
+    Clip(loupe_engine::ClipId),
+}
+
 pub struct Window {
-    pub track: TrackId,
+    pub spot: Spot,
     pub slot: usize,
     pub name: String,
     pub face: Face,
 }
 
 impl Window {
-    pub fn open(track: TrackId, slot: usize, which: usize, name: &str, values: &[f32], peek: Peek, rate: f32, bpm: f32) -> Option<Self> {
+    pub fn open(spot: Spot, slot: usize, which: usize, name: &str, values: &[f32], peek: Peek, rate: f32, bpm: f32) -> Option<Self> {
         let look = Look::default();
         let mut face = match which {
             0 => Face::Eq(Box::new(EqEditor::new(rate, peek.scopes.clone(), look))),
@@ -41,7 +47,7 @@ impl Window {
                 Face::Reverb(editor) => editor.load(values),
             }
         }
-        Some(Self { track, slot, name: name.to_string(), face })
+        Some(Self { spot, slot, name: name.to_string(), face })
     }
 
     pub fn tick(&mut self) {

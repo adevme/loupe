@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use iced::futures::channel::oneshot;
 use iced::widget::{button, checkbox, column, horizontal_space, row, text};
 use iced::{Alignment, Element, Task};
-use loupe_engine::{export, next_version_folder, ExportPlan, SavedProject};
+use loupe_engine::{next_version_folder, ExportPlan, SavedProject};
 
 use crate::{App, Message, Overlay};
 
@@ -104,6 +104,7 @@ impl App {
             },
         };
         let project = self.project.clone();
+        let rate = self.engine.rate();
         self.overlay = Overlay::None;
         self.exporting = true;
         self.problem = None;
@@ -115,7 +116,12 @@ impl App {
             let report = |fraction: f32| {
                 progress.store((fraction * crate::EXPORT_PROGRESS_STEPS as f32) as u32, Ordering::Relaxed);
             };
-            let _ = done.send(export(&project, &plan, &report).map(|()| folder));
+            let mut racks: Box<dyn loupe_engine::Chains> =
+                Box::new(crate::racks::Racks::new(rate, 512, crate::racks::Peeks::default()));
+            racks.follow(&project);
+            let went = loupe_engine::export_through(&project, &plan, &report, Some(racks.as_mut()));
+            drop(racks);
+            let _ = done.send(went.map(|()| folder));
         });
         Task::perform(
             async move { exported.await.unwrap_or_else(|_| Err("the export stopped unexpectedly".into())) },
