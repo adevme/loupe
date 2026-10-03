@@ -38,8 +38,8 @@ const NEUTRAL: Palette = Palette {
     text: Color::from_rgb(0.906, 0.906, 0.925),
     text_dim: Color::from_rgb(0.6, 0.6, 0.66),
     text_faint: Color::from_rgb(0.4, 0.4, 0.46),
-    accent: Color::from_rgb(0.925, 0.725, 0.38),
-    on_accent: Color::from_rgb(0.08, 0.06, 0.02),
+    accent: Color::from_rgb(0.906, 0.906, 0.925),
+    on_accent: Color::from_rgb(0.043, 0.043, 0.051),
     danger: Color::from_rgb(0.984, 0.443, 0.522),
     tracks: [
         Color::from_rgb(0.45, 0.72, 0.95),
@@ -84,10 +84,7 @@ impl Palette {
         };
         let themes = dir.join("themes");
         let _ = fs::create_dir_all(&themes);
-        let reference = themes.join("default.theme");
-        if !reference.exists() {
-            let _ = fs::write(&reference, NEUTRAL.to_text());
-        }
+        let _ = fs::write(themes.join("default.theme"), NEUTRAL.to_text());
         let settings = fs::read_to_string(dir.join("settings")).unwrap_or_default();
         let chosen = entries(&settings).find(|(_, key, _)| *key == "theme").map(|(_, _, v)| v.to_string());
         let Some(name) = chosen else {
@@ -228,7 +225,7 @@ impl Palette {
 
     pub fn solid(&self, status: button::Status) -> button::Style {
         let background = match status {
-            button::Status::Hovered | button::Status::Pressed => mix(self.accent, Color::WHITE, 0.15),
+            button::Status::Hovered | button::Status::Pressed => mix(self.accent, self.background, 0.12),
             _ => self.accent,
         };
         button::Style {

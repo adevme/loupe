@@ -17,7 +17,9 @@ const DRAG_THRESHOLD: f32 = 4.0;
 const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
 const HANDLE_RADIUS: f32 = 4.5;
-const HANDLE_REACH: f32 = 9.0;
+const HANDLE_REACH: f32 = 10.0;
+const FADE_FLAG_SIZE: f32 = 10.0;
+const GAIN_HANDLE_INSET: f32 = 7.0;
 const MIN_CLIP_PX_FOR_HANDLES: f32 = 36.0;
 const MIN_FADE_PX_FOR_SHAPE_HANDLE: f32 = 24.0;
 const CURVE_PER_PX: f32 = 1.0 / 50.0;
@@ -240,7 +242,7 @@ impl Timeline<'_> {
         grips.push((Grip::FadeOut, fade_out_start));
         let seen_left = shape.left.max(HEADER_W);
         let seen_right = shape.right.min(self.width);
-        grips.push((Grip::Gain, Point::new((seen_left + seen_right) / 2.0, shape.top + shape.height - 10.0)));
+        grips.push((Grip::Gain, Point::new((seen_left + seen_right) / 2.0, shape.top + shape.height - GAIN_HANDLE_INSET)));
         grips
     }
 
@@ -482,7 +484,7 @@ impl canvas::Program<Message> for Timeline<'_> {
 
     fn draw(
         &self,
-        _state: &Interaction,
+        state: &Interaction,
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
@@ -540,6 +542,36 @@ impl canvas::Program<Message> for Timeline<'_> {
                 b.close();
             });
             overlay.fill(&cap, p.accent);
+        }
+        if let Some(Drag::Grip { clip, grip: Grip::Gain, .. }) = &state.drag {
+            let handle = self
+                .project
+                .clip(*clip)
+                .and_then(|clip| self.grips(clip).into_iter().find(|(grip, _)| *grip == Grip::Gain).map(|(_, at)| (clip, at)));
+            if let Some((clip, at)) = handle {
+                let db = 20.0 * clip.gain.max(1e-6).log10();
+                let label = Size::new(64.0, 20.0);
+                let centre = Point::new(at.x, at.y - 24.0);
+                let pill = Path::new(|b| {
+                    b.rounded_rectangle(
+                        Point::new(centre.x - label.width / 2.0, centre.y - label.height / 2.0),
+                        label,
+                        5.0.into(),
+                    );
+                });
+                overlay.fill(&pill, p.raised);
+                overlay.stroke(&pill, Stroke::default().with_color(p.line).with_width(1.0));
+                overlay.fill_text(Text {
+                    content: format!("{db:+.1} dB"),
+                    position: centre,
+                    color: p.text,
+                    size: 11.5.into(),
+                    font: p.mono,
+                    horizontal_alignment: alignment::Horizontal::Center,
+                    vertical_alignment: alignment::Vertical::Center,
+                    ..Text::default()
+                });
+            }
         }
         vec![content, overlay.into_geometry()]
     }
@@ -783,11 +815,38 @@ impl Timeline<'_> {
             });
             frame.stroke(&curve, Stroke::default().with_color(curve_colour).with_width(1.25));
         }
+        let selected_body = theme::mix(p.background, colour, 0.26);
         for (grip, at) in self.grips(clip) {
-            let radius = if grip == Grip::Gain { HANDLE_RADIUS + 1.0 } else { HANDLE_RADIUS };
-            let dot = Path::circle(in_lanes(at), radius);
-            frame.fill(&dot, p.text);
-            frame.stroke(&dot, Stroke::default().with_color(p.background).with_width(1.5));
+            let at = in_lanes(at);
+            match grip {
+                Grip::FadeIn | Grip::FadeOut => {
+                    let (inward, fade) = if grip == Grip::FadeIn { (1.0, clip.fade_in) } else { (-1.0, clip.fade_out) };
+                    if fade.len > 0 {
+                        frame.fill_rectangle(
+                            Point::new(at.x - 0.5, at.y),
+                            Size::new(1.0, shape.wave_height()),
+                            theme::mix(colour, p.text, 0.35),
+                        );
+                    }
+                    let flag = Path::new(|b| {
+                        b.move_to(at);
+                        b.line_to(Point::new(at.x + FADE_FLAG_SIZE * inward, at.y));
+                        b.line_to(Point::new(at.x, at.y + FADE_FLAG_SIZE));
+                        b.close();
+                    });
+                    frame.fill(&flag, p.text);
+                }
+                Grip::ShapeIn | Grip::ShapeOut => {
+                    let ring = Path::circle(at, HANDLE_RADIUS);
+                    frame.fill(&ring, selected_body);
+                    frame.stroke(&ring, Stroke::default().with_color(p.text).with_width(1.5));
+                }
+                Grip::Gain => {
+                    let dot = Path::circle(at, HANDLE_RADIUS);
+                    frame.fill(&dot, p.text);
+                    frame.stroke(&dot, Stroke::default().with_color(p.background).with_width(1.5));
+                }
+            }
         }
     }
 
