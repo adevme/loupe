@@ -30,11 +30,12 @@ use loupe_engine::{
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
 use theme::Palette;
-use timeline::{LoopRange, Timeline, Tool, View, MAX_GAIN_DB, MIN_GAIN_DB};
+use timeline::{LoopRange, Timeline, Tool, View};
 
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
+const STATUS_HEIGHT: f32 = 30.0;
 
 fn main() -> iced::Result {
     let settings = Settings::load();
@@ -746,7 +747,9 @@ impl App {
         if self.mixer_open {
             song = song.push(rule(palette)).push(self.mixer());
         }
-        let song = song.push(rule(palette)).push(self.inspector());
+        if let Some(status) = self.status() {
+            song = song.push(rule(palette)).push(status);
+        }
         stack![song, self.overlay()].into()
     }
 
@@ -908,60 +911,25 @@ impl App {
             .into()
     }
 
-    fn inspector(&self) -> Element<'_, Message> {
+    fn status(&self) -> Option<Element<'_, Message>> {
         let palette = self.palette;
-        let status: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
-            text(problem.as_str()).size(12).color(palette.danger).into()
+        let line = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
+            text(problem.as_str()).size(12).color(palette.danger)
         } else if self.loading > 0 {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
-            text(format!("Importing {what}…")).size(12).color(palette.text_dim).into()
+            text(format!("Loading {what}…")).size(12).color(palette.text_dim)
         } else {
-            Space::with_width(0).into()
+            return None;
         };
-
-        let split = button(
-            row![icon("scissors", 13.0), text("Split").size(12.5).font(palette.medium)]
-                .spacing(7)
-                .align_y(Alignment::Center),
-        )
-        .padding([6, 12])
-            .style(move |_, status| palette.outlined(status))
-            .on_press_maybe((!self.split_targets().is_empty()).then_some(Message::Split));
-
-        let clip: Element<'_, Message> = match self.selected.and_then(|id| self.project.clip(id)) {
-            Some(clip) => {
-                let db = (20.0 * clip.gain.max(1e-6).log10()).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-                let seconds = clip.len as f64 / self.project.rate as f64;
-                row![
-                    text(clip.source.name.as_str()).size(13).font(palette.medium),
-                    text(format!("{seconds:.3} s")).size(12).font(palette.mono).color(palette.text_dim),
-                    text(format!("{db:+.1} dB")).size(12).font(palette.mono).color(palette.text_dim).width(70),
-                    split,
-                    button(icon("trash-2", 14.0))
-                        .padding([6, 10])
-                        .style(move |_, status| palette.outlined(status))
-                        .on_press(Message::Delete),
-                ]
-                .spacing(10)
+        Some(
+            container(line)
+                .padding([0, 16])
+                .width(Length::Fill)
+                .height(STATUS_HEIGHT)
                 .align_y(Alignment::Center)
-                .into()
-            }
-            None => row![
-                text("Click a clip to work on it alone").size(12.5).color(palette.text_dim),
-                Space::with_width(12),
-                split,
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into(),
-        };
-
-        container(row![clip, horizontal_space(), status].spacing(16).align_y(Alignment::Center))
-            .padding([0, 16])
-            .height(48)
-            .align_y(Alignment::Center)
-            .style(move |_| palette.bar())
-            .into()
+                .style(move |_| palette.bar())
+                .into(),
+        )
     }
 }
 
