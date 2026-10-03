@@ -12,6 +12,7 @@ mod mixer;
 mod pointer;
 mod pool;
 mod routing;
+mod racks;
 mod recording;
 mod selection;
 mod settings;
@@ -36,8 +37,8 @@ use iced::widget::{
 };
 use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
 use loupe_engine::{
-    ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChoice, Outcome, Output, Project, Source,
-    TrackId,
+    Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChoice, Outcome, Output, Project,
+    Source, TrackId,
 };
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
@@ -294,6 +295,8 @@ struct App {
     input_names: Vec<String>,
     practice_input: bool,
     engine: Engine,
+    racks: Option<Box<dyn Chains>>,
+    fx_was: u64,
     project: Project,
     undo: Vec<Project>,
     redo: Vec<Project>,
@@ -411,6 +414,8 @@ impl App {
             templates: Vec::new(),
             recent: Vec::new(),
             cache: Cache::new(),
+            racks: None,
+            fx_was: 0,
         };
         let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args_os()
             .skip(1)
@@ -1085,6 +1090,7 @@ impl App {
                 self.notice = None;
                 self.dirty = true;
                 self.engine.set_project(&self.project);
+                self.chains_if_changed();
                 let timeline_looks_the_same = matches!(run, Some(Run::Master | Run::TrackGain(_)));
                 if !timeline_looks_the_same {
                     self.cache.clear();
@@ -1101,6 +1107,77 @@ impl App {
     fn changed(&mut self) {
         self.engine.set_project(&self.project);
         self.cache.clear();
+        self.chains_if_changed();
+    }
+
+    fn chains_if_changed(&mut self) {
+        let shape = self.fx_shape();
+        if shape != self.fx_was {
+            self.fx_was = shape;
+            self.follow_chains();
+        }
+    }
+
+    pub(crate) fn gather_fx_state(&mut self) {
+        if self.project.tracks.iter().all(|track| track.fx.is_empty()) {
+            return;
+        }
+        let Some(mut racks) = self.borrow_racks() else { return };
+        let found = racks.harvest();
+        self.racks = Some(racks);
+        for (track, slot, state) in found {
+            let _ = self.project.apply(Command::SetFxState { track, slot, state });
+        }
+        self.hand_racks_over();
+    }
+
+    fn borrow_racks(&mut self) -> Option<Box<dyn Chains>> {
+        if let Some(racks) = self.racks.take() {
+            return Some(racks);
+        }
+        self.engine.drop_chains();
+        for _ in 0..500 {
+            if let Some(got) = self.engine.chains_back() {
+                return Some(got);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
+    }
+
+    fn hand_racks_over(&mut self) {
+        if let Some(racks) = self.racks.take() {
+            self.engine.use_chains(racks);
+        }
+    }
+
+    fn fx_shape(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for track in &self.project.tracks {
+            if track.fx.is_empty() {
+                continue;
+            }
+            track.id.hash(&mut hasher);
+            for fx in &track.fx {
+                fx.path.hash(&mut hasher);
+                fx.index.hash(&mut hasher);
+                fx.bypassed.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    fn follow_chains(&mut self) {
+        let mut racks = match self.borrow_racks() {
+            Some(racks) => racks,
+            None => Box::new(racks::Racks::new(self.engine.rate(), 512)) as Box<dyn Chains>,
+        };
+        let troubles = racks.follow(&self.project);
+        if let Some(first) = troubles.first() {
+            self.problem = Some(first.clone());
+        }
+        self.engine.use_chains(racks);
     }
 
     fn restored(&mut self) {

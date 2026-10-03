@@ -1,5 +1,27 @@
 use crate::model::{Clip, ClipId, Frames, Project, Track, TrackId};
 
+pub trait Chains: Send {
+    fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]);
+
+    fn follow(&mut self, project: &Project) -> Vec<String> {
+        let _ = project;
+        Vec::new()
+    }
+
+    fn troubles(&self) -> Vec<(TrackId, String, String)> {
+        Vec::new()
+    }
+
+    fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
+        Vec::new()
+    }
+
+    fn show(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
+        let _ = (track, slot);
+        Err("plugin windows are not wired up".into())
+    }
+}
+
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
     mix_tracks(project, pos, out, None);
     let level = if project.master_muted { 0.0 } else { project.master };
@@ -44,7 +66,7 @@ impl Mixdown {
 
 pub fn mix_tracks(project: &Project, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
     let mut scratch = Mixdown::default();
-    mix_tracks_metered(project, pos, out, only, None, &mut scratch);
+    mix_tracks_metered(project, pos, out, only, None, &mut scratch, None);
 }
 
 pub fn mix_tracks_metered(
@@ -54,6 +76,7 @@ pub fn mix_tracks_metered(
     only: Option<ClipId>,
     mut peaks: Option<&mut [f32]>,
     scratch: &mut Mixdown,
+    mut chains: Option<&mut (dyn Chains + '_)>,
 ) {
     out.fill([0.0; 2]);
     let len = out.len();
@@ -72,6 +95,11 @@ pub fn mix_tracks_metered(
         let buffer = &mut scratch.buffers[index][..len];
         buffer.fill([0.0; 2]);
         lay_clips(track, pos, buffer, only);
+        if let Some(racks) = chains.as_deref_mut() {
+            if !track.fx.is_empty() {
+                racks.process(track.id, buffer);
+            }
+        }
     }
     for step in 0..scratch.order.len() {
         let index = scratch.index[step];
@@ -235,6 +263,64 @@ mod tests {
         assert_eq!(out[51], [1.0, -1.0]);
         assert_eq!(out[149], [99.0, -99.0]);
         assert_eq!(out[150], [0.0, 0.0]);
+    }
+
+    struct Doubler {
+        seen: Vec<TrackId>,
+    }
+
+    impl Chains for Doubler {
+        fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
+            self.seen.push(track);
+            for frame in audio.iter_mut() {
+                frame[0] *= 2.0;
+                frame[1] *= 2.0;
+            }
+        }
+    }
+
+    fn flat(p: &mut Project, track: TrackId, level: f32, frames: usize) {
+        let source = Arc::new(Source::from_frames("flat", vec![[level, level]; frames + 2]));
+        clip(p, track, source, 0);
+    }
+
+    #[test]
+    fn a_chain_runs_before_the_fader_and_feeds_the_sends() {
+        let mut p = Project::new(48_000);
+        let vox = track(&mut p);
+        let verb = track(&mut p);
+        flat(&mut p, vox, 0.25, 64);
+        p.apply(Command::SetTrackGain { track: vox, gain: 0.5 }).unwrap();
+        p.apply(Command::AddSend { from: vox, to: verb }).unwrap();
+        p.apply(Command::SetSendGain { from: vox, to: verb, gain: 1.0 }).unwrap();
+        p.apply(Command::SetSendPreFader { from: vox, to: verb, pre_fader: true }).unwrap();
+        let fx = crate::model::Fx {
+            path: std::path::PathBuf::from("x.vst3"),
+            index: 0,
+            name: "x".into(),
+            bypassed: false,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddFx { track: vox, fx }).unwrap();
+        let mut racks = Doubler { seen: Vec::new() };
+        let mut out = vec![[0.0; 2]; 32];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 1, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(racks.seen, vec![vox]);
+        assert!((out[8][0] - 0.75).abs() < 1e-6, "got {}", out[8][0]);
+    }
+
+    #[test]
+    fn a_track_with_no_plugins_is_never_handed_to_the_chains() {
+        let mut p = Project::new(48_000);
+        let bare = track(&mut p);
+        flat(&mut p, bare, 0.5, 64);
+        let mut racks = Doubler { seen: Vec::new() };
+        let mut out = vec![[0.0; 2]; 32];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 1, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert!(racks.seen.is_empty());
+        assert!((out[8][0] - 0.5).abs() < 1e-6, "got {}", out[8][0]);
     }
 
     #[test]

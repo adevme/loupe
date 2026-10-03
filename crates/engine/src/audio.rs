@@ -9,7 +9,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::clock;
 use crate::model::{ClipId, Frames, Project};
-use crate::render::{mix_tracks_metered, scale, Mixdown};
+use crate::render::{mix_tracks_metered, scale, Chains, Mixdown};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -25,6 +25,7 @@ pub enum Output {
 
 enum Msg {
     Project(Arc<Project>),
+    Chains(Option<Box<dyn Chains>>),
     Play,
     Stop,
     Seek(Frames),
@@ -59,10 +60,12 @@ struct Shared {
 
 struct Rt {
     scratch: Mixdown,
+    chains: Option<Box<dyn Chains>>,
     peaks: [f32; METERS],
     project: Arc<Project>,
     inbox: Consumer<Msg>,
     retired: Producer<Arc<Project>>,
+    hand_back: Producer<Box<dyn Chains>>,
     shared: Arc<Shared>,
     pos: Frames,
     playing: bool,
@@ -79,19 +82,23 @@ struct Rt {
 struct Remote {
     outbox: Producer<Msg>,
     retired: Consumer<Arc<Project>>,
+    handed_back: Consumer<Box<dyn Chains>>,
     shared: Arc<Shared>,
 }
 
 fn pair(rate: u32) -> (Rt, Remote) {
     let (outbox, inbox) = RingBuffer::new(QUEUE);
     let (retired_tx, retired_rx) = RingBuffer::new(QUEUE);
+    let (back_tx, back_rx) = RingBuffer::new(QUEUE);
     let shared = Arc::new(Shared::default());
     let rt = Rt {
         scratch: Mixdown::default(),
+        chains: None,
         peaks: [0.0; METERS],
         project: Arc::new(Project::new(rate)),
         inbox,
         retired: retired_tx,
+        hand_back: back_tx,
         shared: shared.clone(),
         pos: 0,
         playing: false,
@@ -104,7 +111,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
     };
-    (rt, Remote { outbox, retired: retired_rx, shared })
+    (rt, Remote { outbox, retired: retired_rx, handed_back: back_rx, shared })
 }
 
 impl Rt {
@@ -114,6 +121,11 @@ impl Rt {
                 Msg::Project(project) => {
                     let old = std::mem::replace(&mut self.project, project);
                     let _ = self.retired.push(old);
+                }
+                Msg::Chains(racks) => {
+                    if let Some(old) = std::mem::replace(&mut self.chains, racks) {
+                        let _ = self.hand_back.push(old);
+                    }
                 }
                 Msg::Play => self.playing = true,
                 Msg::Stop => self.playing = false,
@@ -156,7 +168,7 @@ impl Rt {
             }
             let chunk = &mut out[done..done + part];
             self.peaks = [0.0; METERS];
-            mix_tracks_metered(&self.project, self.pos, chunk, self.audition, Some(&mut self.peaks), &mut self.scratch);
+            mix_tracks_metered(&self.project, self.pos, chunk, self.audition, Some(&mut self.peaks), &mut self.scratch, self.chains.as_deref_mut());
             let target = if self.project.master_muted { 0.0 } else { self.project.master };
             scale(chunk, self.master, target);
             self.master = target;
@@ -299,6 +311,18 @@ impl Engine {
 
     pub fn is_playing(&self) -> bool {
         self.remote.shared.playing.load(Ordering::Relaxed)
+    }
+
+    pub fn use_chains(&mut self, chains: Box<dyn Chains>) {
+        self.send(Msg::Chains(Some(chains)));
+    }
+
+    pub fn drop_chains(&mut self) {
+        self.send(Msg::Chains(None));
+    }
+
+    pub fn chains_back(&mut self) -> Option<Box<dyn Chains>> {
+        self.remote.handed_back.pop().ok()
     }
 
     pub fn collect(&mut self) {
@@ -461,7 +485,7 @@ mod tests {
         let project = steady(256);
         let mut out = vec![[0.0f32; 2]; 64];
         let mut peaks = [0.0f32; METERS];
-        crate::render::mix_tracks_metered(&project, 0, &mut out, None, Some(&mut peaks), &mut crate::render::Mixdown::default());
+        crate::render::mix_tracks_metered(&project, 0, &mut out, None, Some(&mut peaks), &mut crate::render::Mixdown::default(), None);
         assert!(peaks[0] > 0.0, "track 0 should report a level, got {}", peaks[0]);
     }
 
