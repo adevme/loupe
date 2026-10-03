@@ -8,7 +8,11 @@ use crate::theme::{self, Palette};
 use crate::{icons, Message};
 
 pub const HEADER_W: f32 = 200.0;
+const SCROLLBAR_H: f32 = 18.0;
 const RULER_H: f32 = 30.0;
+const LANES_TOP: f32 = SCROLLBAR_H + RULER_H;
+const MIN_THUMB_PX: f32 = 28.0;
+const SONG_SPAN_HEADROOM: f64 = 1.2;
 const ADD_ROW_H: f32 = 40.0;
 const CLIP_PAD: f32 = 5.0;
 const CLIP_TITLE_H: f32 = 19.0;
@@ -65,6 +69,7 @@ enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Resize { track: TrackId, top: f32 },
+    Scroll { grab_x: f32, span: f64 },
     Grip { clip: ClipId, grip: Grip, origin: Point, curve_at_grab: f32, db_at_grab: f32 },
 }
 
@@ -95,6 +100,7 @@ impl ClipBox {
 }
 
 enum Hit<'a> {
+    Scrollbar,
     Ruler,
     Resize(&'a Track),
     Mute(&'a Track),
@@ -125,14 +131,14 @@ impl Timeline<'_> {
 
     fn track_top(&self, index: usize) -> f32 {
         let above: f32 = self.project.tracks[..index].iter().map(|t| self.height_of(t)).sum();
-        RULER_H + above - self.view.scroll_y
+        LANES_TOP + above - self.view.scroll_y
     }
 
     fn track_at(&self, y: f32) -> Option<usize> {
-        if y < RULER_H {
+        if y < LANES_TOP {
             return None;
         }
-        let mut top = RULER_H - self.view.scroll_y;
+        let mut top = LANES_TOP - self.view.scroll_y;
         for (i, track) in self.project.tracks.iter().enumerate() {
             let bottom = top + self.height_of(track);
             if y >= top && y < bottom {
@@ -146,7 +152,7 @@ impl Timeline<'_> {
     fn row_for_drag(&self, y: f32) -> usize {
         match self.track_at(y) {
             Some(i) => i,
-            None if y < RULER_H - self.view.scroll_y => 0,
+            None if y < LANES_TOP - self.view.scroll_y => 0,
             None => self.project.tracks.len().saturating_sub(1),
         }
     }
@@ -196,7 +202,30 @@ impl Timeline<'_> {
 
     fn content_height(&self) -> f32 {
         let tracks: f32 = self.project.tracks.iter().map(|t| self.height_of(t)).sum();
-        RULER_H + tracks + ADD_ROW_H
+        LANES_TOP + tracks + ADD_ROW_H
+    }
+
+    fn lanes_width(&self) -> f32 {
+        (self.width - HEADER_W).max(1.0)
+    }
+
+    fn scrollbar_span(&self) -> f64 {
+        let song = self.project.length() as f64 / self.rate();
+        let seen_until = self.view.scroll + self.lanes_width() as f64 / self.view.zoom;
+        (song * SONG_SPAN_HEADROOM).max(seen_until).max(1.0)
+    }
+
+    fn thumb(&self, span: f64) -> (f32, f32) {
+        let track = self.lanes_width();
+        let seen = track as f64 / self.view.zoom;
+        let width = ((seen / span) as f32 * track).clamp(MIN_THUMB_PX.min(track), track);
+        let left = HEADER_W + (self.view.scroll / span) as f32 * track;
+        (left.min(self.width - width), width)
+    }
+
+    fn scrolled_to_thumb_left(&self, left: f32, span: f64) -> View {
+        let scroll = ((left - HEADER_W) / self.lanes_width()) as f64 * span;
+        View { scroll: scroll.max(0.0), ..self.view }
     }
 
     fn clip_box(&self, clip: &Clip) -> Option<ClipBox> {
@@ -261,8 +290,12 @@ impl Timeline<'_> {
     }
 
     fn hit(&self, p: Point) -> Hit<'_> {
-        if p.y < RULER_H {
-            return if p.x >= HEADER_W { Hit::Ruler } else { Hit::Nothing };
+        if p.y < LANES_TOP {
+            return match (p.x >= HEADER_W, p.y < SCROLLBAR_H) {
+                (true, true) => Hit::Scrollbar,
+                (true, false) => Hit::Ruler,
+                (false, _) => Hit::Nothing,
+            };
         }
         if let Some(track) = self.resize_grip_at(p) {
             return Hit::Resize(track);
@@ -353,6 +386,15 @@ impl canvas::Program<Message> for Timeline<'_> {
                     return (Ignored, None);
                 };
                 let message = match self.hit(p) {
+                    Hit::Scrollbar => {
+                        let span = self.scrollbar_span();
+                        let (left, width) = self.thumb(span);
+                        let on_thumb = p.x >= left && p.x <= left + width;
+                        let grab_x = if on_thumb { p.x - left } else { width / 2.0 };
+                        state.drag = Some(Drag::Scroll { grab_x, span });
+                        let view = self.scrolled_to_thumb_left(p.x - grab_x, span);
+                        (view != self.view).then_some(Message::SetView(view))
+                    }
                     Hit::Ruler => {
                         let anchor = self.snap(self.frames_at(p.x), free);
                         state.drag = Some(Drag::Range { anchor, origin: p, moving: false });
@@ -360,7 +402,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     }
                     Hit::Resize(track) => {
                         let index = self.project.tracks.iter().position(|t| t.id == track.id);
-                        let top = index.map_or(RULER_H, |i| self.track_top(i));
+                        let top = index.map_or(LANES_TOP, |i| self.track_top(i));
                         state.drag = Some(Drag::Resize { track: track.id, top });
                         None
                     }
@@ -450,6 +492,10 @@ impl canvas::Program<Message> for Timeline<'_> {
                         };
                         (Captured, message)
                     }
+                    Drag::Scroll { grab_x, span } => {
+                        let view = self.scrolled_to_thumb_left(p.x - *grab_x, *span);
+                        (Captured, (view != self.view).then_some(Message::SetView(view)))
+                    }
                     Drag::Resize { track, top } => {
                         let height = (p.y - *top).clamp(theme::MIN_TRACK_HEIGHT, theme::MAX_TRACK_HEIGHT).round();
                         let current = self.project.track(*track).map(|t| self.height_of(t));
@@ -497,17 +543,19 @@ impl canvas::Program<Message> for Timeline<'_> {
         let p = self.palette;
         let content = self.cache.draw(renderer, bounds.size(), |frame| {
             let lanes = Rectangle::new(
-                Point::new(HEADER_W, RULER_H),
-                Size::new((bounds.width - HEADER_W).max(0.0), (bounds.height - RULER_H).max(0.0)),
+                Point::new(HEADER_W, LANES_TOP),
+                Size::new((bounds.width - HEADER_W).max(0.0), (bounds.height - LANES_TOP).max(0.0)),
             );
             frame.with_clip(lanes, |frame| self.draw_lanes(frame, lanes.size()));
-            let ruler = Rectangle::new(Point::new(HEADER_W, 0.0), Size::new(lanes.width, RULER_H));
+            let ruler = Rectangle::new(Point::new(HEADER_W, SCROLLBAR_H), Size::new(lanes.width, RULER_H));
+            let scrollbar = Rectangle::new(Point::new(HEADER_W, 0.0), Size::new(lanes.width, SCROLLBAR_H));
+            frame.with_clip(scrollbar, |frame| self.draw_scrollbar(frame, scrollbar.size()));
             frame.with_clip(ruler, |frame| self.draw_ruler(frame, ruler.size()));
-            let headers = Rectangle::new(Point::new(0.0, RULER_H), Size::new(HEADER_W, lanes.height));
+            let headers = Rectangle::new(Point::new(0.0, LANES_TOP), Size::new(HEADER_W, lanes.height));
             frame.with_clip(headers, |frame| self.draw_headers(frame, headers.size()));
 
-            frame.fill_rectangle(Point::ORIGIN, Size::new(HEADER_W, RULER_H), p.panel);
-            frame.fill_rectangle(Point::new(0.0, RULER_H - 1.0), Size::new(bounds.width, 1.0), p.line);
+            frame.fill_rectangle(Point::ORIGIN, Size::new(HEADER_W, LANES_TOP), p.panel);
+            frame.fill_rectangle(Point::new(0.0, LANES_TOP - 1.0), Size::new(bounds.width, 1.0), p.line);
             frame.fill_rectangle(Point::new(HEADER_W - 1.0, 0.0), Size::new(1.0, bounds.height), p.line);
         });
 
@@ -518,19 +566,19 @@ impl canvas::Program<Message> for Timeline<'_> {
             if right > left {
                 let width = right - left;
                 overlay.fill_rectangle(
-                    Point::new(left, 0.0),
+                    Point::new(left, SCROLLBAR_H),
                     Size::new(width, RULER_H - 1.0),
                     theme::mix(p.panel, p.accent, 0.28),
                 );
                 overlay.fill_rectangle(
-                    Point::new(left, RULER_H),
-                    Size::new(width, bounds.height - RULER_H),
+                    Point::new(left, LANES_TOP),
+                    Size::new(width, bounds.height - LANES_TOP),
                     theme::alpha(p.accent, 0.05),
                 );
                 for x in [left, right] {
                     overlay.fill_rectangle(
-                        Point::new(x.round() - 0.5, RULER_H),
-                        Size::new(1.0, bounds.height - RULER_H),
+                        Point::new(x.round() - 0.5, LANES_TOP),
+                        Size::new(1.0, bounds.height - LANES_TOP),
                         theme::alpha(p.accent, 0.45),
                     );
                 }
@@ -538,11 +586,11 @@ impl canvas::Program<Message> for Timeline<'_> {
         }
         let x = self.x_of(self.playhead as f64).round();
         if x >= HEADER_W && x <= bounds.width {
-            overlay.fill_rectangle(Point::new(x - 0.5, 0.0), Size::new(1.0, bounds.height), p.accent);
+            overlay.fill_rectangle(Point::new(x - 0.5, SCROLLBAR_H), Size::new(1.0, bounds.height - SCROLLBAR_H), p.accent);
             let cap = Path::new(|b| {
-                b.move_to(Point::new(x - 5.5, 0.0));
-                b.line_to(Point::new(x + 5.5, 0.0));
-                b.line_to(Point::new(x, 9.0));
+                b.move_to(Point::new(x - 5.5, SCROLLBAR_H));
+                b.line_to(Point::new(x + 5.5, SCROLLBAR_H));
+                b.line_to(Point::new(x, SCROLLBAR_H + 9.0));
                 b.close();
             });
             overlay.fill(&cap, p.accent);
@@ -639,7 +687,7 @@ impl Timeline<'_> {
         }
 
         for (i, track) in self.project.tracks.iter().enumerate() {
-            let top = self.track_top(i) - RULER_H;
+            let top = self.track_top(i) - LANES_TOP;
             let height = self.height_of(track);
             if top > size.height || top + height < 0.0 {
                 continue;
@@ -690,10 +738,10 @@ impl Timeline<'_> {
         self.draw_fades_and_grips(frame, clip, colour);
 
         let title_on_canvas = Rectangle::new(
-            Point::new(HEADER_W + shown_left, RULER_H + top),
+            Point::new(HEADER_W + shown_left, LANES_TOP + top),
             Size::new(shown_width, CLIP_TITLE_H),
         );
-        let lanes_on_canvas = Rectangle::new(Point::new(HEADER_W, RULER_H), size);
+        let lanes_on_canvas = Rectangle::new(Point::new(HEADER_W, LANES_TOP), size);
         if let Some(visible) = title_on_canvas.intersection(&lanes_on_canvas) {
             frame.with_clip(visible, |name_region| {
                 name_region.fill_text(Text {
@@ -804,7 +852,7 @@ impl Timeline<'_> {
         let Some(shape) = self.clip_box(clip) else {
             return;
         };
-        let in_lanes = |at: Point| Point::new(at.x - HEADER_W, at.y - RULER_H);
+        let in_lanes = |at: Point| Point::new(at.x - HEADER_W, at.y - LANES_TOP);
         let curve_colour = theme::mix(colour, p.text, 0.55);
         for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
             if fade.len == 0 || shape.wave_height() < 8.0 {
@@ -852,6 +900,34 @@ impl Timeline<'_> {
                 }
             }
         }
+    }
+
+    fn draw_scrollbar(&self, frame: &mut Frame, size: Size) {
+        let p = self.palette;
+        frame.fill_rectangle(Point::ORIGIN, size, theme::mix(p.panel, p.background, 0.5));
+        let span = self.scrollbar_span();
+        let per_second = size.width as f64 / span;
+        let rows = self.project.tracks.len().max(1) as f32;
+        let row_step = ((size.height - 8.0) / rows).min(3.0);
+        for (i, track) in self.project.tracks.iter().enumerate() {
+            let y = 4.0 + i as f32 * row_step;
+            for clip in &track.clips {
+                let from = (clip.start as f64 / self.rate() * per_second) as f32;
+                let to = (clip.end() as f64 / self.rate() * per_second) as f32;
+                frame.fill_rectangle(
+                    Point::new(from, y),
+                    Size::new((to - from).max(1.0), (row_step - 1.0).max(1.0)),
+                    theme::mix(p.background, p.track(i), 0.7),
+                );
+            }
+        }
+        let (left, width) = self.thumb(span);
+        let thumb = Path::new(|b| {
+            b.rounded_rectangle(Point::new(left - HEADER_W, 2.0), Size::new(width, size.height - 5.0), 4.0.into());
+        });
+        frame.fill(&thumb, theme::alpha(p.text, 0.13));
+        frame.stroke(&thumb, Stroke::default().with_color(theme::alpha(p.text, 0.3)).with_width(1.0));
+        frame.fill_rectangle(Point::new(0.0, size.height - 1.0), Size::new(size.width, 1.0), p.line);
     }
 
     fn draw_ruler(&self, frame: &mut Frame, size: Size) {
@@ -904,7 +980,7 @@ impl Timeline<'_> {
         let p = self.palette;
         frame.fill_rectangle(Point::ORIGIN, size, p.panel);
         for (i, track) in self.project.tracks.iter().enumerate() {
-            let top = self.track_top(i) - RULER_H;
+            let top = self.track_top(i) - LANES_TOP;
             let height = self.height_of(track);
             if top > size.height || top + height < 0.0 {
                 continue;
@@ -924,7 +1000,7 @@ impl Timeline<'_> {
             let remove = self.remove_button(i);
             frame.fill_text(Text {
                 content: icons::glyph("x").to_string(),
-                position: Point::new(remove.center_x(), remove.center_y() - RULER_H),
+                position: Point::new(remove.center_x(), remove.center_y() - LANES_TOP),
                 color: p.text_faint,
                 size: 14.0.into(),
                 font: theme::ICONS,
@@ -936,12 +1012,12 @@ impl Timeline<'_> {
 
             let mute = self.mute_button(i);
             let shape = Path::new(|b| {
-                b.rounded_rectangle(Point::new(mute.x, mute.y - RULER_H), mute.size(), 5.0.into());
+                b.rounded_rectangle(Point::new(mute.x, mute.y - LANES_TOP), mute.size(), 5.0.into());
             });
             frame.fill(&shape, if track.muted { p.danger } else { p.raised });
             frame.fill_text(Text {
                 content: "M".into(),
-                position: Point::new(mute.center_x(), mute.center_y() - RULER_H),
+                position: Point::new(mute.center_x(), mute.center_y() - LANES_TOP),
                 color: if track.muted { p.on_accent } else { p.text_dim },
                 size: 11.5.into(),
                 font: p.semibold,
@@ -954,7 +1030,7 @@ impl Timeline<'_> {
         let add = self.add_button();
         frame.fill_text(Text {
             content: "+  Add track".into(),
-            position: Point::new(16.0, add.center_y() - RULER_H),
+            position: Point::new(16.0, add.center_y() - LANES_TOP),
             color: p.text_dim,
             size: 12.5.into(),
             font: p.ui,
