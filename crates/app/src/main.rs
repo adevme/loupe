@@ -152,10 +152,8 @@ impl App {
                     self.playing = false;
                     self.settle = SETTLE_TICKS;
                 } else {
-                    if let Some((from, to)) = self.loop_range {
-                        if self.playhead < from || self.playhead >= to {
-                            self.seek(from);
-                        }
+                    if let Some((from, _)) = self.loop_range {
+                        self.seek(from);
                     }
                     self.engine.play();
                     self.playing = true;
