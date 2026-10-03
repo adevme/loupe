@@ -388,6 +388,8 @@ struct App {
     roll_view: piano_roll::RollView,
     roll_beats: f64,
     typing: HashSet<u8>,
+    midi_keys: Option<loupe_engine::MidiKeys>,
+    keys_aimed_at: Option<TrackId>,
 }
 
 impl App {
@@ -466,6 +468,8 @@ impl App {
             roll_view: piano_roll::RollView::default(),
             roll_beats: 1.0,
             typing: HashSet::new(),
+            midi_keys: None,
+            keys_aimed_at: None,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -489,6 +493,7 @@ impl App {
             }
             None => app.import(audio),
         };
+        app.listen_to_keyboards();
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
         (app, Task::batch([task, hunt]))
     }
@@ -496,6 +501,7 @@ impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         let before = self.screen;
         let task = self.handle(message);
+        self.aim_keys();
         match (before, self.screen) {
             (Screen::Song, Screen::Home) => Task::batch([
                 task,
@@ -1951,6 +1957,8 @@ impl App {
             text("Recording input").size(13).font(palette.medium),
             text("The device armed tracks record from.").size(12).color(palette.text_dim),
             pick_list(inputs, Some(current_input), Message::InputChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+            text("MIDI keyboards").size(13).font(palette.medium),
+            text(self.keyboards_found()).size(12).color(palette.text_dim),
         ]
         .spacing(8);
 

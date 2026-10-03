@@ -578,3 +578,29 @@ impl App {
         }
     }
 }
+
+impl App {
+    pub(crate) fn listen_to_keyboards(&mut self) {
+        if self.midi_keys.is_none() {
+            self.midi_keys = loupe_engine::MidiKeys::open(self.engine.key_sender()).ok();
+        }
+    }
+
+    pub(crate) fn keyboards_found(&self) -> String {
+        match self.midi_keys.as_ref().map(|keys| keys.names()) {
+            Some(names) if !names.is_empty() => format!("Playing in from {}. They play the open piano roll, or else the armed track.", names.join(", ")),
+            _ => "None found. Plug one in and restart Loupe.".to_string(),
+        }
+    }
+
+    pub(crate) fn aim_keys(&mut self) {
+        let target = match self.overlay {
+            crate::Overlay::Roll(clip) => self.project.track_of(clip).map(|track| track.id),
+            _ => self.project.tracks.iter().map(|track| track.id).find(|track| self.armed.contains(track)),
+        };
+        if target != self.keys_aimed_at {
+            self.keys_aimed_at = target;
+            self.engine.keys_go_to(target);
+        }
+    }
+}
