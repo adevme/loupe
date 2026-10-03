@@ -40,6 +40,8 @@ enum Msg {
     NoteOff { track: TrackId, key: u8 },
     Silence,
     KeysGoTo(Option<TrackId>),
+    Metronome(bool),
+    CountIn(Frames),
 }
 
 impl Default for Shared {
@@ -88,6 +90,9 @@ struct Rt {
     live: Vec<Live>,
     keys: Consumer<KeyEvent>,
     keys_go_to: Option<TrackId>,
+    metronome: bool,
+    count_in: Frames,
+    count_in_len: Frames,
 }
 
 const MOST_LIVE_NOTES: usize = 32;
@@ -118,6 +123,9 @@ fn pair(rate: u32) -> (Rt, Remote) {
         live: Vec::with_capacity(MOST_LIVE_NOTES),
         keys: keys_out,
         keys_go_to: None,
+        metronome: false,
+        count_in: 0,
+        count_in_len: 0,
         scratch: Mixdown::default(),
         chains: None,
         peaks: [0.0; METERS],
@@ -164,7 +172,15 @@ impl Rt {
                     }
                 }
                 Msg::Play => self.playing = true,
-                Msg::Stop => self.playing = false,
+                Msg::Stop => {
+                    self.playing = false;
+                    self.count_in = 0;
+                }
+                Msg::Metronome(on) => self.metronome = on,
+                Msg::CountIn(len) => {
+                    self.count_in = len;
+                    self.count_in_len = len;
+                }
                 Msg::Seek(to) => self.seek = Some(to),
                 Msg::Loop(range) => self.loop_range = range,
                 Msg::Audition(clip) => self.audition = clip,
@@ -204,6 +220,8 @@ impl Rt {
             }
         }
 
+        let rate = self.project.rate;
+        let beat = beat_frames(self.project.bpm, rate);
         let out = &mut self.block[..frames];
         let mut done = 0;
         while done < frames {
@@ -219,6 +237,15 @@ impl Rt {
                     self.shared.master_level.store(0f32.to_bits(), Ordering::Relaxed);
                     break;
                 }
+            }
+            if self.playing && self.count_in > 0 {
+                let part = (self.count_in as usize).min(frames - done);
+                let chunk = &mut out[done..done + part];
+                chunk.fill([0.0; 2]);
+                add_clicks(chunk, (self.count_in_len - self.count_in) as f64, beat, rate);
+                self.count_in -= part as Frames;
+                done += part;
+                continue;
             }
             let rising = self.playing && self.seek.is_none();
             let mut part = if rising {
@@ -248,6 +275,9 @@ impl Rt {
                 slot.store(peak.to_bits(), Ordering::Relaxed);
             }
             self.shared.master_level.store(top.to_bits(), Ordering::Relaxed);
+            if self.metronome && self.audition.is_none() {
+                add_clicks(chunk, self.pos as f64, beat, rate);
+            }
             if !rising || self.fade < self.fade_len {
                 for frame in chunk.iter_mut() {
                     self.fade = if rising {
@@ -294,7 +324,7 @@ impl Rt {
     fn heard(&self, at: Instant) {
         let shared = &self.shared;
         shared.heard_turn.fetch_add(1, Ordering::AcqRel);
-        shared.heard_pos.store(self.pos, Ordering::Release);
+        shared.heard_pos.store(self.pos.wrapping_sub(self.count_in), Ordering::Release);
         shared.heard_at.store(clock::nanos(at), Ordering::Release);
         shared.heard_turn.fetch_add(1, Ordering::AcqRel);
     }
@@ -400,6 +430,14 @@ impl Engine {
         (tracks, f32::from_bits(shared.master_level.load(Ordering::Relaxed)))
     }
 
+    pub fn set_metronome(&mut self, on: bool) {
+        self.send(Msg::Metronome(on));
+    }
+
+    pub fn count_in(&mut self, len: Frames) {
+        self.send(Msg::CountIn(len));
+    }
+
     pub fn set_endless(&mut self, endless: bool) {
         self.send(Msg::Endless(endless));
     }
@@ -466,6 +504,52 @@ impl Drop for Engine {
             host.thread().unpark();
             let _ = host.join();
         }
+    }
+}
+
+const BEATS_PER_BAR: f64 = 4.0;
+const CLICK_SECONDS: f64 = 0.03;
+const CLICK_HERTZ: f64 = 1000.0;
+const ACCENT_HERTZ: f64 = 1600.0;
+const CLICK_LEVEL: f32 = 0.3;
+const ACCENT_LEVEL: f32 = 0.45;
+
+fn beat_frames(bpm: f64, rate: u32) -> f64 {
+    rate as f64 * 60.0 / bpm.max(1.0)
+}
+
+pub fn bar_frames(bpm: f64, rate: u32) -> Frames {
+    (beat_frames(bpm, rate) * BEATS_PER_BAR).round() as Frames
+}
+
+fn add_clicks(out: &mut [[f32; 2]], from: f64, beat: f64, rate: u32) {
+    let rate = rate as f64;
+    let ringing = CLICK_SECONDS * rate;
+    let first = (from / beat).floor();
+    let last = ((from + out.len() as f64) / beat).floor();
+    let mut which = first;
+    while which <= last {
+        let began = which * beat;
+        let into = began - from;
+        let start = into.max(0.0) as usize;
+        let stop = ((into + ringing).ceil() as isize).clamp(0, out.len() as isize) as usize;
+        if start >= stop {
+            which += 1.0;
+            continue;
+        }
+        let accent = (which as i64).rem_euclid(BEATS_PER_BAR as i64) == 0;
+        let (hertz, level) = if accent { (ACCENT_HERTZ, ACCENT_LEVEL) } else { (CLICK_HERTZ, CLICK_LEVEL) };
+        for (i, frame) in out[start..stop].iter_mut().enumerate() {
+            let since = (from + (start + i) as f64 - began) / rate;
+            if since < 0.0 || since >= CLICK_SECONDS {
+                continue;
+            }
+            let tone = (std::f64::consts::TAU * hertz * since).sin() * (-since * 150.0).exp();
+            let sample = tone as f32 * level;
+            frame[0] += sample;
+            frame[1] += sample;
+        }
+        which += 1.0;
     }
 }
 
@@ -778,6 +862,52 @@ mod tests {
             rt.process(4_000);
         }
         assert!(rt.live.is_empty());
+    }
+
+    #[test]
+    fn the_metronome_clicks_on_each_beat_and_louder_on_the_first() {
+        let (mut rt, mut remote) = pair(RATE);
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        assert!(rt.process(1_000).iter().all(|f| *f == [0.0, 0.0]), "quiet until it is on");
+        remote.outbox.push(Msg::Stop).ok().unwrap();
+        rt.process(1_000);
+        remote.outbox.push(Msg::Seek(0)).ok().unwrap();
+        remote.outbox.push(Msg::Metronome(true)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        let beat = beat_frames(120.0, RATE) as usize;
+        let mut heard = Vec::new();
+        while heard.len() < beat * 5 {
+            heard.extend_from_slice(rt.process(1_000));
+        }
+        let loudest = |from: usize| heard[from..from + beat / 4].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
+        let between = heard[beat / 2..beat - 10].iter().map(|f| f[0].abs()).fold(0.0, f32::max);
+        assert!(loudest(beat) > 0.1 && between == 0.0);
+        assert!(loudest(4 * beat) > loudest(beat) * 1.2, "the bar starts louder");
+    }
+
+    #[test]
+    fn a_count_in_clicks_first_and_holds_the_song_back() {
+        let (mut rt, mut remote) = pair(RATE);
+        let bar = bar_frames(120.0, RATE);
+        remote.outbox.push(Msg::Seek(5_000)).ok().unwrap();
+        remote.outbox.push(Msg::CountIn(bar)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        let first = rt.process(1_000).to_vec();
+        assert!(first.iter().any(|f| f[0].abs() > 0.1), "the count in is heard without the metronome");
+        rt.heard(Instant::now());
+        assert_eq!(remote.shared.heard_pos.load(Ordering::Relaxed) as i64, 5_000 - (bar as i64 - 1_000));
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 5_000);
+        let mut left = bar - 1_000 + 2_000;
+        while left > 0 {
+            let part = left.min(1_000);
+            rt.process(part as usize);
+            left -= part;
+        }
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 7_000);
+        remote.outbox.push(Msg::CountIn(bar)).ok().unwrap();
+        remote.outbox.push(Msg::Stop).ok().unwrap();
+        rt.process(100);
+        assert_eq!(rt.count_in, 0);
     }
 
     #[test]

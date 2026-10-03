@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use iced::futures::channel::oneshot;
 use iced::Task;
-use loupe_engine::{Command, CommandError, Frames, Input, Outcome, Source, TrackId};
+use loupe_engine::{bar_frames, Command, CommandError, Frames, Input, Outcome, Source, TrackId};
 
 use crate::selection::TAKES_FOLDER;
 use crate::{App, Message, SETTLE_TICKS};
@@ -13,6 +13,7 @@ const UNNAMED_TAKE: &str = "Take";
 pub struct Recording {
     pub from: Frames,
     tracks: Vec<TrackId>,
+    counted_in: bool,
 }
 
 impl App {
@@ -40,14 +41,18 @@ impl App {
         self.problem = None;
         self.notice = None;
         self.engine.set_endless(true);
+        let counted_in = !self.playing && self.count_in_bars > 0;
         if !self.playing {
             if let Some((from, _)) = self.loop_range {
                 self.seek(from);
             }
+            if counted_in {
+                self.engine.count_in(bar_frames(self.project.bpm, self.project.rate) * self.count_in_bars as Frames);
+            }
             self.engine.play();
             self.playing = true;
         }
-        self.recording = Some(Recording { from: self.playhead, tracks });
+        self.recording = Some(Recording { from: self.playhead, tracks, counted_in });
         Task::none()
     }
 
@@ -83,6 +88,7 @@ impl App {
         });
         let rate = self.project.rate;
         let tracks = recording.tracks;
+        let keep_from = if recording.counted_in { recording.from as i64 } else { 0 };
         self.loading += 1;
         let (done, loaded) = oneshot::channel();
         std::thread::spawn(move || {
@@ -90,11 +96,11 @@ impl App {
         });
         Task::perform(
             async move { loaded.await.unwrap_or_else(|_| Err("reading the take stopped unexpectedly".into())) },
-            move |result| Message::TakeReady { tracks: tracks.clone(), start, warning: warning.clone(), result },
+            move |result| Message::TakeReady { tracks: tracks.clone(), start, keep_from, warning: warning.clone(), result },
         )
     }
 
-    pub(crate) fn place_take(&mut self, tracks: Vec<TrackId>, start: i64, result: Result<Arc<Source>, String>) {
+    pub(crate) fn place_take(&mut self, tracks: Vec<TrackId>, start: i64, keep_from: i64, result: Result<Arc<Source>, String>) {
         self.loading = self.loading.saturating_sub(1);
         let source = match result {
             Ok(source) => source,
@@ -103,12 +109,12 @@ impl App {
                 return;
             }
         };
-        let before_the_song = start.min(0).unsigned_abs();
+        let cut = (keep_from.max(0) - start).max(0) as Frames;
         let whole = source.frames.len() as Frames;
-        if before_the_song >= whole {
+        if cut >= whole {
             return;
         }
-        let start = start.max(0) as Frames;
+        let start = (start + cut as i64) as Frames;
         let mut placed = Vec::new();
         self.transact(None, |project| {
             for track in tracks {
@@ -118,8 +124,8 @@ impl App {
                 let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source: source.clone(), start })? else {
                     return Err(CommandError::NoSuchClip);
                 };
-                if before_the_song > 0 {
-                    project.apply(Command::TrimClip { clip, offset: before_the_song, len: whole - before_the_song })?;
+                if cut > 0 {
+                    project.apply(Command::TrimClip { clip, offset: cut, len: whole - cut })?;
                 }
                 placed.push(clip);
             }
