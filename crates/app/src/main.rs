@@ -30,7 +30,7 @@ use loupe_engine::{
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
 use theme::Palette;
-use timeline::{LoopRange, Timeline, View, MAX_GAIN_DB, MIN_GAIN_DB};
+use timeline::{LoopRange, Timeline, Tool, View, MAX_GAIN_DB, MIN_GAIN_DB};
 
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
 const UNDO_STEPS: usize = 200;
@@ -108,6 +108,11 @@ pub enum Message {
     DuplicateTrack(TrackId),
     ToggleMixer,
     MasterGain(f32),
+    SetTool(Tool),
+    Refresh,
+    PaintMute { clip: ClipId, muted: bool },
+    PaintDelete(ClipId),
+    Slice { at: Frames, tracks: Vec<TrackId> },
     TrackGain(TrackId, f32),
     TogglePool,
     PlaceSource(usize),
@@ -132,6 +137,7 @@ enum Run {
     Fade(ClipId, Edge),
     TrackGain(TrackId),
     Master,
+    Paint,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,6 +157,7 @@ struct App {
     palette: Palette,
     heights: HashMap<TrackId, f32>,
     loop_range: LoopRange,
+    tool: Tool,
     engine: Engine,
     project: Project,
     undo: Vec<Project>,
@@ -189,6 +196,7 @@ impl App {
             palette: loaded.palette,
             heights: HashMap::new(),
             loop_range: None,
+            tool: Tool::default(),
             problem: None,
             startup_problem: no_sound.or(loaded.problem),
             bpm: format_bpm(project.bpm),
@@ -435,6 +443,40 @@ impl App {
             Message::TrackGain(track, db) => {
                 let gain = mixer::gain_from_db(db);
                 self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
+            }
+            Message::SetTool(tool) => {
+                self.tool = tool;
+                self.cache.clear();
+            }
+            Message::Refresh => {}
+            Message::PaintMute { clip, muted } => {
+                self.edit(Some(Run::Paint), Command::SetClipMuted { clip, muted });
+            }
+            Message::PaintDelete(clip) => {
+                if self.selected == Some(clip) {
+                    self.selected = None;
+                }
+                self.edit(Some(Run::Paint), Command::DeleteClip(clip));
+            }
+            Message::Slice { at, tracks } => {
+                let cuts: Vec<ClipId> = self
+                    .project
+                    .tracks
+                    .iter()
+                    .filter(|track| tracks.contains(&track.id))
+                    .flat_map(|track| track.clips.iter())
+                    .filter(|clip| at > clip.start && at < clip.end())
+                    .map(|clip| clip.id)
+                    .collect();
+                if !cuts.is_empty() {
+                    self.transact(None, |project| {
+                        for clip in cuts {
+                            project.apply(Command::SplitClip { clip, at })?;
+                        }
+                        Ok(Outcome::Done)
+                    });
+                }
+                self.cache.clear();
             }
             Message::MasterGain(db) => {
                 self.edit(Some(Run::Master), Command::SetMasterGain(mixer::gain_from_db(db)));
@@ -688,6 +730,7 @@ impl App {
             selected: self.selected,
             playhead: self.playhead,
             loop_range: self.loop_range,
+            tool: self.tool,
             width: self.canvas_width(),
             cache: &self.cache,
         })
@@ -933,6 +976,10 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
+                ("p", false, _) => Some(Message::SetTool(Tool::Pencil)),
+                ("c", false, _) => Some(Message::SetTool(Tool::Razor)),
+                ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
+                ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
                 ("s", true, false) => Some(Message::Save),
                 ("s", true, true) => Some(Message::SaveAs),
                 ("o", true, _) => Some(Message::OpenProject),

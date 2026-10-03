@@ -38,6 +38,7 @@ pub struct Clip {
     pub offset: Frames,
     pub len: Frames,
     pub gain: f32,
+    pub muted: bool,
     pub fade_in: Fade,
     pub fade_out: Fade,
 }
@@ -96,6 +97,7 @@ pub enum Command {
     DeleteClip(ClipId),
     TrimClip { clip: ClipId, offset: Frames, len: Frames },
     SetClipGain { clip: ClipId, gain: f32 },
+    SetClipMuted { clip: ClipId, muted: bool },
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetBpm(f64),
     SetMasterGain(f32),
@@ -207,6 +209,7 @@ impl Project {
                     offset: 0,
                     len,
                     gain: 1.0,
+                    muted: false,
                     fade_in: Fade::NONE,
                     fade_out: Fade::NONE,
                 });
@@ -267,6 +270,11 @@ impl Project {
             Command::SetClipGain { clip, gain } => {
                 let (t, i) = self.locate(clip)?;
                 self.tracks[t].clips[i].gain = valid_gain(gain)?;
+                Ok(Outcome::Done)
+            }
+            Command::SetClipMuted { clip, muted } => {
+                let (t, i) = self.locate(clip)?;
+                self.tracks[t].clips[i].muted = muted;
                 Ok(Outcome::Done)
             }
             Command::SetClipFade { clip, edge, fade } => {

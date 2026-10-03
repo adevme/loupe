@@ -22,6 +22,9 @@ const MIN_GRID_PX: f64 = 14.0;
 const DRAG_THRESHOLD: f32 = 4.0;
 const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
+const TOOL_BUTTON: f32 = 26.0;
+const TOOL_GAP: f32 = 6.0;
+const TOOLS_LEFT: f32 = 12.0;
 const HANDLE_RADIUS: f32 = 4.5;
 const HANDLE_REACH: f32 = 10.0;
 const FADE_FLAG_SIZE: f32 = 10.0;
@@ -35,6 +38,28 @@ pub const MAX_GAIN_DB: f32 = 12.0;
 pub const MIN_ZOOM: f64 = 2.0;
 
 pub type LoopRange = Option<(Frames, Frames)>;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Tool {
+    #[default]
+    Pencil,
+    Razor,
+    Mute,
+    Delete,
+}
+
+impl Tool {
+    const ALL: [Tool; 4] = [Tool::Pencil, Tool::Razor, Tool::Mute, Tool::Delete];
+
+    fn icon(self) -> &'static str {
+        match self {
+            Tool::Pencil => "pencil",
+            Tool::Razor => "slice",
+            Tool::Mute => "volume-x",
+            Tool::Delete => "eraser",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
@@ -57,6 +82,7 @@ pub struct Timeline<'a> {
     pub selected: Option<ClipId>,
     pub playhead: Frames,
     pub loop_range: LoopRange,
+    pub tool: Tool,
     pub width: f32,
     pub cache: &'a Cache,
 }
@@ -72,6 +98,8 @@ enum Drag {
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Resize { track: TrackId, top: f32 },
     Scroll { grab_x: f32, span: f64 },
+    Slice { at: Frames, from_y: f32, to_y: f32 },
+    Paint { muted: Option<bool>, touched: Vec<ClipId> },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
 }
 
@@ -102,6 +130,7 @@ impl ClipBox {
 }
 
 enum Hit<'a> {
+    Tool(Tool),
     Scrollbar,
     Ruler,
     Resize(&'a Track),
@@ -314,7 +343,11 @@ impl Timeline<'_> {
             return match (p.x >= HEADER_W, p.y < SCROLLBAR_H) {
                 (true, true) => Hit::Scrollbar,
                 (true, false) => Hit::Ruler,
-                (false, _) => Hit::Nothing,
+                (false, _) => Tool::ALL
+                    .into_iter()
+                    .enumerate()
+                    .find(|(i, _)| tool_button(*i).contains(p))
+                    .map_or(Hit::Nothing, |(_, tool)| Hit::Tool(tool)),
             };
         }
         if let Some(track) = self.resize_grip_at(p) {
@@ -422,8 +455,27 @@ impl canvas::Program<Message> for Timeline<'_> {
                 let Some(p) = cursor.position_in(bounds) else {
                     return (Ignored, None);
                 };
-                let message = match self.hit(p) {
-                    Hit::Scrollbar => {
+                let message = match (self.tool, self.hit(p)) {
+                    (_, Hit::Tool(tool)) => Some(Message::SetTool(tool)),
+                    (Tool::Razor, Hit::Clip(_) | Hit::Grip(..) | Hit::Lane) => {
+                        let at = self.snap(self.frames_at(p.x), free);
+                        state.drag = Some(Drag::Slice { at, from_y: p.y, to_y: p.y });
+                        Some(Message::Refresh)
+                    }
+                    (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
+                        let muted = !clip.muted;
+                        state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id] });
+                        Some(Message::PaintMute { clip: clip.id, muted })
+                    }
+                    (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
+                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
+                        Some(Message::PaintDelete(clip.id))
+                    }
+                    (Tool::Mute | Tool::Delete, Hit::Lane) => {
+                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
+                        None
+                    }
+                    (_, Hit::Scrollbar) => {
                         let span = self.scrollbar_span();
                         let (left, width) = self.thumb(span);
                         let on_thumb = p.x >= left && p.x <= left + width;
@@ -432,21 +484,21 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let view = self.scrolled_to_thumb_left(p.x - grab_x, span);
                         (view != self.view).then_some(Message::SetView(view))
                     }
-                    Hit::Ruler => {
+                    (_, Hit::Ruler) => {
                         let anchor = self.snap(self.frames_at(p.x), free);
                         state.drag = Some(Drag::Range { anchor, origin: p, moving: false });
                         None
                     }
-                    Hit::Resize(track) => {
+                    (_, Hit::Resize(track)) => {
                         let index = self.project.tracks.iter().position(|t| t.id == track.id);
                         let top = index.map_or(LANES_TOP, |i| self.track_top(i));
                         state.drag = Some(Drag::Resize { track: track.id, top });
                         None
                     }
-                    Hit::Mute(track) => Some(Message::ToggleMute(track.id)),
-                    Hit::Remove(track) => Some(Message::RemoveTrack(track.id)),
-                    Hit::AddTrack => Some(Message::AddTrack),
-                    Hit::Grip(clip, grip) => {
+                    (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
+                    (_, Hit::Remove(track)) => Some(Message::RemoveTrack(track.id)),
+                    (_, Hit::AddTrack) => Some(Message::AddTrack),
+                    (_, Hit::Grip(clip, grip)) => {
                         let curve_at_grab = match grip {
                             Grip::ShapeOut => clip.fade_out.curve,
                             _ => clip.fade_in.curve,
@@ -456,7 +508,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Grip { clip: clip.id, grip, pull, curve_at_grab, db_at_grab });
                         None
                     }
-                    Hit::Clip(clip) => {
+                    (_, Hit::Clip(clip)) => {
                         state.drag = Some(Drag::Clip {
                             id: clip.id,
                             grab: self.frames_at(p.x) - clip.start as f64,
@@ -465,8 +517,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                         });
                         Some(Message::Select(Some(clip.id)))
                     }
-                    Hit::Lane => Some(Message::LaneClicked(self.snap(self.frames_at(p.x), free))),
-                    Hit::Nothing => None,
+                    (_, Hit::Lane) => Some(Message::LaneClicked(self.snap(self.frames_at(p.x), free))),
+                    (_, Hit::Nothing) => None,
                 };
                 (Captured, message)
             }
@@ -533,6 +585,25 @@ impl canvas::Program<Message> for Timeline<'_> {
                         };
                         (Captured, message)
                     }
+                    Drag::Slice { to_y, .. } => {
+                        *to_y = p.y;
+                        (Captured, Some(Message::Refresh))
+                    }
+                    Drag::Paint { muted, touched } => {
+                        let (Hit::Clip(clip) | Hit::Grip(clip, _)) = self.hit(p) else {
+                            return (Captured, None);
+                        };
+                        if touched.contains(&clip.id) {
+                            return (Captured, None);
+                        }
+                        touched.push(clip.id);
+                        let message = if self.tool == Tool::Delete {
+                            Message::PaintDelete(clip.id)
+                        } else {
+                            Message::PaintMute { clip: clip.id, muted: *muted.get_or_insert(!clip.muted) }
+                        };
+                        (Captured, Some(message))
+                    }
                     Drag::Scroll { grab_x, span } => {
                         let view = self.scrolled_to_thumb_left(p.x - *grab_x, *span);
                         (Captured, (view != self.view).then_some(Message::SetView(view)))
@@ -547,7 +618,15 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
                 Some(Drag::Range { anchor, moving: false, .. }) => (Captured, Some(Message::RulerClicked(anchor))),
-                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. }) => (Captured, Some(Message::DragEnd)),
+                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. }) => {
+                    (Captured, Some(Message::DragEnd))
+                }
+                Some(Drag::Slice { at, from_y, to_y }) if !self.project.tracks.is_empty() => {
+                    let first = self.row_for_drag(from_y.min(to_y));
+                    let last = self.row_for_drag(from_y.max(to_y));
+                    let tracks = self.project.tracks[first..=last].iter().map(|track| track.id).collect();
+                    (Captured, Some(Message::Slice { at, tracks }))
+                }
                 Some(_) => (Captured, None),
                 None => (Ignored, None),
             },
@@ -596,6 +675,24 @@ impl canvas::Program<Message> for Timeline<'_> {
             frame.with_clip(headers, |frame| self.draw_headers(frame, headers.size()));
 
             frame.fill_rectangle(Point::ORIGIN, Size::new(HEADER_W, LANES_TOP), p.panel);
+            for (i, tool) in Tool::ALL.into_iter().enumerate() {
+                let button = tool_button(i);
+                if tool == self.tool {
+                    let chosen = Path::new(|b| b.rounded_rectangle(button.position(), button.size(), 6.0.into()));
+                    frame.fill(&chosen, p.hover);
+                }
+                frame.fill_text(Text {
+                    content: icons::glyph(tool.icon()).to_string(),
+                    position: button.center(),
+                    color: if tool == self.tool { p.text } else { p.text_dim },
+                    size: 14.0.into(),
+                    font: theme::ICONS,
+                    horizontal_alignment: alignment::Horizontal::Center,
+                    vertical_alignment: alignment::Vertical::Center,
+                    shaping: iced::widget::text::Shaping::Advanced,
+                    ..Text::default()
+                });
+            }
             frame.fill_rectangle(Point::new(0.0, LANES_TOP - 1.0), Size::new(bounds.width, 1.0), p.line);
             frame.fill_rectangle(Point::new(HEADER_W - 1.0, 0.0), Size::new(1.0, bounds.height), p.line);
         });
@@ -623,6 +720,16 @@ impl canvas::Program<Message> for Timeline<'_> {
                         theme::alpha(p.accent, 0.45),
                     );
                 }
+            }
+        }
+        if let Some(Drag::Slice { at, from_y, to_y }) = &state.drag {
+            let x = self.x_of(*at as f64).round();
+            if x >= HEADER_W && !self.project.tracks.is_empty() {
+                let first = self.row_for_drag(from_y.min(*to_y));
+                let last = self.row_for_drag(from_y.max(*to_y));
+                let top = self.track_top(first);
+                let bottom = self.track_top(last) + self.height_of(&self.project.tracks[last]);
+                overlay.fill_rectangle(Point::new(x - 1.0, top), Size::new(2.0, bottom - top), p.accent);
             }
         }
         let x = self.x_of(self.playhead as f64).round();
@@ -676,11 +783,13 @@ impl canvas::Program<Message> for Timeline<'_> {
             Some(Drag::Grip { grip, .. }) => return grip.pointer(),
             _ => {}
         }
-        match cursor.position_in(bounds).map(|p| self.hit(p)) {
-            Some(Hit::Resize(_)) => mouse::Interaction::ResizingVertically,
-            Some(Hit::Grip(_, grip)) => grip.pointer(),
-            Some(Hit::Mute(_) | Hit::Remove(_) | Hit::AddTrack) => mouse::Interaction::Pointer,
-            Some(Hit::Clip(_)) => mouse::Interaction::Grab,
+        match (self.tool, cursor.position_in(bounds).map(|p| self.hit(p))) {
+            (_, Some(Hit::Resize(_))) => mouse::Interaction::ResizingVertically,
+            (_, Some(Hit::Mute(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => mouse::Interaction::Pointer,
+            (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
+            (Tool::Mute | Tool::Delete, Some(Hit::Clip(_) | Hit::Grip(..))) => mouse::Interaction::Pointer,
+            (Tool::Pencil, Some(Hit::Grip(_, grip))) => grip.pointer(),
+            (Tool::Pencil, Some(Hit::Clip(_))) => mouse::Interaction::Grab,
             _ => mouse::Interaction::default(),
         }
     }
@@ -734,8 +843,9 @@ impl Timeline<'_> {
                 continue;
             }
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
-            let colour = if track.muted { p.text_faint } else { self.colour_of(i) };
+            let track_colour = if track.muted { p.text_faint } else { self.colour_of(i) };
             for clip in &track.clips {
+                let colour = if clip.muted { p.text_faint } else { track_colour };
                 self.draw_clip(frame, size, clip, top, height, colour);
             }
         }
@@ -1080,6 +1190,13 @@ impl Timeline<'_> {
             ..Text::default()
         });
     }
+}
+
+fn tool_button(index: usize) -> Rectangle {
+    Rectangle::new(
+        Point::new(TOOLS_LEFT + index as f32 * (TOOL_BUTTON + TOOL_GAP), (LANES_TOP - TOOL_BUTTON) / 2.0),
+        Size::new(TOOL_BUTTON, TOOL_BUTTON),
+    )
 }
 
 fn shorten(name: &str, most: usize) -> String {

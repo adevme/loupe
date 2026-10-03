@@ -8,7 +8,7 @@ pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
             continue;
         }
         for clip in &track.clips {
-            if clip.end() <= pos || clip.start >= end {
+            if clip.muted || clip.end() <= pos || clip.start >= end {
                 continue;
             }
             let from = clip.start.max(pos);
@@ -209,6 +209,22 @@ mod tests {
         let (left, right) = (p.clip(c).unwrap(), p.clip(right).unwrap());
         assert_eq!((left.fade_in.len, left.fade_out.len), (400, 0));
         assert_eq!((right.fade_in.len, right.fade_out.len), (0, 300));
+    }
+
+    #[test]
+    fn a_muted_clip_is_silent_and_its_neighbour_is_not() {
+        let mut p = Project::new(48_000);
+        let t = track(&mut p);
+        let left = clip(&mut p, t, counting(1000), 0);
+        let Ok(Outcome::Clip(right)) = p.apply(Command::SplitClip { clip: left, at: 500 }) else {
+            panic!("no split")
+        };
+        p.apply(Command::SetClipMuted { clip: right, muted: true }).unwrap();
+        let out = whole(&p, 1000);
+        assert_eq!(out[499], [499.0, -499.0]);
+        assert_eq!(out[500], [0.0, 0.0]);
+        p.apply(Command::SetClipMuted { clip: right, muted: false }).unwrap();
+        assert_eq!(whole(&p, 1000)[500], [500.0, -500.0]);
     }
 
     #[test]

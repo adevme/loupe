@@ -33,6 +33,7 @@ pub struct SavedClip {
     pub offset: Frames,
     pub len: Frames,
     pub gain: f32,
+    pub muted: bool,
     pub fade_in: Fade,
     pub fade_out: Fade,
 }
@@ -65,6 +66,7 @@ impl SavedProject {
                             offset: clip.offset,
                             len: clip.len,
                             gain: clip.gain,
+                            muted: clip.muted,
                             fade_in: clip.fade_in,
                             fade_out: clip.fade_out,
                         })
@@ -88,12 +90,13 @@ impl SavedProject {
             ));
             for clip in &track.clips {
                 out.push_str(&format!(
-                    "clip source={} start={} offset={} len={} gain={} fade_in={}:{} fade_out={}:{}\n",
+                    "clip source={} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}\n",
                     clip.source,
                     clip.start,
                     clip.offset,
                     clip.len,
                     clip.gain,
+                    clip.muted as u8,
                     clip.fade_in.len,
                     clip.fade_in.curve,
                     clip.fade_out.len,
@@ -141,6 +144,7 @@ impl SavedProject {
                         offset: whole("offset")?,
                         len: whole("len")?,
                         gain: number_in(&fields, "gain").ok_or_else(|| bad("the clip has no gain"))?,
+                        muted: fields.get("muted") == Some(&"1"),
                         fade_in: fade_from(need("fade_in")?).ok_or_else(|| bad("the fade in is not readable"))?,
                         fade_out: fade_from(need("fade_out")?).ok_or_else(|| bad("the fade out is not readable"))?,
                     };
@@ -188,6 +192,7 @@ impl SavedProject {
                 let trimmed = Command::TrimClip { clip: id, offset: rescale(clip.offset), len: rescale(clip.len) };
                 let _ = project.apply(trimmed);
                 let _ = project.apply(Command::SetClipGain { clip: id, gain: clip.gain });
+                let _ = project.apply(Command::SetClipMuted { clip: id, muted: clip.muted });
                 for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
                     let fade = Fade { len: rescale(fade.len), curve: fade.curve };
                     let _ = project.apply(Command::SetClipFade { clip: id, edge, fade });

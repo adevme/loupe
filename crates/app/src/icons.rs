@@ -13,6 +13,10 @@ pub fn glyph(name: &str) -> char {
         "sliders-vertical" => '\u{e162}',
         "chevron-down" => '\u{e06d}',
         "plus" => '\u{e13d}',
+        "pencil" => '\u{e1f9}',
+        "slice" => '\u{e2f0}',
+        "volume-x" => '\u{e1ac}',
+        "eraser" => '\u{e28f}',
         _ => '?',
     }
 }
