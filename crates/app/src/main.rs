@@ -14,7 +14,7 @@ mod timeline;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::futures::channel::oneshot;
 use iced::widget::canvas::Cache;
@@ -36,6 +36,7 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 fn main() -> iced::Result {
     let settings = Settings::load();
@@ -109,6 +110,8 @@ pub enum Message {
     DuplicateTrack(TrackId),
     ToggleMixer,
     MasterGain(f32),
+    LevelPressed(mixer::Level),
+    LevelEntered,
     SetTool(Tool),
     Refresh,
     PaintMute { clip: ClipId, muted: bool },
@@ -161,6 +164,8 @@ struct App {
     heights: HashMap<TrackId, f32>,
     loop_range: LoopRange,
     tool: Tool,
+    level_press: Option<(mixer::Level, Instant)>,
+    editing_level: Option<mixer::Level>,
     engine: Engine,
     project: Project,
     undo: Vec<Project>,
@@ -200,6 +205,8 @@ impl App {
             heights: HashMap::new(),
             loop_range: None,
             tool: Tool::default(),
+            level_press: None,
+            editing_level: None,
             problem: None,
             startup_problem: no_sound.or(loaded.problem),
             bpm: format_bpm(project.bpm),
@@ -392,7 +399,10 @@ impl App {
                 self.pending_scale = self.scale;
                 self.scale_text = format_scale(self.scale);
             }
-            Message::CloseOverlay => self.overlay = Overlay::None,
+            Message::CloseOverlay => {
+                self.overlay = Overlay::None;
+                self.editing_level = None;
+            }
             Message::DeleteClip(clip) => {
                 if self.selected == Some(clip) {
                     self.selected = None;
@@ -488,6 +498,37 @@ impl App {
                     });
                 }
                 self.cache.clear();
+            }
+            Message::LevelPressed(level) => {
+                let pressed_twice = self
+                    .level_press
+                    .is_some_and(|(last, at)| last == level && at.elapsed() < DOUBLE_CLICK);
+                self.level_press = Some((level, Instant::now()));
+                if pressed_twice {
+                    let gain = match level {
+                        mixer::Level::Master => Some(self.project.master),
+                        mixer::Level::Track(track) => self.project.track(track).map(|track| track.gain),
+                    };
+                    if let Some(gain) = gain {
+                        self.entry = mixer::level_text(gain);
+                        self.editing_level = Some(level);
+                        return Task::batch([
+                            text_input::focus(mixer::LEVEL_ENTRY_ID),
+                            text_input::select_all(mixer::LEVEL_ENTRY_ID),
+                        ]);
+                    }
+                }
+            }
+            Message::LevelEntered => {
+                if let (Some(level), Some(db)) = (self.editing_level.take(), mixer::db_from_typed(&self.entry)) {
+                    let gain = mixer::gain_from_db(db);
+                    let command = match level {
+                        mixer::Level::Master => Command::SetMasterGain(gain),
+                        mixer::Level::Track(track) => Command::SetTrackGain { track, gain },
+                    };
+                    self.edit(None, command);
+                }
+                return unfocus();
             }
             Message::MasterGain(db) => {
                 self.edit(Some(Run::Master), Command::SetMasterGain(mixer::gain_from_db(db)));
@@ -825,7 +866,7 @@ impl App {
             })
             .width(30)
             .height(30),
-            text(mixer::level_text(self.project.master)).size(12).font(palette.mono).color(palette.text_dim).width(40),
+            container(self.level_readout(mixer::Level::Master, self.project.master)).width(52),
         ]
         .spacing(8)
         .align_y(Alignment::Center);

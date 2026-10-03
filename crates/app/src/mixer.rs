@@ -1,6 +1,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, column, container, scrollable, text, vertical_slider, Space};
+use iced::widget::{button, column, container, mouse_area, scrollable, text, text_input, vertical_slider, Space};
 use iced::{Alignment, Color, Element, Length};
+
+use loupe_engine::TrackId;
 
 use crate::{App, Message};
 
@@ -10,6 +12,22 @@ const STRIP_HEIGHT: f32 = 204.0;
 const NAME_LENGTH: usize = 9;
 pub const SILENT_DB: f32 = -60.0;
 pub const LOUDEST_DB: f32 = 6.0;
+pub const LEVEL_ENTRY_ID: &str = "level-entry";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Level {
+    Track(TrackId),
+    Master,
+}
+
+pub fn db_from_typed(typed: &str) -> Option<f32> {
+    let typed = typed.trim().to_lowercase();
+    let number = typed.trim_end_matches("db").trim();
+    if number == "-inf" {
+        return Some(SILENT_DB);
+    }
+    number.parse::<f32>().ok().filter(|db| db.is_finite()).map(|db| db.clamp(SILENT_DB, LOUDEST_DB))
+}
 
 pub fn gain_from_db(db: f32) -> f32 {
     if db <= SILENT_DB {
@@ -36,6 +54,25 @@ pub fn level_text(gain: f32) -> String {
 }
 
 impl App {
+    pub(crate) fn level_readout(&self, level: Level, gain: f32) -> Element<'_, Message> {
+        let palette = self.palette;
+        if self.editing_level == Some(level) {
+            return text_input("", &self.entry)
+                .id(LEVEL_ENTRY_ID)
+                .on_input(Message::EntryTyped)
+                .on_submit(Message::LevelEntered)
+                .font(palette.mono)
+                .size(11.5)
+                .padding([2, 4])
+                .width(52)
+                .style(move |_, status| palette.field(status))
+                .into();
+        }
+        mouse_area(text(level_text(gain)).size(11.5).font(palette.mono).color(palette.text_dim))
+            .on_press(Message::LevelPressed(level))
+            .into()
+    }
+
     pub(crate) fn mixer(&self) -> Element<'_, Message> {
         let palette = self.palette;
         if self.project.tracks.is_empty() {
@@ -48,7 +85,6 @@ impl App {
         let strips = self.project.tracks.iter().map(|track| {
             let id = track.id;
             let db = db_from_gain(track.gain);
-            let level = level_text(track.gain);
             let colour = match track.colour {
                 Some([r, g, b]) => Color::from_rgb8(r, g, b),
                 None => palette.track(track.id.0.saturating_sub(1) as usize),
@@ -68,7 +104,7 @@ impl App {
                         .on_release(Message::DragEnd)
                         .height(Length::Fill)
                         .style(move |_, status| palette.slider(status)),
-                    text(level).size(11.5).font(palette.mono).color(palette.text_dim),
+                    self.level_readout(Level::Track(id), track.gain),
                     button(text("M").size(11.5).font(palette.semibold))
                         .padding([3, 9])
                         .style(move |_, status| palette.mute(muted, status))
