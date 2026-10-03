@@ -17,6 +17,7 @@ mod selection;
 mod settings;
 mod spinner;
 mod theme;
+mod theming;
 mod timeline;
 
 use std::collections::{HashMap, HashSet};
@@ -40,7 +41,7 @@ use loupe_engine::{
 };
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
-use theme::Palette;
+use theme::{BarItem, Palette, Side};
 use timeline::{LoopRange, Timeline, Tool, View};
 
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
@@ -53,18 +54,18 @@ const COPIED_SHOWN_FOR: Duration = Duration::from_millis(1500);
 const EXPORT_PROGRESS_STEPS: u32 = 1000;
 const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
-const TOP_BAR_HEIGHT: f32 = 53.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-const SETTINGS_PAGE_HEIGHT: f32 = 96.0;
+const SETTINGS_PAGE_HEIGHT: f32 = 196.0;
 
 fn main() -> iced::Result {
     crash::keep_a_record();
     let settings = Settings::load();
-    let loaded = Palette::load(settings.theme.as_deref());
+    let mut loaded = Palette::load(settings.theme.as_deref());
+    let icon_font = loaded.icon_font.take();
     let ui_font = loaded.palette.ui;
     let opens_a_song = std::env::args_os().len() > 1;
     let first_size = if opens_a_song { START_SIZE } else { scaled(HOME_SIZE, settings.scale) };
-    iced::application(App::title, App::update, App::view)
+    let mut loupe = iced::application(App::title, App::update, App::view)
         .subscription(App::subscription)
         .theme(|app: &App| app.palette.iced())
         .scale_factor(|app: &App| app.scale)
@@ -81,8 +82,11 @@ fn main() -> iced::Result {
             icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
             min_size: Some(Size::new(820.0, 420.0)),
             ..window::Settings::default()
-        })
-        .run_with(move || App::new(loaded, settings))
+        });
+    if let Some(font) = icon_font {
+        loupe = loupe.font(font);
+    }
+    loupe.run_with(move || App::new(loaded, settings))
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
@@ -200,6 +204,9 @@ pub enum Message {
     FolderPicked(Option<PathBuf>),
     FolderReset,
     SettingsTab(SettingsTab),
+    ThemeChosen(String),
+    ThemeFontLoaded,
+    ShowThemes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -281,6 +288,9 @@ struct App {
     track_levels: [f32; loupe_engine::METERS],
     master_level: f32,
     input_name: Option<String>,
+    theme_name: Option<String>,
+    theme_names: Vec<String>,
+    theme_problem: Option<String>,
     input_names: Vec<String>,
     practice_input: bool,
     engine: Engine,
@@ -353,6 +363,9 @@ impl App {
             track_levels: [0.0; loupe_engine::METERS],
             master_level: 0.0,
             input_name: settings.input.clone(),
+            theme_name: settings.theme.clone(),
+            theme_names: Vec::new(),
+            theme_problem: loaded.problem,
             input_names: Vec::new(),
             practice_input: silent,
             problem: None,
@@ -362,7 +375,7 @@ impl App {
             export_elsewhere: None,
             exporting: false,
             export_progress: Arc::new(AtomicU32::new(0)),
-            startup_problem: no_sound.or(loaded.problem).or(no_folder),
+            startup_problem: no_sound.or(no_folder),
             bpm: format_bpm(project.bpm),
             engine,
             project,
@@ -660,6 +673,7 @@ impl App {
             Message::Resized(size) => self.window = size,
             Message::OpenSettings => {
                 self.input_names = loupe_engine::input_devices();
+                self.theme_names = theme::available();
                 self.overlay = Overlay::Settings;
                 self.pending_scale = self.scale;
                 self.scale_text = format_scale(self.scale);
@@ -758,7 +772,7 @@ impl App {
             Message::MixerGrabbed => self.resizing_mixer = true,
             Message::MixerDragged(pointer_y) => {
                 let below = if self.status().is_some() { STATUS_HEIGHT + 1.0 } else { 0.0 };
-                let tallest = (self.window.height - TOP_BAR_HEIGHT - below).max(mixer::SHORTEST_MIXER);
+                let tallest = (self.window.height - self.palette.top_bar_height - 1.0 - below).max(mixer::SHORTEST_MIXER);
                 self.mixer_height = (self.window.height - below - pointer_y).clamp(mixer::SHORTEST_MIXER, tallest);
             }
             Message::MixerReleased => {
@@ -1013,6 +1027,9 @@ impl App {
             }
             Message::FolderReset => self.use_folder(None),
             Message::SettingsTab(tab) => self.settings_tab = tab,
+            Message::ThemeChosen(name) => return self.use_theme(name),
+            Message::ThemeFontLoaded => self.cache.clear(),
+            Message::ShowThemes => self.show_themes_folder(),
         }
         Task::none()
     }
@@ -1140,12 +1157,12 @@ impl App {
 
     fn canvas_width(&self) -> f32 {
         let beside = if self.pool_open { pool::POOL_WIDTH + 1.0 } else { 0.0 };
-        (self.window.width - beside).max(timeline::HEADER_W + 1.0)
+        (self.window.width - beside).max(self.palette.header_width + 1.0)
     }
 
     fn show_whole_song(&mut self) {
         let seconds = self.project.length() as f64 / self.project.rate.max(1) as f64;
-        let room = (self.canvas_width() - timeline::HEADER_W - 48.0).max(100.0) as f64;
+        let room = (self.canvas_width() - self.palette.header_width - 48.0).max(100.0) as f64;
         self.view.zoom = if seconds > 0.0 {
             (room / seconds).clamp(timeline::MIN_ZOOM, View::max_zoom(self.project.rate))
         } else {
@@ -1241,7 +1258,7 @@ impl App {
     }
 
     fn follow(&mut self) {
-        let width = (self.canvas_width() - timeline::HEADER_W) as f64;
+        let width = (self.canvas_width() - self.palette.header_width) as f64;
         let x = (self.playhead as f64 / self.project.rate as f64 - self.view.scroll) * self.view.zoom;
         if self.playing && (x > width - 24.0 || x < 0.0) {
             let lead = width * 0.1 / self.view.zoom;
@@ -1275,10 +1292,11 @@ impl App {
         .height(Length::Fill);
 
         let palette = self.palette;
-        let mut middle = row![timeline];
-        if self.pool_open {
-            middle = middle.push(upright_rule(palette)).push(self.pool());
-        }
+        let middle = match (self.pool_open, palette.all_audio) {
+            (false, _) => row![timeline],
+            (true, Side::Right) => row![timeline, upright_rule(palette), self.pool()],
+            (true, Side::Left) => row![self.pool(), upright_rule(palette), timeline],
+        };
         let mut song = column![self.transport(), rule(palette), middle];
         if self.mixer_open {
             song = song.push(rule(palette)).push(self.mixer());
@@ -1393,32 +1411,34 @@ impl App {
         .style(move |_, status| palette.outlined(status))
         .on_press(Message::Import);
 
-        container(
-            row![
-                file,
-                help,
-                Space::with_width(6),
-                icon_button(palette, "skip-back", Some(Message::ToStart)),
-                play,
-                record,
-                Space::with_width(10),
-                text(position).size(13).font(palette.mono).width(52),
-                text(clock).size(13).font(palette.mono).color(palette.text_dim).width(84),
-                text("BPM").size(11).font(palette.medium).color(palette.text_dim),
-                tempo,
-                Space::with_width(10),
-                master,
-                horizontal_space(),
-                history,
-                mixer,
-                icon_button(palette, "settings", Some(Message::OpenSettings)),
-                import,
-            ]
+        let tempo = row![text("BPM").size(11).font(palette.medium).color(palette.text_dim), tempo]
             .spacing(8)
-            .align_y(Alignment::Center),
-        )
+            .align_y(Alignment::Center);
+        let mut pieces: Vec<(BarItem, Element<'_, Message>)> = vec![
+            (BarItem::ToStart, icon_button(palette, "skip-back", Some(Message::ToStart))),
+            (BarItem::Play, play.into()),
+            (BarItem::Record, record.into()),
+            (BarItem::Position, text(position).size(13).font(palette.mono).width(52).into()),
+            (BarItem::Clock, text(clock).size(13).font(palette.mono).color(palette.text_dim).width(84).into()),
+            (BarItem::Tempo, tempo.into()),
+            (BarItem::Master, master.into()),
+            (BarItem::History, history.into()),
+            (BarItem::Mixer, mixer.into()),
+            (BarItem::Settings, icon_button(palette, "settings", Some(Message::OpenSettings))),
+            (BarItem::Import, import.into()),
+        ];
+        let mut bar = row![file, help, Space::with_width(6)].spacing(8).align_y(Alignment::Center);
+        for item in palette.top_bar_items() {
+            let piece = match item {
+                BarItem::Gap => Some(horizontal_space().into()),
+                BarItem::Space => Some(Space::with_width(10).into()),
+                _ => pieces.iter().position(|(kind, _)| *kind == item).map(|at| pieces.swap_remove(at).1),
+            };
+            bar = bar.push_maybe(piece);
+        }
+        container(bar)
         .padding([0, 16])
-        .height(52)
+        .height(palette.top_bar_height)
         .align_y(Alignment::Center)
         .style(move |_| palette.bar())
         .into()
@@ -1496,7 +1516,7 @@ impl App {
         }))
         .spacing(4);
         let page = match current {
-            SettingsTab::Display => scale,
+            SettingsTab::Display => column![self.theme_picker(), rule(palette), scale].spacing(16),
             SettingsTab::File => folder,
             SettingsTab::Recording => recording,
         };
@@ -1506,7 +1526,7 @@ impl App {
 
     fn status(&self) -> Option<Element<'_, Message>> {
         let palette = self.palette;
-        let line: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
+        let line: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()).or(self.theme_problem.as_ref()) {
             text(problem.as_str()).size(12).color(palette.danger).into()
         } else if self.exporting {
             let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
@@ -1609,7 +1629,7 @@ fn format_bpm(bpm: f64) -> String {
 
 fn icon(name: &str, size: f32) -> iced::widget::Text<'static> {
     text(icons::glyph(name).to_string())
-        .font(theme::ICONS)
+        .font(icons::font(name))
         .shaping(text::Shaping::Advanced)
         .size(size)
 }

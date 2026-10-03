@@ -9,8 +9,9 @@ use crate::{rule, App, Message, Overlay};
 const MENU_WIDTH: f32 = 220.0;
 const TALLEST_MENU: f32 = 290.0;
 const EDGE_GAP: f32 = 8.0;
-const FILE_MENU_AT: Point = Point::new(14.0, 44.0);
-const HELP_MENU_AT: Point = Point::new(72.0, 44.0);
+const FILE_MENU_LEFT: f32 = 14.0;
+const HELP_MENU_LEFT: f32 = 72.0;
+const MENU_OVERLAPS_BAR: f32 = 8.0;
 pub const ENTRY_ID: &str = "overlay-entry";
 
 impl App {
@@ -23,8 +24,8 @@ impl App {
             Overlay::SaveName => self.centred(self.save_sheet()),
             Overlay::Export => self.centred(self.export_sheet()),
             Overlay::Clip(clip) => self.centred(self.clip_sheet(*clip)),
-            Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
-            Overlay::HelpMenu => self.floating(HELP_MENU_AT, self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
+            Overlay::FileMenu => self.floating(self.under_the_bar(FILE_MENU_LEFT), self.file_menu()),
+            Overlay::HelpMenu => self.floating(self.under_the_bar(HELP_MENU_LEFT), self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
@@ -40,6 +41,10 @@ impl App {
             mouse_area(center(opaque(sheet)).padding(16).style(move |_| palette.backdrop()))
                 .on_press(Message::CloseOverlay),
         )
+    }
+
+    fn under_the_bar(&self, left: f32) -> Point {
+        Point::new(left, self.palette.top_bar_height - MENU_OVERLAPS_BAR)
     }
 
     fn floating<'a>(&self, at: Point, menu: Element<'a, Message>) -> Element<'a, Message> {

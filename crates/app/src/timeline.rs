@@ -6,20 +6,14 @@ use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, 
 use loupe_engine::{Clip, ClipId, Edge, Fade, Frames, Project, Track, TrackId};
 
 use crate::pointer::EndlessDrag;
-use crate::theme::{self, Palette};
+use crate::theme::{self, ArmShape, Palette, PlayheadCap, Side};
 use crate::{icons, Message};
 
-pub const HEADER_W: f32 = 200.0;
 const INDENT_W: f32 = 14.0;
-const SCROLLBAR_H: f32 = 18.0;
-const RULER_H: f32 = 30.0;
-const LANES_TOP: f32 = SCROLLBAR_H + RULER_H;
 const MIN_THUMB_PX: f32 = 28.0;
 const SONG_SPAN_HEADROOM: f64 = 1.2;
 const SHORTEST_SPAN_SECONDS: f64 = 30.0;
 const ADD_ROW_H: f32 = 40.0;
-const CLIP_PAD: f32 = 5.0;
-const CLIP_TITLE_H: f32 = 21.0;
 const MIN_GRID_PX: f64 = 14.0;
 const DRAG_THRESHOLD: f32 = 4.0;
 const RESIZE_GRIP: f32 = 5.0;
@@ -27,7 +21,8 @@ const ROOMY_HEADER_H: f32 = 72.0;
 const ARM_BUTTON: f32 = 22.0;
 const ARM_GAP: f32 = 8.0;
 const ARM_DOT_RADIUS: f32 = 5.0;
-const METER_THICKNESS: f32 = 3.0;
+const PLAYHEAD_CAP: f32 = 11.0;
+const PLAYHEAD_CAP_DROP: f32 = 9.0;
 const METER_FLOOR_DB: f32 = -60.0;
 const METER_MID_DB: f32 = -12.0;
 const METER_HIGH_DB: f32 = -6.0;
@@ -40,9 +35,7 @@ const EDGE_GRIP: f32 = 6.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const MIN_CLIP_PX_FOR_EDGES: f32 = 20.0;
 const SHORTEST_CLIP: Frames = 16;
-const HANDLE_RADIUS: f32 = 4.5;
 const HANDLE_REACH: f32 = 10.0;
-const FADE_FLAG_SIZE: f32 = 10.0;
 const GAIN_HANDLE_INSET: f32 = 7.0;
 const MIN_CLIP_PX_FOR_HANDLES: f32 = 36.0;
 const MIN_FADE_PX_FOR_SHAPE_HANDLE: f32 = 24.0;
@@ -140,15 +133,16 @@ struct ClipBox {
     right: f32,
     top: f32,
     height: f32,
+    title: f32,
 }
 
 impl ClipBox {
     fn wave_top(&self) -> f32 {
-        self.top + CLIP_TITLE_H + 2.0
+        self.top + self.title + 2.0
     }
 
     fn wave_height(&self) -> f32 {
-        self.height - CLIP_TITLE_H - 5.0
+        self.height - self.title - 5.0
     }
 }
 
@@ -175,12 +169,56 @@ impl Timeline<'_> {
         self.project.rate.max(1) as f64
     }
 
+    fn lanes_top(&self) -> f32 {
+        self.palette.scrollbar_height + self.palette.ruler_height
+    }
+
+    fn header_left(&self) -> f32 {
+        match self.palette.headers {
+            Side::Left => 0.0,
+            Side::Right => (self.width - self.palette.header_width).max(0.0),
+        }
+    }
+
+    fn header_right(&self) -> f32 {
+        self.header_left() + self.palette.header_width
+    }
+
+    fn lanes_left(&self) -> f32 {
+        match self.palette.headers {
+            Side::Left => self.palette.header_width,
+            Side::Right => 0.0,
+        }
+    }
+
+    fn lanes_right(&self) -> f32 {
+        self.lanes_left() + self.lanes_width()
+    }
+
+    fn in_header(&self, x: f32) -> bool {
+        x >= self.header_left() && x < self.header_right()
+    }
+
+    fn in_lanes(&self, x: f32) -> bool {
+        x >= self.lanes_left() && x <= self.lanes_right()
+    }
+
+    fn tool_button(&self, index: usize) -> Rectangle {
+        Rectangle::new(
+            Point::new(
+                self.header_left() + TOOLS_LEFT + index as f32 * (TOOL_BUTTON + TOOL_GAP),
+                (self.lanes_top() - TOOL_BUTTON) / 2.0,
+            ),
+            Size::new(TOOL_BUTTON, TOOL_BUTTON),
+        )
+    }
+
     fn x_of(&self, frames: f64) -> f32 {
-        HEADER_W + ((frames / self.rate() - self.view.scroll) * self.view.zoom) as f32
+        self.lanes_left() + ((frames / self.rate() - self.view.scroll) * self.view.zoom) as f32
     }
 
     fn frames_at(&self, x: f32) -> f64 {
-        (((x - HEADER_W) as f64 / self.view.zoom + self.view.scroll) * self.rate()).max(0.0)
+        (((x - self.lanes_left()) as f64 / self.view.zoom + self.view.scroll) * self.rate()).max(0.0)
     }
 
     fn height_of(&self, track: &Track) -> f32 {
@@ -211,14 +249,14 @@ impl Timeline<'_> {
 
     fn track_top(&self, index: usize) -> f32 {
         let above: f32 = self.project.tracks[..index].iter().map(|t| self.height_of(t)).sum();
-        LANES_TOP + above - self.view.scroll_y
+        self.lanes_top() + above - self.view.scroll_y
     }
 
     fn track_at(&self, y: f32) -> Option<usize> {
-        if y < LANES_TOP {
+        if y < self.lanes_top() {
             return None;
         }
-        let mut top = LANES_TOP - self.view.scroll_y;
+        let mut top = self.lanes_top() - self.view.scroll_y;
         for (i, track) in self.project.tracks.iter().enumerate() {
             let bottom = top + self.height_of(track);
             if y >= top && y < bottom {
@@ -232,7 +270,7 @@ impl Timeline<'_> {
     fn row_for_drag(&self, y: f32) -> usize {
         match self.track_at(y) {
             Some(i) => i,
-            None if y < LANES_TOP - self.view.scroll_y => 0,
+            None if y < self.lanes_top() - self.view.scroll_y => 0,
             None => self.project.tracks.len().saturating_sub(1),
         }
     }
@@ -242,8 +280,8 @@ impl Timeline<'_> {
         let (top, bottom) = (from.y.min(to.y), from.y.max(to.y));
         let mut inside = Vec::new();
         for (i, track) in self.project.tracks.iter().enumerate() {
-            let lane_top = self.track_top(i) + CLIP_PAD;
-            let lane_bottom = self.track_top(i) + self.height_of(track) - CLIP_PAD;
+            let lane_top = self.track_top(i) + self.palette.clip_padding;
+            let lane_bottom = self.track_top(i) + self.height_of(track) - self.palette.clip_padding;
             if lane_bottom < top || lane_top > bottom {
                 continue;
             }
@@ -305,9 +343,9 @@ impl Timeline<'_> {
         let top = self.track_top(index);
         let height = self.height_of(&self.project.tracks[index]);
         let corner = if height >= ROOMY_HEADER_H {
-            Point::new(16.0, top + height - 36.0)
+            Point::new(self.header_left() + 16.0, top + height - 36.0)
         } else {
-            Point::new(HEADER_W - 68.0, top + 9.0)
+            Point::new(self.header_right() - 68.0, top + 9.0)
         };
         Rectangle::new(corner, Size::new(28.0, 22.0))
     }
@@ -330,7 +368,10 @@ impl Timeline<'_> {
         let top = self.track_top(index);
         let height = self.height_of(&self.project.tracks[index]);
         let inset = if height >= ROOMY_HEADER_H { 9.0 } else { 5.0 };
-        Rectangle::new(Point::new(16.0, top + height - inset), Size::new(HEADER_W - 32.0, METER_THICKNESS))
+        Rectangle::new(
+            Point::new(self.header_left() + 16.0, top + height - inset),
+            Size::new(self.palette.header_width - 32.0, self.palette.meter_thickness),
+        )
     }
 
     fn collapse_button(&self, index: usize) -> Rectangle {
@@ -339,19 +380,19 @@ impl Timeline<'_> {
     }
 
     fn remove_button(&self, index: usize) -> Rectangle {
-        Rectangle::new(Point::new(HEADER_W - 34.0, self.track_top(index) + 8.0), Size::new(24.0, 24.0))
+        Rectangle::new(Point::new(self.header_right() - 34.0, self.track_top(index) + 8.0), Size::new(24.0, 24.0))
     }
 
     fn add_button(&self) -> Rectangle {
         Rectangle::new(
-            Point::new(0.0, self.track_top(self.project.tracks.len())),
-            Size::new(HEADER_W, ADD_ROW_H),
+            Point::new(self.header_left(), self.track_top(self.project.tracks.len())),
+            Size::new(self.palette.header_width, ADD_ROW_H),
         )
     }
 
     fn content_height(&self) -> f32 {
         let tracks: f32 = self.project.tracks.iter().map(|t| self.height_of(t)).sum();
-        LANES_TOP + tracks + ADD_ROW_H
+        self.lanes_top() + tracks + ADD_ROW_H
     }
 
     fn colour_of(&self, index: usize) -> Color {
@@ -362,14 +403,14 @@ impl Timeline<'_> {
     }
 
     fn track_header_at(&self, p: Point) -> Option<&Track> {
-        if p.x >= HEADER_W {
+        if !self.in_header(p.x) {
             return None;
         }
         self.track_at(p.y).map(|i| &self.project.tracks[i])
     }
 
     fn lanes_width(&self) -> f32 {
-        (self.width - HEADER_W).max(1.0)
+        (self.width - self.palette.header_width).max(1.0)
     }
 
     fn scrollbar_span(&self) -> f64 {
@@ -386,12 +427,12 @@ impl Timeline<'_> {
         let track = self.lanes_width();
         let seen = track as f64 / self.view.zoom;
         let width = ((seen / span) as f32 * track).clamp(MIN_THUMB_PX.min(track), track);
-        let left = HEADER_W + (self.view.scroll / span) as f32 * track;
-        (left.min(self.width - width), width)
+        let left = self.lanes_left() + (self.view.scroll / span) as f32 * track;
+        (left.min(self.lanes_right() - width), width)
     }
 
     fn scrolled_to_thumb_left(&self, left: f32, span: f64) -> View {
-        let scroll = ((left - HEADER_W) / self.lanes_width()) as f64 * span;
+        let scroll = ((left - self.lanes_left()) / self.lanes_width()) as f64 * span;
         View { scroll: self.within_span(scroll, self.view.zoom), ..self.view }
     }
 
@@ -400,8 +441,9 @@ impl Timeline<'_> {
         Some(ClipBox {
             left: self.x_of(clip.start as f64),
             right: self.x_of(clip.end() as f64),
-            top: self.track_top(index) + CLIP_PAD,
-            height: self.height_of(&self.project.tracks[index]) - CLIP_PAD * 2.0,
+            top: self.track_top(index) + self.palette.clip_padding,
+            height: self.height_of(&self.project.tracks[index]) - self.palette.clip_padding * 2.0,
+            title: self.palette.clip_title_height,
         })
     }
 
@@ -440,14 +482,14 @@ impl Timeline<'_> {
         }
         grips.push((Grip::FadeIn, fade_in_end));
         grips.push((Grip::FadeOut, fade_out_start));
-        let seen_left = shape.left.max(HEADER_W);
-        let seen_right = shape.right.min(self.width);
+        let seen_left = shape.left.max(self.lanes_left());
+        let seen_right = shape.right.min(self.lanes_right());
         grips.push((Grip::Gain, Point::new((seen_left + seen_right) / 2.0, shape.top + shape.height - GAIN_HANDLE_INSET)));
         grips
     }
 
     fn resize_grip_at(&self, p: Point) -> Option<&Track> {
-        if p.x >= HEADER_W {
+        if !self.in_header(p.x) {
             return None;
         }
         self.project.tracks.iter().enumerate().find_map(|(i, track)| {
@@ -457,21 +499,21 @@ impl Timeline<'_> {
     }
 
     fn hit(&self, p: Point) -> Hit<'_> {
-        if p.y < LANES_TOP {
-            return match (p.x >= HEADER_W, p.y < SCROLLBAR_H) {
+        if p.y < self.lanes_top() {
+            return match (!self.in_header(p.x), p.y < self.palette.scrollbar_height) {
                 (true, true) => Hit::Scrollbar,
                 (true, false) => Hit::Ruler,
                 (false, _) => Tool::ALL
                     .into_iter()
                     .enumerate()
-                    .find(|(i, _)| tool_button(*i).contains(p))
+                    .find(|(i, _)| self.tool_button(*i).contains(p))
                     .map_or(Hit::Nothing, |(_, tool)| Hit::Tool(tool)),
             };
         }
         if let Some(track) = self.resize_grip_at(p) {
             return Hit::Resize(track);
         }
-        if p.x < HEADER_W {
+        if self.in_header(p.x) {
             if let Some(i) = self.track_at(p.y) {
                 let track = &self.project.tracks[i];
                 if self.mute_button(i).contains(p) {
@@ -505,7 +547,7 @@ impl Timeline<'_> {
         };
         let track = &self.project.tracks[i];
         let top = self.track_top(i);
-        if p.y < top + CLIP_PAD || p.y > top + self.height_of(track) - CLIP_PAD {
+        if p.y < top + self.palette.clip_padding || p.y > top + self.height_of(track) - self.palette.clip_padding {
             return Hit::Lane;
         }
         let at = self.frames_at(p.x);
@@ -527,7 +569,7 @@ impl Timeline<'_> {
     }
 
     fn zoomed(&self, factor: f64, anchor_x: f32) -> View {
-        let anchor = (anchor_x - HEADER_W).max(0.0) as f64;
+        let anchor = (anchor_x - self.lanes_left()).max(0.0) as f64;
         let time = self.view.scroll + anchor / self.view.zoom;
         let zoom = (self.view.zoom * factor).clamp(MIN_ZOOM, View::max_zoom(self.project.rate));
         View { zoom, scroll: self.within_span(time - anchor / zoom, zoom), ..self.view }
@@ -647,7 +689,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     }
                     (_, Hit::Resize(track)) => {
                         let index = self.project.tracks.iter().position(|t| t.id == track.id);
-                        let top = index.map_or(LANES_TOP, |i| self.track_top(i));
+                        let top = index.map_or(self.lanes_top(), |i| self.track_top(i));
                         state.drag = Some(Drag::Resize { track: track.id, top });
                         None
                     }
@@ -696,7 +738,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             return (Captured, None);
                         }
                         *moving = true;
-                        let here = self.snap(self.frames_at(p.x.max(HEADER_W)), free);
+                        let here = self.snap(self.frames_at(p.x.clamp(self.lanes_left(), self.lanes_right())), free);
                         let range = (here != *anchor).then(|| (here.min(*anchor), here.max(*anchor)));
                         (Captured, (range != self.loop_range).then_some(Message::SetLoop(range)))
                     }
@@ -856,22 +898,23 @@ impl canvas::Program<Message> for Timeline<'_> {
         let p = self.palette;
         let content = self.cache.draw(renderer, bounds.size(), |frame| {
             let lanes = Rectangle::new(
-                Point::new(HEADER_W, LANES_TOP),
-                Size::new((bounds.width - HEADER_W).max(0.0), (bounds.height - LANES_TOP).max(0.0)),
+                Point::new(self.lanes_left(), self.lanes_top()),
+                Size::new(self.lanes_width(), (bounds.height - self.lanes_top()).max(0.0)),
             );
             frame.with_clip(lanes, |frame| self.draw_lanes(frame, lanes.size()));
-            let ruler = Rectangle::new(Point::new(HEADER_W, SCROLLBAR_H), Size::new(lanes.width, RULER_H));
-            let scrollbar = Rectangle::new(Point::new(HEADER_W, 0.0), Size::new(lanes.width, SCROLLBAR_H));
+            let ruler = Rectangle::new(Point::new(self.lanes_left(), self.palette.scrollbar_height), Size::new(lanes.width, self.palette.ruler_height));
+            let scrollbar = Rectangle::new(Point::new(self.lanes_left(), 0.0), Size::new(lanes.width, self.palette.scrollbar_height));
             frame.with_clip(scrollbar, |frame| self.draw_scrollbar(frame, scrollbar.size()));
             frame.with_clip(ruler, |frame| self.draw_ruler(frame, ruler.size()));
-            let headers = Rectangle::new(Point::new(0.0, LANES_TOP), Size::new(HEADER_W, lanes.height));
+            let headers =
+                Rectangle::new(Point::new(self.header_left(), self.lanes_top()), Size::new(p.header_width, lanes.height));
             frame.with_clip(headers, |frame| self.draw_headers(frame, headers.size()));
 
-            frame.fill_rectangle(Point::ORIGIN, Size::new(HEADER_W, LANES_TOP), p.panel);
+            frame.fill_rectangle(Point::new(self.header_left(), 0.0), Size::new(p.header_width, self.lanes_top()), p.panel);
             for (i, tool) in Tool::ALL.into_iter().enumerate() {
-                let button = tool_button(i);
+                let button = self.tool_button(i);
                 if tool == self.tool {
-                    let chosen = Path::new(|b| b.rounded_rectangle(button.position(), button.size(), 6.0.into()));
+                    let chosen = Path::new(|b| b.rounded_rectangle(button.position(), button.size(), p.corner.into()));
                     frame.fill(&chosen, p.hover);
                 }
                 frame.fill_text(Text {
@@ -879,45 +922,47 @@ impl canvas::Program<Message> for Timeline<'_> {
                     position: button.center(),
                     color: if tool == self.tool { p.text } else { p.text_dim },
                     size: 14.0.into(),
-                    font: theme::ICONS,
+                    font: icons::font(tool.icon()),
                     horizontal_alignment: alignment::Horizontal::Center,
                     vertical_alignment: alignment::Vertical::Center,
                     shaping: iced::widget::text::Shaping::Advanced,
                     ..Text::default()
                 });
             }
-            frame.fill_rectangle(Point::new(0.0, LANES_TOP - 1.0), Size::new(bounds.width, 1.0), p.line);
-            frame.fill_rectangle(Point::new(HEADER_W - 1.0, 0.0), Size::new(1.0, bounds.height), p.line);
+            frame.fill_rectangle(Point::new(0.0, self.lanes_top() - 1.0), Size::new(bounds.width, 1.0), p.line);
+            let divider = if p.headers == Side::Left { p.header_width - 1.0 } else { self.header_left() };
+            frame.fill_rectangle(Point::new(divider, 0.0), Size::new(1.0, bounds.height), p.line);
         });
 
         let mut overlay = Frame::new(renderer, bounds.size());
         if let Some((from, to)) = self.loop_range {
-            let left = self.x_of(from as f64).max(HEADER_W);
-            let right = self.x_of(to as f64).min(bounds.width);
+            let left = self.x_of(from as f64).max(self.lanes_left());
+            let right = self.x_of(to as f64).min(self.lanes_right());
             if right > left {
                 let width = right - left;
                 overlay.fill_rectangle(
-                    Point::new(left, SCROLLBAR_H),
-                    Size::new(width, RULER_H - 1.0),
+                    Point::new(left, self.palette.scrollbar_height),
+                    Size::new(width, self.palette.ruler_height - 1.0),
                     theme::mix(p.panel, p.accent, 0.28),
                 );
                 overlay.fill_rectangle(
-                    Point::new(left, LANES_TOP),
-                    Size::new(width, bounds.height - LANES_TOP),
+                    Point::new(left, self.lanes_top()),
+                    Size::new(width, bounds.height - self.lanes_top()),
                     theme::alpha(p.accent, 0.05),
                 );
                 for x in [left, right] {
                     overlay.fill_rectangle(
-                        Point::new(x.round() - 0.5, LANES_TOP),
-                        Size::new(1.0, bounds.height - LANES_TOP),
+                        Point::new(x.round() - 0.5, self.lanes_top()),
+                        Size::new(1.0, bounds.height - self.lanes_top()),
                         theme::alpha(p.accent, 0.45),
                     );
                 }
             }
         }
         if let Some(Drag::Marquee { from, to }) = &state.drag {
-            let corner = Point::new(from.x.min(to.x).max(HEADER_W), from.y.min(to.y).max(LANES_TOP));
-            let size = Size::new((from.x.max(to.x) - corner.x).max(0.0), (from.y.max(to.y) - corner.y).max(0.0));
+            let corner = Point::new(from.x.min(to.x).max(self.lanes_left()), from.y.min(to.y).max(self.lanes_top()));
+            let reach = from.x.max(to.x).min(self.lanes_right());
+            let size = Size::new((reach - corner.x).max(0.0), (from.y.max(to.y) - corner.y).max(0.0));
             overlay.fill_rectangle(corner, size, theme::alpha(p.accent, 0.08));
             overlay.stroke(
                 &Path::rectangle(corner, size),
@@ -927,7 +972,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         let free = state.modifiers.alt() || state.modifiers.shift();
         let slicing = match (&state.drag, self.tool, cursor.position_in(bounds)) {
             (Some(Drag::Slice { from, to }), _, _) => Some((*from, *to)),
-            (None, Tool::Razor, Some(at)) if at.x >= HEADER_W && at.y >= LANES_TOP => Some((at, at)),
+            (None, Tool::Razor, Some(at)) if self.in_lanes(at.x) && at.y >= self.lanes_top() => Some((at, at)),
             _ => None,
         };
         if let Some((from, to)) = slicing {
@@ -936,24 +981,24 @@ impl canvas::Program<Message> for Timeline<'_> {
             let aimed_row = rows.first().filter(|_| from == to).map(|(row, _)| *row);
             let (start, end) = match aimed_row {
                 Some(row) => {
-                    let top = self.track_top(row).max(LANES_TOP);
+                    let top = self.track_top(row).max(self.lanes_top());
                     let bottom = self.track_top(row) + self.height_of(&self.project.tracks[row]);
                     (Point::new(from.x, top), Point::new(from.x, bottom))
                 }
                 None => (from, to),
             };
-            if !rows.is_empty() && start.x >= HEADER_W && start.x == end.x {
+            if !rows.is_empty() && self.in_lanes(start.x) && start.x == end.x {
                 let upright = Size::new(1.0, (end.y - start.y).abs());
                 overlay.fill_rectangle(Point::new(start.x.round() - 0.5, start.y.min(end.y)), upright, p.accent);
-            } else if !rows.is_empty() && start.x >= HEADER_W {
+            } else if !rows.is_empty() && self.in_lanes(start.x) {
                 overlay.stroke(&Path::line(start, end), Stroke::default().with_color(p.accent).with_width(1.0));
             }
         }
         if let Some(from) = self.recording_from {
-            let left = self.x_of(from as f64).max(HEADER_W);
-            let right = self.x_of(self.playhead as f64).min(bounds.width);
+            let left = self.x_of(from as f64).max(self.lanes_left());
+            let right = self.x_of(self.playhead as f64).min(self.lanes_right());
             for (i, track) in self.project.tracks.iter().enumerate() {
-                let top = self.track_top(i).max(LANES_TOP);
+                let top = self.track_top(i).max(self.lanes_top());
                 let bottom = (self.track_top(i) + self.height_of(track)).min(bounds.height);
                 if self.armed.contains(&track.id) && right > left && bottom > top {
                     let taken = Size::new(right - left, bottom - top);
@@ -963,7 +1008,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         }
         for (i, track) in self.project.tracks.iter().enumerate() {
             let bar = self.meter_bar(i);
-            if !self.armed.contains(&track.id) || bar.y < LANES_TOP || bar.y > bounds.height {
+            if !self.armed.contains(&track.id) || bar.y < self.lanes_top() || bar.y > bounds.height {
                 continue;
             }
             let db = 20.0 * self.input_level.max(1e-6).log10();
@@ -982,15 +1027,26 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
         }
         let x = self.x_of(self.playhead as f64).round();
-        if x >= HEADER_W && x <= bounds.width {
-            overlay.fill_rectangle(Point::new(x - 0.5, SCROLLBAR_H), Size::new(1.0, bounds.height - SCROLLBAR_H), p.accent);
-            let cap = Path::new(|b| {
-                b.move_to(Point::new(x - 5.5, SCROLLBAR_H));
-                b.line_to(Point::new(x + 5.5, SCROLLBAR_H));
-                b.line_to(Point::new(x, SCROLLBAR_H + 9.0));
-                b.close();
-            });
-            overlay.fill(&cap, p.accent);
+        if self.in_lanes(x) {
+            let top = p.scrollbar_height;
+            let line = Size::new(p.playhead_width, bounds.height - top);
+            overlay.fill_rectangle(Point::new(x - p.playhead_width / 2.0, top), line, p.accent);
+            match p.playhead_cap {
+                PlayheadCap::Triangle => {
+                    let cap = Path::new(|b| {
+                        b.move_to(Point::new(x - PLAYHEAD_CAP / 2.0, top));
+                        b.line_to(Point::new(x + PLAYHEAD_CAP / 2.0, top));
+                        b.line_to(Point::new(x, top + PLAYHEAD_CAP_DROP));
+                        b.close();
+                    });
+                    overlay.fill(&cap, p.accent);
+                }
+                PlayheadCap::Square => {
+                    let cap = Size::new(PLAYHEAD_CAP, PLAYHEAD_CAP_DROP);
+                    overlay.fill_rectangle(Point::new(x - PLAYHEAD_CAP / 2.0, top), cap, p.accent);
+                }
+                PlayheadCap::None => {}
+            }
         }
         if let Some(Drag::Grip { clip, grip: Grip::Gain, .. }) = &state.drag {
             let handle = self
@@ -1093,7 +1149,7 @@ impl Timeline<'_> {
         }
 
         for (i, track) in self.project.tracks.iter().enumerate() {
-            let top = self.track_top(i) - LANES_TOP;
+            let top = self.track_top(i) - self.lanes_top();
             let height = self.height_of(track);
             if height <= 0.0 {
                 continue;
@@ -1112,29 +1168,29 @@ impl Timeline<'_> {
 
     fn draw_clip(&self, frame: &mut Frame, size: Size, clip: &Clip, lane_top: f32, lane_height: f32, colour: Color) {
         let p = self.palette;
-        let left = self.x_of(clip.start as f64) - HEADER_W;
-        let right = self.x_of(clip.end() as f64) - HEADER_W;
+        let left = self.x_of(clip.start as f64) - self.lanes_left();
+        let right = self.x_of(clip.end() as f64) - self.lanes_left();
         if right < 0.0 || left > size.width {
             return;
         }
         let selected = self.selection.contains(&clip.id);
-        let top = lane_top + CLIP_PAD;
-        let height = lane_height - CLIP_PAD * 2.0;
+        let top = lane_top + self.palette.clip_padding;
+        let height = lane_height - self.palette.clip_padding * 2.0;
         let shown_left = left.max(-8.0);
         let shown_right = right.min(size.width + 8.0);
         let shown_width = (shown_right - shown_left).max(1.0);
         let body = Path::new(|b| {
-            b.rounded_rectangle(Point::new(shown_left, top), Size::new(shown_width, height), 5.0.into());
+            b.rounded_rectangle(Point::new(shown_left, top), Size::new(shown_width, height), p.clip_corner.into());
         });
         let tint = if selected { 0.26 } else { 0.16 };
         frame.fill(&body, theme::mix(p.background, colour, tint));
         let title = Path::new(|b| {
-            b.rounded_rectangle(Point::new(shown_left, top), Size::new(shown_width, CLIP_TITLE_H), iced::border::top(5));
+            b.rounded_rectangle(Point::new(shown_left, top), Size::new(shown_width, p.clip_title_height), iced::border::top(p.clip_corner));
         });
         frame.fill(&title, theme::mix(p.background, colour, tint + 0.18));
 
-        let wave_top = top + CLIP_TITLE_H + 2.0;
-        let wave_height = height - CLIP_TITLE_H - 5.0;
+        let wave_top = top + self.palette.clip_title_height + 2.0;
+        let wave_height = height - self.palette.clip_title_height - 5.0;
         if wave_height > 4.0 {
             self.draw_waveform(frame, clip, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour);
         }
@@ -1148,20 +1204,20 @@ impl Timeline<'_> {
         self.draw_fades_and_grips(frame, clip, colour);
 
         let title_on_canvas = Rectangle::new(
-            Point::new(HEADER_W + shown_left, LANES_TOP + top),
-            Size::new(shown_width, CLIP_TITLE_H),
+            Point::new(self.lanes_left() + shown_left, self.lanes_top() + top),
+            Size::new(shown_width, self.palette.clip_title_height),
         );
-        let lanes_on_canvas = Rectangle::new(Point::new(HEADER_W, LANES_TOP), size);
+        let lanes_on_canvas = Rectangle::new(Point::new(self.lanes_left(), self.lanes_top()), size);
         if let Some(visible) = title_on_canvas.intersection(&lanes_on_canvas) {
             frame.with_clip(visible, |name_region| {
                 name_region.fill_text(Text {
                     content: clip.source.name.clone(),
                     position: Point::new(
-                        HEADER_W + left.max(0.0) + 8.0 - visible.x,
-                        title_on_canvas.y - visible.y + CLIP_TITLE_H / 2.0,
+                        self.lanes_left() + left.max(0.0) + 8.0 - visible.x,
+                        title_on_canvas.y - visible.y + self.palette.clip_title_height / 2.0,
                     ),
                     color: p.text,
-                    size: 13.0.into(),
+                    size: p.clip_title_size.into(),
                     font: p.medium,
                     vertical_alignment: alignment::Vertical::Center,
                     ..Text::default()
@@ -1262,7 +1318,7 @@ impl Timeline<'_> {
         let Some(shape) = self.clip_box(clip) else {
             return;
         };
-        let in_lanes = |at: Point| Point::new(at.x - HEADER_W, at.y - LANES_TOP);
+        let in_lanes = |at: Point| Point::new(at.x - self.lanes_left(), at.y - self.lanes_top());
         let curve_colour = theme::mix(colour, p.text, 0.55);
         for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
             if fade.len == 0 || shape.wave_height() < 8.0 {
@@ -1278,7 +1334,7 @@ impl Timeline<'_> {
             frame.stroke(&curve, Stroke::default().with_color(curve_colour).with_width(1.25));
         }
         let selected_body = theme::mix(p.background, colour, 0.26);
-        let on_screen = |at: &Point| at.x >= HEADER_W - HANDLE_REACH && at.x <= self.width + HANDLE_REACH;
+        let on_screen = |at: &Point| at.x >= self.lanes_left() - HANDLE_REACH && at.x <= self.lanes_right() + HANDLE_REACH;
         for (grip, at) in self.grips(clip).into_iter().filter(|(_, at)| on_screen(at)) {
             let at = in_lanes(at);
             match grip {
@@ -1293,19 +1349,19 @@ impl Timeline<'_> {
                     }
                     let flag = Path::new(|b| {
                         b.move_to(at);
-                        b.line_to(Point::new(at.x + FADE_FLAG_SIZE * inward, at.y));
-                        b.line_to(Point::new(at.x, at.y + FADE_FLAG_SIZE));
+                        b.line_to(Point::new(at.x + self.palette.fade_flag_size * inward, at.y));
+                        b.line_to(Point::new(at.x, at.y + self.palette.fade_flag_size));
                         b.close();
                     });
                     frame.fill(&flag, p.text);
                 }
                 Grip::ShapeIn | Grip::ShapeOut => {
-                    let ring = Path::circle(at, HANDLE_RADIUS);
+                    let ring = Path::circle(at, self.palette.handle_radius);
                     frame.fill(&ring, selected_body);
                     frame.stroke(&ring, Stroke::default().with_color(p.text).with_width(1.5));
                 }
                 Grip::Gain => {
-                    let dot = Path::circle(at, HANDLE_RADIUS);
+                    let dot = Path::circle(at, self.palette.handle_radius);
                     frame.fill(&dot, p.text);
                     frame.stroke(&dot, Stroke::default().with_color(p.background).with_width(1.5));
                 }
@@ -1334,7 +1390,7 @@ impl Timeline<'_> {
         }
         let (left, width) = self.thumb(span);
         let thumb = Path::new(|b| {
-            b.rounded_rectangle(Point::new(left - HEADER_W, 2.0), Size::new(width, size.height - 5.0), 4.0.into());
+            b.rounded_rectangle(Point::new(left - self.lanes_left(), 2.0), Size::new(width, size.height - 5.0), 4.0.into());
         });
         frame.fill(&thumb, theme::alpha(p.text, 0.13));
         frame.stroke(&thumb, Stroke::default().with_color(theme::alpha(p.text, 0.3)).with_width(1.0));
@@ -1362,7 +1418,7 @@ impl Timeline<'_> {
                 content: format!("{}", bars as i64 + 1),
                 position: Point::new(x.round() + 5.0, size.height / 2.0 - 1.0),
                 color: p.text_dim,
-                size: 11.0.into(),
+                size: p.ruler_text_size.into(),
                 font: p.mono,
                 vertical_alignment: alignment::Vertical::Center,
                 ..Text::default()
@@ -1389,9 +1445,10 @@ impl Timeline<'_> {
 
     fn draw_headers(&self, frame: &mut Frame, size: Size) {
         let p = self.palette;
+        let small_corner = (p.corner - 1.0).max(0.0);
         frame.fill_rectangle(Point::ORIGIN, size, p.panel);
         for (i, track) in self.project.tracks.iter().enumerate() {
-            let top = self.track_top(i) - LANES_TOP;
+            let top = self.track_top(i) - self.lanes_top();
             let height = self.height_of(track);
             if height <= 0.0 {
                 continue;
@@ -1421,7 +1478,7 @@ impl Timeline<'_> {
                     position: Point::new(indent + 6.0, top + 20.0),
                     color: p.text_dim,
                     size: 13.0.into(),
-                    font: theme::ICONS,
+                    font: icons::font(if track.collapsed { "chevron-right" } else { "chevron-down" }),
                     vertical_alignment: alignment::Vertical::Center,
                     ..Text::default()
                 });
@@ -1430,7 +1487,7 @@ impl Timeline<'_> {
                 content: shorten(&track.name, if height >= ROOMY_HEADER_H { 20 } else { 14 }),
                 position: Point::new(16.0 + indent + if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) { 14.0 } else { 0.0 }, top + 20.0),
                 color: if track.muted { p.text_dim } else { p.text },
-                size: 13.0.into(),
+                size: p.track_title_size.into(),
                 font: p.medium,
                 vertical_alignment: alignment::Vertical::Center,
                 ..Text::default()
@@ -1439,10 +1496,10 @@ impl Timeline<'_> {
             let remove = self.remove_button(i);
             frame.fill_text(Text {
                 content: icons::glyph("x").to_string(),
-                position: Point::new(remove.center_x(), remove.center_y() - LANES_TOP),
+                position: Point::new(remove.center_x() - self.header_left(), remove.center_y() - self.lanes_top()),
                 color: p.text_dim,
                 size: 14.0.into(),
-                font: theme::ICONS,
+                font: icons::font("x"),
                 horizontal_alignment: alignment::Horizontal::Center,
                 vertical_alignment: alignment::Vertical::Center,
                 shaping: iced::widget::text::Shaping::Advanced,
@@ -1451,12 +1508,12 @@ impl Timeline<'_> {
 
             let mute = self.mute_button(i);
             let shape = Path::new(|b| {
-                b.rounded_rectangle(Point::new(mute.x, mute.y - LANES_TOP), mute.size(), 5.0.into());
+                b.rounded_rectangle(Point::new(mute.x - self.header_left(), mute.y - self.lanes_top()), mute.size(), small_corner.into());
             });
             frame.fill(&shape, if track.muted { p.danger } else { p.raised });
             frame.fill_text(Text {
                 content: "M".into(),
-                position: Point::new(mute.center_x(), mute.center_y() - LANES_TOP),
+                position: Point::new(mute.center_x() - self.header_left(), mute.center_y() - self.lanes_top()),
                 color: if track.muted { p.on_accent } else { p.text_dim },
                 size: 11.5.into(),
                 font: p.semibold,
@@ -1468,10 +1525,17 @@ impl Timeline<'_> {
             let arm = self.arm_button(i);
             let armed = self.armed.contains(&track.id);
             let surround = Path::new(|b| {
-                b.rounded_rectangle(Point::new(arm.x, arm.y - LANES_TOP), arm.size(), 5.0.into());
+                b.rounded_rectangle(Point::new(arm.x - self.header_left(), arm.y - self.lanes_top()), arm.size(), small_corner.into());
             });
             frame.fill(&surround, p.raised);
-            let dot = Path::circle(Point::new(arm.center_x(), arm.center_y() - LANES_TOP), ARM_DOT_RADIUS);
+            let middle = Point::new(arm.center_x() - self.header_left(), arm.center_y() - self.lanes_top());
+            let dot = match p.arm_shape {
+                ArmShape::Dot => Path::circle(middle, ARM_DOT_RADIUS),
+                ArmShape::Square => Path::rectangle(
+                    Point::new(middle.x - ARM_DOT_RADIUS, middle.y - ARM_DOT_RADIUS),
+                    Size::new(ARM_DOT_RADIUS * 2.0, ARM_DOT_RADIUS * 2.0),
+                ),
+            };
             if armed {
                 frame.fill(&dot, p.danger);
             } else {
@@ -1481,12 +1545,12 @@ impl Timeline<'_> {
             let route = self.route_button(i);
             let wired = !track.sends.is_empty() || track.parent.is_some();
             let pad = Path::new(|b| {
-                b.rounded_rectangle(Point::new(route.x, route.y - LANES_TOP), route.size(), 5.0.into());
+                b.rounded_rectangle(Point::new(route.x, route.y - self.lanes_top()), route.size(), 5.0.into());
             });
             frame.fill(&pad, p.raised);
             frame.fill_text(Text {
                 content: "→".into(),
-                position: Point::new(route.center_x(), route.center_y() - LANES_TOP),
+                position: Point::new(route.center_x(), route.center_y() - self.lanes_top()),
                 color: if wired { p.accent } else { p.text_dim },
                 size: 13.0.into(),
                 font: p.medium,
@@ -1499,7 +1563,7 @@ impl Timeline<'_> {
         let add = self.add_button();
         frame.fill_text(Text {
             content: "+  Add track".into(),
-            position: Point::new(16.0, add.center_y() - LANES_TOP),
+            position: Point::new(16.0, add.center_y() - self.lanes_top()),
             color: p.text_dim,
             size: 12.5.into(),
             font: p.ui,
@@ -1507,13 +1571,6 @@ impl Timeline<'_> {
             ..Text::default()
         });
     }
-}
-
-fn tool_button(index: usize) -> Rectangle {
-    Rectangle::new(
-        Point::new(TOOLS_LEFT + index as f32 * (TOOL_BUTTON + TOOL_GAP), (LANES_TOP - TOOL_BUTTON) / 2.0),
-        Size::new(TOOL_BUTTON, TOOL_BUTTON),
-    )
 }
 
 fn shorten(name: &str, most: usize) -> String {
