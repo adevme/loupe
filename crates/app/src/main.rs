@@ -22,6 +22,7 @@ mod spinner;
 mod theme;
 mod theming;
 mod timeline;
+mod versions;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -191,6 +192,14 @@ pub enum Message {
     SendSidechain { from: TrackId, to: TrackId, sidechain: bool },
     LevelPressed(mixer::Level),
     OpenClip(ClipId),
+    OpenVersions,
+    UseVersion(String),
+    CheckForUpdates,
+    UpdateChecked(Result<Option<versions::Update>, String>),
+    InstallUpdate,
+    UpdateDownloaded(Result<PathBuf, String>),
+    UpdateLater,
+    CheckUpdatesOnStart(bool),
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
     TogglePreview(ClipId),
@@ -295,6 +304,7 @@ pub enum Overlay {
     Knobs(stockwin::Spot, usize),
     Stock,
     Matrix,
+    Versions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -383,6 +393,10 @@ struct App {
     templates: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     cache: Cache,
+    update_state: versions::UpdateState,
+    quiet_check: bool,
+    check_updates: bool,
+    update_dismissed: bool,
 }
 
 impl App {
@@ -458,6 +472,10 @@ impl App {
             templates: Vec::new(),
             recent: Vec::new(),
             cache: Cache::new(),
+            update_state: versions::UpdateState::default(),
+            quiet_check: false,
+            check_updates: settings.check_updates,
+            update_dismissed: false,
             racks: None,
             fx_was: 0,
             peeks: racks::Peeks::default(),
@@ -484,7 +502,13 @@ impl App {
             None => app.import(audio),
         };
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
-        (app, Task::batch([task, hunt]))
+        let look = if app.check_updates {
+            app.quiet_check = true;
+            app.check_for_updates()
+        } else {
+            Task::none()
+        };
+        (app, Task::batch([task, hunt, look]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -1261,6 +1285,31 @@ impl App {
                 }
             }
             Message::FolderReset => self.use_folder(None),
+            Message::OpenVersions => self.overlay = Overlay::Versions,
+            Message::UseVersion(version) => return self.switch_version(version),
+            Message::CheckForUpdates => return self.check_for_updates(),
+            Message::UpdateChecked(result) => {
+                let quiet = std::mem::replace(&mut self.quiet_check, false);
+                self.update_state = match result {
+                    Err(_) if quiet => versions::UpdateState::Idle,
+                    Ok(None) if quiet => versions::UpdateState::Idle,
+                    Ok(Some(update)) => versions::UpdateState::Found(update),
+                    Ok(None) => versions::UpdateState::Current,
+                    Err(why) => versions::UpdateState::Failed(format!("Could not check for updates: {why}.")),
+                };
+            }
+            Message::InstallUpdate => return self.install_update(),
+            Message::UpdateLater => self.update_dismissed = true,
+            Message::CheckUpdatesOnStart(on) => {
+                self.check_updates = on;
+                if let Err(why) = settings::save("check_updates", if on { "on" } else { "off" }) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
+            Message::UpdateDownloaded(result) => match result {
+                Ok(setup) => return self.run_setup(setup),
+                Err(why) => self.update_state = versions::UpdateState::Failed(format!("Could not download the update: {why}.")),
+            },
             Message::SettingsTab(tab) => self.settings_tab = tab,
             Message::ThemeChosen(name) => return self.use_theme(name),
             Message::ThemeFontLoaded => self.cache.clear(),
@@ -2041,6 +2090,16 @@ impl App {
             .into()
         } else if let Some(notice) = &self.notice {
             text(notice.as_str()).size(12).color(palette.text).into()
+        } else if let (versions::UpdateState::Found(update), false) = (&self.update_state, self.update_dismissed) {
+            row![
+                text(format!("Loupe {} is available.", update.version)).size(12).color(palette.text),
+                button(text("Update").size(12).font(palette.medium)).padding([3, 12]).style(move |_, status| palette.solid(status)).on_press(Message::InstallUpdate),
+                button(text("What's new").size(12)).padding([3, 10]).style(move |_, status| palette.ghost(status)).on_press(Message::OpenVersions),
+                button(text("Later").size(12)).padding([3, 10]).style(move |_, status| palette.ghost(status)).on_press(Message::UpdateLater),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
         } else if self.loading > 0 {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
             text(format!("Loading {what}…")).size(12).color(palette.text_dim).into()

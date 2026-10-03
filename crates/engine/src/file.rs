@@ -9,6 +9,8 @@ const HEADER: &str = "loupe project 1";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedProject {
+    pub saved_by: Option<String>,
+    pub skipped: Vec<String>,
     pub rate: u32,
     pub bpm: f64,
     pub master: f32,
@@ -70,6 +72,8 @@ impl SavedProject {
             project.sources.iter().position(|kept| Arc::ptr_eq(kept, &clip.source)).unwrap_or(0)
         };
         Self {
+            saved_by: Some(env!("CARGO_PKG_VERSION").to_string()),
+            skipped: Vec::new(),
             rate: project.rate,
             bpm: project.bpm,
             master: project.master,
@@ -160,7 +164,7 @@ impl SavedProject {
     }
 
     pub fn to_text(&self) -> String {
-        let mut out = format!("{HEADER}\nrate {}\nbpm {}\nmaster {}\nmaster_muted {}\n", self.rate, self.bpm, self.master, self.master_muted as u8);
+        let mut out = format!("{HEADER}\nsaved_by {}\nrate {}\nbpm {}\nmaster {}\nmaster_muted {}\n", env!("CARGO_PKG_VERSION"), self.rate, self.bpm, self.master, self.master_muted as u8);
         for path in &self.sources {
             out.push_str(&format!("source {}\n", path.display()));
         }
@@ -231,7 +235,7 @@ impl SavedProject {
             _ => return Err("this is not a Loupe project file".into()),
         }
         let mut saved =
-            Self { rate: 0, bpm: 120.0, master: 1.0, master_muted: false, sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
+            Self { saved_by: None, skipped: Vec::new(), rate: 0, bpm: 120.0, master: 1.0, master_muted: false, sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
         let mut held: Option<PathBuf> = None;
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -241,6 +245,7 @@ impl SavedProject {
                 "bpm" => saved.bpm = rest.parse().map_err(|_| bad("the tempo is not a number"))?,
                 "master" => saved.master = rest.parse().map_err(|_| bad("the master level is not a number"))?,
                 "master_muted" => saved.master_muted = rest.trim() != "0",
+                "saved_by" => saved.saved_by = Some(rest.trim().to_string()),
                 "source" => saved.sources.push(PathBuf::from(rest)),
                 "track" => {
                     let (fields, name) = rest.split_once("name=").ok_or_else(|| bad("the track has no name"))?;
@@ -333,7 +338,11 @@ impl SavedProject {
                     }
                     saved.tracks.last_mut().ok_or_else(|| bad("a clip comes before any track"))?.clips.push(clip);
                 }
-                other => return Err(bad(&format!("\"{other}\" is not something a project holds"))),
+                other => {
+                    if !saved.skipped.iter().any(|known| known == other) {
+                        saved.skipped.push(other.to_string());
+                    }
+                }
             }
         }
         if saved.rate == 0 {
@@ -568,7 +577,20 @@ mod tests {
         assert!(SavedProject::parse("hello").is_err());
         assert!(SavedProject::parse("loupe project 1\nbpm 120\n").is_err());
         assert!(SavedProject::parse("loupe project 1\nrate 48000\nclip source=0 start=0\n").is_err());
-        assert!(SavedProject::parse("loupe project 1\nrate 48000\nwidget 3\n").is_err());
+    }
+
+    #[test]
+    fn lines_from_a_newer_loupe_are_skipped_and_named() {
+        let saved = SavedProject::parse("loupe project 1\nsaved_by 9.2.0\nrate 48000\nwidget 3\nwidget 4\nsparkle on\n").unwrap();
+        assert_eq!(saved.saved_by.as_deref(), Some("9.2.0"));
+        assert_eq!(saved.skipped, ["widget", "sparkle"]);
+    }
+
+    #[test]
+    fn every_save_says_which_loupe_wrote_it() {
+        let text = SavedProject::capture(&Project::new(48_000), |_| None).to_text();
+        assert!(text.starts_with(&format!("loupe project 1\nsaved_by {}\n", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(SavedProject::parse(&text).unwrap().saved_by.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     }
 }
 

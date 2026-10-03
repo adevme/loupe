@@ -12,6 +12,7 @@ pub struct Settings {
     pub folder: Option<PathBuf>,
     pub mixer_open: bool,
     pub input: Option<String>,
+    pub check_updates: bool,
 }
 
 impl Settings {
@@ -25,6 +26,7 @@ impl Settings {
             folder: value_of("folder").map(PathBuf::from),
             mixer_open: value_of("mixer") == Some("open"),
             input: value_of("input").map(str::to_string),
+            check_updates: value_of("check_updates") != Some("off"),
         }
     }
 }

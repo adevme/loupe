@@ -25,8 +25,12 @@ impl App {
             Overlay::Export => self.centred(self.export_sheet()),
             Overlay::Clip(clip) => self.centred(self.clip_sheet(*clip)),
             Overlay::FileMenu => self.floating(self.under_the_bar(FILE_MENU_LEFT), self.file_menu()),
-            Overlay::HelpMenu => self.floating(self.under_the_bar(HELP_MENU_LEFT), self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
+            Overlay::HelpMenu => self.floating(self.under_the_bar(HELP_MENU_LEFT), self.menu(vec![
+                self.item("Versions and updates", "", Some(Message::OpenVersions)),
+                self.item("About", "", Some(Message::OpenAbout)),
+            ])),
             Overlay::About => self.centred(self.about_sheet()),
+            Overlay::Versions => self.centred(self.versions_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
