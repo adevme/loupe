@@ -35,6 +35,7 @@ pub struct Found {
     pub path: PathBuf,
     pub format: Format,
     pub vendor: Option<String>,
+    pub index: usize,
 }
 
 pub fn folders() -> Vec<(Format, PathBuf)> {
@@ -80,7 +81,7 @@ pub fn scan(places: &[(Format, PathBuf)]) -> Vec<Found> {
         look(*format, place, place, &mut found, 0);
     }
     found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then(a.format.cmp(&b.format)));
-    found.dedup_by(|a, b| a.path == b.path);
+    found.dedup_by(|a, b| a.path == b.path && a.index == b.index);
     found
 }
 
@@ -101,7 +102,13 @@ fn look(format: Format, root: &Path, at: &Path, found: &mut Vec<Found>, depth: u
                 .filter(|parent| *parent != root)
                 .and_then(|parent| parent.file_name())
                 .map(|name| name.to_string_lossy().into_owned());
-            found.push(Found { name, path, format, vendor });
+            if format == Format::Lv2 {
+                for (index, one) in crate::lv2::plugins_in(&path).into_iter().enumerate() {
+                    found.push(Found { name: one.name, path: path.clone(), format, vendor: vendor.clone(), index });
+                }
+                continue;
+            }
+            found.push(Found { name, path, format, vendor, index: 0 });
         } else if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             look(format, root, &path, found, depth + 1);
         }
