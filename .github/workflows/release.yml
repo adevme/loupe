@@ -92,6 +92,8 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - name: Build both chips
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
           cargo build --release --target aarch64-apple-darwin -p loupe -p loupe-host
           cargo build --release --target x86_64-apple-darwin -p loupe -p loupe-host
