@@ -143,6 +143,21 @@ impl App {
                 Some(if has_volume { Message::RemoveEnvelope(volume) } else { Message::AddEnvelope(volume) }),
             ),
         ];
+        if has_volume {
+            let armed = self.project.envelope(volume).and_then(|shape| shape.armed);
+            let touch = armed == Some(loupe_engine::Mode::Touch);
+            let latch = armed == Some(loupe_engine::Mode::Latch);
+            items.push(self.item(
+                if touch { "Stop writing on touch" } else { "Write on touch" },
+                "",
+                Some(Message::ArmEnvelope(volume, (!touch).then_some(loupe_engine::Mode::Touch))),
+            ));
+            items.push(self.item(
+                if latch { "Stop writing on latch" } else { "Write on latch" },
+                "",
+                Some(Message::ArmEnvelope(volume, (!latch).then_some(loupe_engine::Mode::Latch))),
+            ));
+        }
         items.push(self.item(
             "Put inside the track above",
             "",

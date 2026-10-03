@@ -185,3 +185,88 @@ mod tests {
         assert_eq!(shape.points.len(), 1);
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Writer {
+    pub target: Target,
+    pub mode: Mode,
+    pub from: Frames,
+    pub was: f32,
+    pub value: f32,
+}
+
+impl Envelope {
+    pub fn start_writing(&mut self, mode: Mode, at: Frames, value: f32) -> Writer {
+        let was = self.value_at(at).unwrap_or(value);
+        if at > 0 {
+            self.put(Point { at: at - 1, value: was, shape: Shape::Linear });
+        }
+        self.put(Point { at, value, shape: Shape::Linear });
+        Writer { target: self.target, mode, from: at, was, value }
+    }
+
+    pub fn go_on_writing(&mut self, writer: &mut Writer, at: Frames, value: f32) {
+        if at <= writer.from {
+            return;
+        }
+        self.clear_between(writer.from + 1, at);
+        self.put(Point { at, value, shape: Shape::Linear });
+        writer.value = value;
+    }
+
+    pub fn stop_writing(&mut self, writer: &Writer, at: Frames) {
+        if writer.mode != Mode::Touch {
+            return;
+        }
+        let at = at.max(writer.from + 1);
+        self.put(Point { at: at + 1, value: writer.was, shape: Shape::Linear });
+    }
+}
+
+#[cfg(test)]
+mod writing {
+    use super::*;
+
+    fn steady() -> Envelope {
+        let mut shape = Envelope::new(Target::MasterGain, 0.0, 1.0, 0.4);
+        shape.points.clear();
+        shape.put(Point { at: 0, value: 0.4, shape: Shape::Linear });
+        shape.put(Point { at: 1000, value: 0.4, shape: Shape::Linear });
+        shape
+    }
+
+    #[test]
+    fn touch_snaps_back_when_you_let_go() {
+        let mut shape = steady();
+        let mut writer = shape.start_writing(Mode::Touch, 200, 0.9);
+        for at in [250, 300] {
+            shape.go_on_writing(&mut writer, at, 0.9);
+        }
+        shape.stop_writing(&writer, 300);
+        assert_eq!(shape.value_at(100), Some(0.4), "before the move");
+        assert_eq!(shape.value_at(300), Some(0.9), "during the move");
+        assert_eq!(shape.value_at(600), Some(0.4), "after letting go");
+    }
+
+    #[test]
+    fn latch_holds_on_to_the_end() {
+        let mut shape = steady();
+        let mut writer = shape.start_writing(Mode::Latch, 200, 0.9);
+        for at in [250, 300, 500, 800] {
+            shape.go_on_writing(&mut writer, at, 0.9);
+        }
+        shape.stop_writing(&writer, 800);
+        assert_eq!(shape.value_at(100), Some(0.4), "before the move");
+        assert_eq!(shape.value_at(400), Some(0.9), "latch is still writing after you let go");
+        assert_eq!(shape.value_at(800), Some(0.9), "latch wrote right up to the stop");
+    }
+
+    #[test]
+    fn a_move_wipes_what_was_under_it() {
+        let mut shape = steady();
+        shape.put(Point { at: 400, value: 0.1, shape: Shape::Linear });
+        let mut writer = shape.start_writing(Mode::Latch, 300, 0.8);
+        shape.go_on_writing(&mut writer, 500, 0.8);
+        assert_eq!(shape.points.iter().filter(|point| point.at == 400).count(), 0);
+    }
+}

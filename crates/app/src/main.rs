@@ -176,6 +176,7 @@ pub enum Message {
     DropPoint { target: loupe_engine::Target, which: usize },
     AddEnvelope(loupe_engine::Target),
     RemoveEnvelope(loupe_engine::Target),
+    ArmEnvelope(loupe_engine::Target, Option<loupe_engine::Mode>),
     FxGrab(TrackId, usize),
     FxOver(usize),
     FxDrop,
@@ -333,6 +334,7 @@ struct App {
     peeks: racks::Peeks,
     stock: Option<stockwin::Window>,
     fx_drag: Option<(TrackId, usize, usize)>,
+    writing: Option<loupe_engine::Writer>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
     plugin_filter: String,
@@ -458,6 +460,7 @@ impl App {
             peeks: racks::Peeks::default(),
             stock: None,
             fx_drag: None,
+            writing: None,
             found: Vec::new(),
             scanning: true,
             plugin_filter: String::new(),
@@ -552,6 +555,7 @@ impl App {
                     self.engine.stop();
                     self.playing = false;
                     self.settle = SETTLE_TICKS;
+                    self.writing = None;
                 } else {
                     if let Some((from, _)) = self.loop_range {
                         self.seek(from);
@@ -563,6 +567,7 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                self.keep_writing();
                 if let Some(window) = self.stock.as_mut() {
                     window.tick();
                 }
@@ -643,7 +648,10 @@ impl App {
                 self.cache.clear();
             }
             Message::MoveClip { clip, track, start } => self.move_clips(clip, track, start),
-            Message::DragEnd => self.run = None,
+            Message::DragEnd => {
+                self.run = None;
+                self.stop_writing();
+            }
             Message::Split => self.split(),
             Message::Delete => {
                 let chosen: Vec<ClipId> = self.selection.iter().copied().collect();
@@ -861,7 +869,13 @@ impl App {
             }
             Message::TrackGain(track, db) => {
                 let gain = mixer::gain_from_db(db);
-                self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
+                let target = loupe_engine::Target::TrackGain(track);
+                match self.writing_to(target) {
+                    Some(mode) => self.write_point(target, gain, mode),
+                    None => {
+                        self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
+                    }
+                }
             }
             Message::SetTool(tool) => {
                 self.tool = tool;
@@ -944,7 +958,13 @@ impl App {
                 return unfocus();
             }
             Message::MasterPercent(percent) => {
-                self.edit(Some(Run::Master), Command::SetMasterGain(percent / 100.0));
+                let target = loupe_engine::Target::MasterGain;
+                match self.writing_to(target) {
+                    Some(mode) => self.write_point(target, percent / 100.0, mode),
+                    None => {
+                        self.edit(Some(Run::Master), Command::SetMasterGain(percent / 100.0));
+                    }
+                }
             }
             Message::ToggleMasterMute => {
                 self.edit(None, Command::ToggleMasterMute);
@@ -1042,6 +1062,11 @@ impl App {
             }
             Message::RemoveEnvelope(target) => {
                 self.edit(None, Command::RemoveEnvelope { target });
+            }
+            Message::ArmEnvelope(target, mode) => {
+                self.overlay = Overlay::None;
+                self.writing = None;
+                self.edit(None, Command::ArmEnvelope { target, mode });
             }
             Message::FxGrab(track, slot) => self.fx_drag = Some((track, slot, slot)),
             Message::FxOver(slot) => {
@@ -1264,6 +1289,20 @@ impl App {
         self.transact(run, |project| project.apply(command))
     }
 
+    fn remember(&mut self, before: Project, run: Option<Run>) {
+        if run.is_none() || run != self.run {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_STEPS {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.run = run;
+        self.dirty = true;
+        self.engine.set_project(&self.project);
+        self.cache.clear();
+    }
+
     fn transact(
         &mut self,
         run: Option<Run>,
@@ -1455,6 +1494,50 @@ impl App {
             stockwin::Spot::Clip(clip) => self.project.apply(Command::SetClipFxState { clip, slot, state }),
         };
         self.dirty = true;
+    }
+
+    fn writing_to(&self, target: loupe_engine::Target) -> Option<loupe_engine::Mode> {
+        if !self.playing {
+            return None;
+        }
+        self.project.envelope(target).and_then(|shape| shape.armed)
+    }
+
+    pub(crate) fn write_point(&mut self, target: loupe_engine::Target, value: f32, mode: loupe_engine::Mode) {
+        let at = self.playhead;
+        let mut writer = self.writing.filter(|held| held.target == target);
+        let before = self.project.clone();
+        match self.project.envelopes.iter_mut().find(|shape| shape.target == target) {
+            Some(shape) => match writer.as_mut() {
+                Some(writer) => shape.go_on_writing(writer, at, value),
+                None => writer = Some(shape.start_writing(mode, at, value)),
+            },
+            None => return,
+        }
+        self.writing = writer;
+        self.remember(before, Some(Run::Point(target)));
+    }
+
+    pub(crate) fn keep_writing(&mut self) {
+        let Some(writer) = self.writing else { return };
+        if writer.mode != loupe_engine::Mode::Latch || !self.playing {
+            return;
+        }
+        self.write_point(writer.target, writer.value, loupe_engine::Mode::Latch);
+    }
+
+    pub(crate) fn stop_writing(&mut self) {
+        let Some(writer) = self.writing.take() else { return };
+        let at = self.playhead;
+        let before = self.project.clone();
+        if let Some(shape) = self.project.envelopes.iter_mut().find(|shape| shape.target == writer.target) {
+            shape.stop_writing(&writer, at);
+        }
+        if writer.mode == loupe_engine::Mode::Latch {
+            self.writing = Some(writer);
+            return;
+        }
+        self.remember(before, None);
     }
 
     fn fx_shape(&self) -> u64 {
