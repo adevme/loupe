@@ -113,6 +113,7 @@ pub enum Message {
     Refresh,
     PaintMute { clip: ClipId, muted: bool },
     PaintDelete(ClipId),
+    TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
     Slice { at: Frames, tracks: Vec<TrackId> },
     TrackGain(TrackId, f32),
     TogglePool,
@@ -139,6 +140,7 @@ enum Run {
     TrackGain(TrackId),
     Master,
     Paint,
+    Trim(ClipId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -458,6 +460,14 @@ impl App {
                     self.selected = None;
                 }
                 self.edit(Some(Run::Paint), Command::DeleteClip(clip));
+            }
+            Message::TrimClip { clip, start, offset, len } => {
+                if let Some(track) = self.project.track_of(clip).map(|track| track.id) {
+                    self.transact(Some(Run::Trim(clip)), |project| {
+                        project.apply(Command::TrimClip { clip, offset, len })?;
+                        project.apply(Command::MoveClip { clip, track, start })
+                    });
+                }
             }
             Message::Slice { at, tracks } => {
                 let cuts: Vec<ClipId> = self

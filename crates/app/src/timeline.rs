@@ -25,6 +25,9 @@ const ROOMY_HEADER_H: f32 = 72.0;
 const TOOL_BUTTON: f32 = 26.0;
 const TOOL_GAP: f32 = 6.0;
 const TOOLS_LEFT: f32 = 12.0;
+const EDGE_GRIP: f32 = 6.0;
+const MIN_CLIP_PX_FOR_EDGES: f32 = 20.0;
+const SHORTEST_CLIP: Frames = 16;
 const HANDLE_RADIUS: f32 = 4.5;
 const HANDLE_REACH: f32 = 10.0;
 const FADE_FLAG_SIZE: f32 = 10.0;
@@ -99,6 +102,7 @@ enum Drag {
     Resize { track: TrackId, top: f32 },
     Scroll { grab_x: f32, span: f64 },
     Slice { at: Frames, from_y: f32, to_y: f32 },
+    Trim { clip: ClipId, edge: Edge },
     Paint { muted: Option<bool>, touched: Vec<ClipId> },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
 }
@@ -138,6 +142,7 @@ enum Hit<'a> {
     Remove(&'a Track),
     AddTrack,
     Grip(&'a Clip, Grip),
+    Edge(&'a Clip, Edge),
     Clip(&'a Clip),
     Lane,
     Nothing,
@@ -382,9 +387,20 @@ impl Timeline<'_> {
             return Hit::Lane;
         }
         let at = self.frames_at(p.x);
-        match track.clips.iter().rev().find(|c| at >= c.start as f64 && at < c.end() as f64) {
-            Some(clip) => Hit::Clip(clip),
-            None => Hit::Lane,
+        let Some(clip) = track.clips.iter().rev().find(|c| at >= c.start as f64 && at < c.end() as f64) else {
+            return Hit::Lane;
+        };
+        let left = self.x_of(clip.start as f64);
+        let right = self.x_of(clip.end() as f64);
+        if self.tool != Tool::Pencil || right - left < MIN_CLIP_PX_FOR_EDGES {
+            return Hit::Clip(clip);
+        }
+        if p.x - left <= EDGE_GRIP {
+            Hit::Edge(clip, Edge::In)
+        } else if right - p.x <= EDGE_GRIP {
+            Hit::Edge(clip, Edge::Out)
+        } else {
+            Hit::Clip(clip)
         }
     }
 
@@ -443,7 +459,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     return (Ignored, None);
                 };
                 let message = match self.hit(p) {
-                    Hit::Clip(clip) | Hit::Grip(clip, _) => Some(Message::DeleteClip(clip.id)),
+                    Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Edge(clip, _) => Some(Message::DeleteClip(clip.id)),
                     _ => self.track_header_at(p).map(|track| Message::TrackMenu {
                         track: track.id,
                         at: Point::new(bounds.x + p.x, bounds.y + p.y),
@@ -507,6 +523,10 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let pull = EndlessDrag::start(p, !grip.moves_sideways());
                         state.drag = Some(Drag::Grip { clip: clip.id, grip, pull, curve_at_grab, db_at_grab });
                         None
+                    }
+                    (_, Hit::Edge(clip, edge)) => {
+                        state.drag = Some(Drag::Trim { clip: clip.id, edge });
+                        Some(Message::Select(Some(clip.id)))
                     }
                     (_, Hit::Clip(clip)) => {
                         state.drag = Some(Drag::Clip {
@@ -585,6 +605,28 @@ impl canvas::Program<Message> for Timeline<'_> {
                         };
                         (Captured, message)
                     }
+                    Drag::Trim { clip, edge } => {
+                        let Some(clip) = self.project.clip(*clip) else {
+                            return (Captured, None);
+                        };
+                        let at = self.snap(self.frames_at(p.x), free);
+                        let recorded = clip.source.frames.len() as Frames;
+                        let (start, offset, len) = match edge {
+                            Edge::In => {
+                                let earliest = clip.start.saturating_sub(clip.offset);
+                                let latest = clip.end().saturating_sub(SHORTEST_CLIP).max(earliest);
+                                let start = at.clamp(earliest, latest);
+                                (start, clip.offset + start - clip.start, clip.end() - start)
+                            }
+                            Edge::Out => {
+                                let longest = recorded.saturating_sub(clip.offset).max(clip.len);
+                                let end = at.clamp(clip.start + SHORTEST_CLIP.min(clip.len), clip.start + longest);
+                                (clip.start, clip.offset, end - clip.start)
+                            }
+                        };
+                        let changed = start != clip.start || len != clip.len;
+                        (Captured, changed.then_some(Message::TrimClip { clip: clip.id, start, offset, len }))
+                    }
                     Drag::Slice { to_y, .. } => {
                         *to_y = p.y;
                         (Captured, Some(Message::Refresh))
@@ -618,7 +660,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
                 Some(Drag::Range { anchor, moving: false, .. }) => (Captured, Some(Message::RulerClicked(anchor))),
-                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. }) => {
+                Some(Drag::Clip { moving: true, .. } | Drag::Grip { .. } | Drag::Paint { .. } | Drag::Trim { .. }) => {
                     (Captured, Some(Message::DragEnd))
                 }
                 Some(Drag::Slice { at, from_y, to_y }) if !self.project.tracks.is_empty() => {
@@ -781,6 +823,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             Some(Drag::Clip { moving: true, .. }) => return mouse::Interaction::Grabbing,
             Some(Drag::Resize { .. }) => return mouse::Interaction::ResizingVertically,
             Some(Drag::Grip { grip, .. }) => return grip.pointer(),
+            Some(Drag::Trim { .. }) => return mouse::Interaction::ResizingHorizontally,
             _ => {}
         }
         match (self.tool, cursor.position_in(bounds).map(|p| self.hit(p))) {
@@ -789,6 +832,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
             (Tool::Mute | Tool::Delete, Some(Hit::Clip(_) | Hit::Grip(..))) => mouse::Interaction::Pointer,
             (Tool::Pencil, Some(Hit::Grip(_, grip))) => grip.pointer(),
+            (_, Some(Hit::Edge(..))) => mouse::Interaction::ResizingHorizontally,
             (Tool::Pencil, Some(Hit::Clip(_))) => mouse::Interaction::Grab,
             _ => mouse::Interaction::default(),
         }
