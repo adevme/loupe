@@ -171,6 +171,11 @@ pub enum Message {
     AddClipPlugin(ClipId, usize),
     RemoveClipPlugin(ClipId, usize),
     BypassClipPlugin(ClipId, usize),
+    PutPoint { target: loupe_engine::Target, at: Frames, value: f32 },
+    DragPoint { target: loupe_engine::Target, which: usize, at: Frames, value: f32 },
+    DropPoint { target: loupe_engine::Target, which: usize },
+    AddEnvelope(loupe_engine::Target),
+    RemoveEnvelope(loupe_engine::Target),
     FxGrab(TrackId, usize),
     FxOver(usize),
     FxDrop,
@@ -264,6 +269,7 @@ enum Run {
     Paint,
     Trim(ClipId),
     Send(TrackId, TrackId),
+    Point(loupe_engine::Target),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1016,6 +1022,26 @@ impl App {
                     .map(|fx| !fx.bypassed)
                     .unwrap_or(false);
                 self.edit(None, Command::BypassClipFx { clip, slot, bypassed });
+            }
+            Message::PutPoint { target, at, value } => {
+                let point = loupe_engine::Point { at, value, shape: loupe_engine::Shape::Linear };
+                self.edit(Some(Run::Point(target)), Command::PutPoint { target, point });
+            }
+            Message::DragPoint { target, which, at, value } => {
+                let shape = self.project.envelope(target).and_then(|found| found.points.get(which)).map(|point| point.shape);
+                let shape = shape.unwrap_or(loupe_engine::Shape::Linear);
+                self.edit(Some(Run::Point(target)), Command::DropPoint { target, which });
+                let point = loupe_engine::Point { at, value, shape };
+                self.edit(Some(Run::Point(target)), Command::PutPoint { target, point });
+            }
+            Message::DropPoint { target, which } => {
+                self.edit(None, Command::DropPoint { target, which });
+            }
+            Message::AddEnvelope(target) => {
+                self.edit(None, Command::AddEnvelope { target });
+            }
+            Message::RemoveEnvelope(target) => {
+                self.edit(None, Command::RemoveEnvelope { target });
             }
             Message::FxGrab(track, slot) => self.fx_drag = Some((track, slot, slot)),
             Message::FxOver(slot) => {

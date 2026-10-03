@@ -9,6 +9,7 @@ use crate::pointer::EndlessDrag;
 use crate::theme::{self, ArmShape, Palette, PlayheadCap, Side};
 use crate::{icons, Message};
 
+const LANE_HEIGHT: f32 = 54.0;
 const INDENT_W: f32 = 14.0;
 const MIN_THUMB_PX: f32 = 28.0;
 const SONG_SPAN_HEADROOM: f64 = 1.2;
@@ -116,6 +117,7 @@ enum Drag {
     Marquee { from: Point, to: Point },
     Trim { clip: ClipId, edge: Edge },
     Paint { muted: Option<bool>, touched: Vec<ClipId> },
+    Point { target: loupe_engine::Target, which: usize },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
 }
 
@@ -160,6 +162,7 @@ enum Hit<'a> {
     Grip(&'a Clip, Grip),
     Edge(&'a Clip, Edge),
     Clip(&'a Clip),
+    Envelope(loupe_engine::Target, Option<usize>, Frames, f32),
     Lane,
     Nothing,
 }
@@ -225,7 +228,35 @@ impl Timeline<'_> {
         if self.hidden(track) {
             return 0.0;
         }
+        self.clips_height(track) + self.lanes_of(track).len() as f32 * LANE_HEIGHT
+    }
+
+    fn clips_height(&self, track: &Track) -> f32 {
+        if self.hidden(track) {
+            return 0.0;
+        }
         self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height)
+    }
+
+    fn lanes_of(&self, track: &Track) -> Vec<&loupe_engine::Envelope> {
+        if self.hidden(track) {
+            return Vec::new();
+        }
+        self.project
+            .envelopes
+            .iter()
+            .filter(|shape| shape.lane_open && self.belongs(shape.target, track))
+            .collect()
+    }
+
+    fn belongs(&self, target: loupe_engine::Target, track: &Track) -> bool {
+        if target.on_track() == Some(track.id) {
+            return true;
+        }
+        match target.on_clip() {
+            Some(clip) => track.clips.iter().any(|kept| kept.id == clip),
+            None => false,
+        }
     }
 
     fn hidden(&self, track: &Track) -> bool {
@@ -547,6 +578,9 @@ impl Timeline<'_> {
         };
         let track = &self.project.tracks[i];
         let top = self.track_top(i);
+        if let Some(found) = self.envelope_at(i, p) {
+            return found;
+        }
         if p.y < top + self.palette.clip_padding || p.y > top + self.height_of(track) - self.palette.clip_padding {
             return Hit::Lane;
         }
@@ -623,6 +657,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                     return (Ignored, None);
                 };
                 let message = match self.hit(p) {
+                    Hit::Envelope(target, Some(which), ..) => Some(Message::DropPoint { target, which }),
+                    Hit::Envelope(..) => None,
                     Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Edge(clip, _) => Some(Message::DeleteClip(clip.id)),
                     _ => self.track_header_at(p).map(|track| Message::TrackMenu {
                         track: track.id,
@@ -656,6 +692,17 @@ impl canvas::Program<Message> for Timeline<'_> {
                 }
                 let message = match (self.tool, self.hit(p)) {
                     (_, Hit::Tool(tool)) => Some(Message::SetTool(tool)),
+                    (_, Hit::Envelope(target, near, at, value)) => {
+                        let which = match near {
+                            Some(which) => which,
+                            None => {
+                                state.drag = Some(Drag::Point { target, which: usize::MAX });
+                                return (Captured, Some(Message::PutPoint { target, at, value }));
+                            }
+                        };
+                        state.drag = Some(Drag::Point { target, which });
+                        Some(Message::Refresh)
+                    }
                     (Tool::Razor, Hit::Clip(_) | Hit::Grip(..) | Hit::Lane) => {
                         state.drag = Some(Drag::Slice { from: p, to: p });
                         Some(Message::Refresh)
@@ -733,6 +780,30 @@ impl canvas::Program<Message> for Timeline<'_> {
                     return (Ignored, aiming.then_some(Message::Refresh));
                 };
                 match drag {
+                    Drag::Point { target, which } => {
+                        let target = *target;
+                        let Some(shape) = self.project.envelope(target) else {
+                            return (Captured, None);
+                        };
+                        let offset = self.lane_offset(target);
+                        let at = (self.frames_at(p.x).max(0.0) as Frames).saturating_sub(offset);
+                        let Some(top) = self.lane_top_of(target) else {
+                            return (Captured, None);
+                        };
+                        let inset = 7.0;
+                        let span = (LANE_HEIGHT - inset * 2.0).max(1.0);
+                        let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
+                        let value = shape.lowest + reach * (1.0 - ((p.y - top - inset) / span).clamp(0.0, 1.0));
+                        if *which == usize::MAX {
+                            *which = shape.points.iter().position(|point| point.at == at).unwrap_or(usize::MAX);
+                        }
+                        if *which == usize::MAX {
+                            return (Captured, None);
+                        }
+                        let moving = *which;
+                        *which = shape.points.iter().position(|point| point.at >= at).unwrap_or(shape.points.len() - 1);
+                        (Captured, Some(Message::DragPoint { target, which: moving, at, value }))
+                    }
                     Drag::Range { anchor, origin, moving } => {
                         if !*moving && p.distance(*origin) < DRAG_THRESHOLD {
                             return (Captured, None);
@@ -1159,11 +1230,139 @@ impl Timeline<'_> {
             }
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
             let track_colour = if track.muted { p.text_faint } else { self.colour_of(i) };
+            let clips_height = self.clips_height(track);
             for clip in &track.clips {
                 let colour = if clip.muted { p.text_faint } else { track_colour };
-                self.draw_clip(frame, size, clip, top, height, colour);
+                self.draw_clip(frame, size, clip, top, clips_height, colour);
+            }
+            let mut lane_top = top + clips_height;
+            for shape in self.lanes_of(track) {
+                self.draw_envelope(frame, size, shape, lane_top);
+                lane_top += LANE_HEIGHT;
             }
         }
+    }
+
+    fn envelope_at(&self, index: usize, p: Point) -> Option<Hit<'_>> {
+        let track = &self.project.tracks[index];
+        let mut top = self.track_top(index) + self.clips_height(track);
+        for shape in self.lanes_of(track) {
+            if p.y >= top && p.y < top + LANE_HEIGHT {
+                let inset = 7.0;
+                let span = (LANE_HEIGHT - inset * 2.0).max(1.0);
+                let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
+                let value = shape.lowest + reach * (1.0 - ((p.y - top - inset) / span).clamp(0.0, 1.0));
+                let offset = self.lane_offset(shape.target);
+                let at = (self.frames_at(p.x).max(0.0) as Frames).saturating_sub(offset);
+                let near = shape.points.iter().position(|point| {
+                    let seen = Point::new(self.x_of((point.at + offset) as f64), {
+                        top + inset + span * (1.0 - (point.value - shape.lowest) / reach)
+                    });
+                    seen.distance(p) <= HANDLE_REACH
+                });
+                return Some(Hit::Envelope(shape.target, near, at, value));
+            }
+            top += LANE_HEIGHT;
+        }
+        None
+    }
+
+    fn lane_top_of(&self, target: loupe_engine::Target) -> Option<f32> {
+        for (i, track) in self.project.tracks.iter().enumerate() {
+            let mut top = self.track_top(i) + self.clips_height(track);
+            for shape in self.lanes_of(track) {
+                if shape.target == target {
+                    return Some(top);
+                }
+                top += LANE_HEIGHT;
+            }
+        }
+        None
+    }
+
+    fn lane_label(&self, target: loupe_engine::Target) -> String {
+        use loupe_engine::Target;
+        let track_name = |want: TrackId| {
+            self.project.tracks.iter().find(|t| t.id == want).map(|t| t.name.clone()).unwrap_or_default()
+        };
+        match target {
+            Target::MasterGain => "Master volume".into(),
+            Target::TrackGain(_) => "Volume".into(),
+            Target::SendGain { to, .. } => format!("Send to {}", track_name(to)),
+            Target::TrackFx { slot, knob, track } => {
+                let name = self
+                    .project
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == track)
+                    .and_then(|t| t.fx.get(slot))
+                    .map(|fx| fx.name.clone())
+                    .unwrap_or_default();
+                format!("{name} knob {knob}")
+            }
+            Target::ClipGain(_) => "Clip gain".into(),
+            Target::ClipFx { clip, slot, knob } => {
+                let name = self
+                    .project
+                    .clip(clip)
+                    .and_then(|found| found.fx.get(slot))
+                    .map(|fx| fx.name.clone())
+                    .unwrap_or_default();
+                format!("Clip {name} knob {knob}")
+            }
+        }
+    }
+
+    fn lane_offset(&self, target: loupe_engine::Target) -> Frames {
+        match target.on_clip().and_then(|id| self.project.clip(id)) {
+            Some(clip) => clip.start,
+            None => 0,
+        }
+    }
+
+    fn draw_envelope(&self, frame: &mut Frame, size: Size, shape: &loupe_engine::Envelope, top: f32) {
+        let p = self.palette;
+        frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, LANE_HEIGHT), theme::mix(p.background, p.panel, 0.5));
+        frame.fill_rectangle(Point::new(0.0, top + LANE_HEIGHT - 1.0), Size::new(size.width, 1.0), p.line);
+        let inset = 7.0;
+        let span = (LANE_HEIGHT - inset * 2.0).max(1.0);
+        let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
+        let y_of = |value: f32| top + inset + span * (1.0 - (value - shape.lowest) / reach);
+        let offset = self.lane_offset(shape.target);
+        let x_of = |at: Frames| self.x_of((at + offset) as f64) - self.lanes_left();
+        let mut line = iced::widget::canvas::path::Builder::new();
+        let mut started = false;
+        let mut step = 0.0f32;
+        while step <= size.width {
+            let at = self.frames_at(step + self.lanes_left()).max(0.0) as Frames;
+            let value = shape.value_at(at.saturating_sub(offset)).unwrap_or(shape.lowest);
+            let at = Point::new(step, y_of(value));
+            if started {
+                line.line_to(at);
+            } else {
+                line.move_to(at);
+                started = true;
+            }
+            step += 2.0;
+        }
+        if started {
+            frame.stroke(&line.build(), Stroke::default().with_color(p.accent).with_width(1.6));
+        }
+        for point in &shape.points {
+            let at = Point::new(x_of(point.at), y_of(point.value));
+            if at.x < -6.0 || at.x > size.width + 6.0 {
+                continue;
+            }
+            frame.fill(&Path::circle(at, 3.5), p.accent);
+        }
+        frame.fill_text(Text {
+            content: self.lane_label(shape.target),
+            position: Point::new(6.0, top + 4.0),
+            color: p.text_dim,
+            size: 10.5.into(),
+            font: p.medium,
+            ..Text::default()
+        });
     }
 
     fn draw_clip(&self, frame: &mut Frame, size: Size, clip: &Clip, lane_top: f32, lane_height: f32, colour: Color) {

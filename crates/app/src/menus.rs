@@ -131,10 +131,17 @@ impl App {
             .position(|t| t.id == track)
             .filter(|i| *i > 0)
             .map(|i| self.project.tracks[i - 1].id);
+        let volume = loupe_engine::Target::TrackGain(track);
+        let has_volume = self.project.envelope(volume).is_some();
         let mut items = vec![
             self.item("Rename", "", Some(Message::StartRename(track))),
             self.item("Change colour", "", Some(Message::StartColour(track))),
             self.item("Duplicate", "", Some(Message::DuplicateTrack(track))),
+            self.item(
+                if has_volume { "Remove the volume envelope" } else { "Automate volume" },
+                "",
+                Some(if has_volume { Message::RemoveEnvelope(volume) } else { Message::AddEnvelope(volume) }),
+            ),
         ];
         items.push(self.item(
             "Put inside the track above",
