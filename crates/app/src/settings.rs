@@ -10,6 +10,7 @@ pub struct Settings {
     pub scale: f64,
     pub mixer_height: Option<f32>,
     pub folder: Option<PathBuf>,
+    pub mixer_open: bool,
 }
 
 impl Settings {
@@ -21,6 +22,7 @@ impl Settings {
             scale: value_of("scale").and_then(|value| value.parse().ok()).map_or(1.0, clamp_scale),
             mixer_height: value_of("mixer_height").and_then(|value| value.parse().ok()),
             folder: value_of("folder").map(PathBuf::from),
+            mixer_open: value_of("mixer") == Some("open"),
         }
     }
 }

@@ -301,7 +301,7 @@ impl App {
             overlay: Overlay::None,
             entry: String::new(),
             entry_problem: None,
-            mixer_open: false,
+            mixer_open: settings.mixer_open,
             mixer_height: settings.mixer_height.unwrap_or(mixer::MIXER_HEIGHT).max(mixer::SHORTEST_MIXER),
             resizing_mixer: false,
             folder: settings.folder.clone(),
@@ -593,7 +593,10 @@ impl App {
                     self.heights.insert(copy, height);
                 }
             }
-            Message::ToggleMixer => self.mixer_open = !self.mixer_open,
+            Message::ToggleMixer => {
+                self.mixer_open = !self.mixer_open;
+                let _ = settings::save("mixer", if self.mixer_open { "open" } else { "closed" });
+            }
             Message::MixerGrabbed => self.resizing_mixer = true,
             Message::MixerDragged(pointer_y) => {
                 let below = if self.status().is_some() { STATUS_HEIGHT + 1.0 } else { 0.0 };
