@@ -12,3 +12,6 @@ opt-level = 3
 
 [profile.dev.package.loupe-stock]
 opt-level = 3
+
+[patch.crates-io]
+iced_graphics = { path = "vendor/iced_graphics" }

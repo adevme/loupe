@@ -1691,8 +1691,6 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba25a18cfa6d5cc160aca7e1b34f73ccdff21680fa8702168c09739767b6c66f"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
