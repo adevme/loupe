@@ -1,10 +1,23 @@
 use crate::model::{Clip, ClipId, Frames, Project};
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
-    render_choice(project, pos, out, None);
+    mix_tracks(project, pos, out, None);
+    scale(out, project.master, project.master);
 }
 
-pub fn render_choice(project: &Project, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
+pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
+    if from == 1.0 && to == 1.0 {
+        return;
+    }
+    let step = (to - from) / out.len().max(1) as f32;
+    for (i, frame) in out.iter_mut().enumerate() {
+        let level = from + step * (i + 1) as f32;
+        frame[0] *= level;
+        frame[1] *= level;
+    }
+}
+
+pub fn mix_tracks(project: &Project, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
     out.fill([0.0; 2]);
     let end = pos + out.len() as Frames;
     for track in &project.tracks {
@@ -40,12 +53,6 @@ pub fn render_choice(project: &Project, pos: Frames, out: &mut [[f32; 2]], only:
                 clip,
                 first + fade_out_from as Frames,
             );
-        }
-    }
-    if project.master != 1.0 {
-        for frame in out.iter_mut() {
-            frame[0] *= project.master;
-            frame[1] *= project.master;
         }
     }
 }
@@ -244,11 +251,18 @@ mod tests {
         clip(&mut p, b, counting(100), 0);
         p.apply(Command::SetTrackMuted { track: a, muted: true }).unwrap();
         let mut out = vec![[9.0; 2]; 100];
-        render_choice(&p, 0, &mut out, Some(wanted));
+        mix_tracks(&p, 0, &mut out, Some(wanted));
         assert_eq!(out[10], [10.0, -10.0]);
         p.apply(Command::SetClipMuted { clip: wanted, muted: true }).unwrap();
-        render_choice(&p, 0, &mut out, Some(wanted));
+        mix_tracks(&p, 0, &mut out, Some(wanted));
         assert_eq!(out[10], [0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_level_change_glides_instead_of_stepping() {
+        let mut out = vec![[1.0, 1.0]; 4];
+        scale(&mut out, 1.0, 0.0);
+        assert_eq!(out, vec![[0.75, 0.75], [0.5, 0.5], [0.25, 0.25], [0.0, 0.0]]);
     }
 
     #[test]

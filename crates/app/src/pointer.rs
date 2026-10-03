@@ -69,33 +69,34 @@ mod windows {
     }
 }
 
-const LEASH_PX: f32 = 40.0;
-const HOME_SLACK_PX: f32 = 1.5;
-
 pub struct EndlessDrag {
     origin: Point,
     last: Point,
     travel_up: f32,
-    awaiting_return: bool,
     anchor: Option<Anchor>,
 }
 
 impl EndlessDrag {
     pub fn start(at: Point, hold_pointer: bool) -> Self {
         let anchor = if hold_pointer { Anchor::here() } else { None };
-        Self { origin: at, last: at, travel_up: 0.0, awaiting_return: false, anchor }
+        Self { origin: at, last: at, travel_up: 0.0, anchor }
     }
 
     pub fn moved(&mut self, to: Point) -> Option<f32> {
-        if self.awaiting_return && to.distance(self.origin) <= HOME_SLACK_PX {
-            self.awaiting_return = false;
+        let Some(anchor) = &self.anchor else {
+            self.travel_up += self.last.y - to.y;
             self.last = to;
+            return Some(self.travel_up);
+        };
+        if to == self.origin {
             return None;
         }
-        self.travel_up += self.last.y - to.y;
-        self.last = to;
-        if to.distance(self.origin) > LEASH_PX && !self.awaiting_return {
-            self.awaiting_return = self.anchor.as_ref().is_some_and(Anchor::bring_pointer_back);
+        if anchor.bring_pointer_back() {
+            self.travel_up += self.origin.y - to.y;
+        } else {
+            self.travel_up += self.last.y - to.y;
+            self.last = to;
+            self.anchor = None;
         }
         Some(self.travel_up)
     }

@@ -841,7 +841,11 @@ impl App {
                 self.run = run;
                 self.problem = None;
                 self.dirty = true;
-                self.changed();
+                self.engine.set_project(&self.project);
+                let timeline_looks_the_same = matches!(run, Some(Run::Master | Run::TrackGain(_)));
+                if !timeline_looks_the_same {
+                    self.cache.clear();
+                }
                 Some(outcome)
             }
             Err(_) => {

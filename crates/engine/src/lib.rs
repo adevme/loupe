@@ -10,5 +10,5 @@ pub use file::{SavedClip, SavedProject, SavedTrack};
 pub use model::{
     Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Outcome, Project, Track, TrackId,
 };
-pub use render::{render, render_choice};
+pub use render::{mix_tracks, render, scale};
 pub use source::Source;

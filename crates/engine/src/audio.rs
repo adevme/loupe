@@ -8,7 +8,7 @@ use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::model::{ClipId, Frames, Project};
-use crate::render::render_choice;
+use crate::render::{mix_tracks, scale};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -46,6 +46,7 @@ struct Rt {
     seek: Option<Frames>,
     loop_range: Option<(Frames, Frames)>,
     audition: Option<ClipId>,
+    master: f32,
     fade: u32,
     fade_len: u32,
     block: Vec<[f32; 2]>,
@@ -71,6 +72,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         seek: None,
         loop_range: None,
         audition: None,
+        master: 1.0,
         fade: 0,
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
@@ -120,7 +122,9 @@ impl Rt {
                 part = part.min((stop_at - self.pos) as usize);
             }
             let chunk = &mut out[done..done + part];
-            render_choice(&self.project, self.pos, chunk, self.audition);
+            mix_tracks(&self.project, self.pos, chunk, self.audition);
+            scale(chunk, self.master, self.project.master);
+            self.master = self.project.master;
             if !rising || self.fade < self.fade_len {
                 for frame in chunk.iter_mut() {
                     self.fade = if rising {
