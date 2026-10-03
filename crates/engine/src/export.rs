@@ -4,11 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::model::{Frames, Project, Track};
 use crate::render::render;
+use crate::wav;
 
 const BLOCK: usize = 16_384;
 const CHANNELS: u16 = 2;
-const BYTES_PER_SAMPLE: u16 = 4;
-const IEEE_FLOAT: u16 = 3;
 const STEMS_FOLDER: &str = "Stems";
 const NOT_IN_FILE_NAMES: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
@@ -96,26 +95,11 @@ fn write_wav(
     wrote: &mut dyn FnMut(Frames),
 ) -> io::Result<()> {
     let frames = to - from;
-    let block_align = CHANNELS * BYTES_PER_SAMPLE;
-    let data_bytes = u32::try_from(frames * block_align as u64)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "the song is too long for one WAV file"))?;
+    if frames > wav::most_frames(CHANNELS) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the song is too long for one WAV file"));
+    }
     let mut out = BufWriter::new(File::create(path)?);
-    out.write_all(b"RIFF")?;
-    out.write_all(&(50 + data_bytes).to_le_bytes())?;
-    out.write_all(b"WAVEfmt ")?;
-    out.write_all(&18u32.to_le_bytes())?;
-    out.write_all(&IEEE_FLOAT.to_le_bytes())?;
-    out.write_all(&CHANNELS.to_le_bytes())?;
-    out.write_all(&project.rate.to_le_bytes())?;
-    out.write_all(&(project.rate * block_align as u32).to_le_bytes())?;
-    out.write_all(&block_align.to_le_bytes())?;
-    out.write_all(&(BYTES_PER_SAMPLE * 8).to_le_bytes())?;
-    out.write_all(&0u16.to_le_bytes())?;
-    out.write_all(b"fact")?;
-    out.write_all(&4u32.to_le_bytes())?;
-    out.write_all(&(frames as u32).to_le_bytes())?;
-    out.write_all(b"data")?;
-    out.write_all(&data_bytes.to_le_bytes())?;
+    out.write_all(&wav::float_header(CHANNELS, project.rate, frames as u32))?;
 
     let mut block = vec![[0.0f32; 2]; BLOCK];
     let mut pos = from;

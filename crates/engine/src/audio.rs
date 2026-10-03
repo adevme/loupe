@@ -7,6 +7,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::clock;
 use crate::model::{ClipId, Frames, Project};
 use crate::render::{mix_tracks, scale};
 
@@ -28,12 +29,16 @@ enum Msg {
     Seek(Frames),
     Loop(Option<(Frames, Frames)>),
     Audition(Option<ClipId>),
+    Endless(bool),
 }
 
 #[derive(Default)]
 struct Shared {
     pos: AtomicU64,
     playing: AtomicBool,
+    heard_turn: AtomicU64,
+    heard_pos: AtomicU64,
+    heard_at: AtomicU64,
 }
 
 struct Rt {
@@ -46,6 +51,7 @@ struct Rt {
     seek: Option<Frames>,
     loop_range: Option<(Frames, Frames)>,
     audition: Option<ClipId>,
+    endless: bool,
     master: f32,
     fade: u32,
     fade_len: u32,
@@ -72,6 +78,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         seek: None,
         loop_range: None,
         audition: None,
+        endless: false,
         master: 1.0,
         fade: 0,
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
@@ -93,6 +100,7 @@ impl Rt {
                 Msg::Seek(to) => self.seek = Some(to),
                 Msg::Loop(range) => self.loop_range = range,
                 Msg::Audition(clip) => self.audition = clip,
+                Msg::Endless(endless) => self.endless = endless,
             }
         }
 
@@ -115,6 +123,7 @@ impl Rt {
                 (self.fade as usize).clamp(1, frames - done)
             };
             let (stop_at, go_round_to) = match self.loop_range {
+                _ if self.endless => (Frames::MAX, 0),
                 Some((from, to)) if self.pos >= from && self.pos < to => (to, from),
                 _ => (self.project.length(), 0),
             };
@@ -146,6 +155,14 @@ impl Rt {
         self.shared.pos.store(self.pos, Ordering::Relaxed);
         out
     }
+
+    fn heard(&self, at: Instant) {
+        let shared = &self.shared;
+        shared.heard_turn.fetch_add(1, Ordering::AcqRel);
+        shared.heard_pos.store(self.pos, Ordering::Release);
+        shared.heard_at.store(clock::nanos(at), Ordering::Release);
+        shared.heard_turn.fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 pub struct Engine {
@@ -164,6 +181,7 @@ struct Ready {
 
 impl Engine {
     pub fn start(output: Output) -> Self {
+        clock::start();
         let quit = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = mpsc::channel();
         let host = thread::Builder::new()
@@ -221,6 +239,24 @@ impl Engine {
         self.remote.shared.pos.load(Ordering::Relaxed)
     }
 
+    pub fn set_endless(&mut self, endless: bool) {
+        self.send(Msg::Endless(endless));
+    }
+
+    pub fn position_at(&self, when: Instant) -> i64 {
+        let shared = &self.remote.shared;
+        let (pos, at) = loop {
+            let turn = shared.heard_turn.load(Ordering::Acquire);
+            let seen = (shared.heard_pos.load(Ordering::Acquire), shared.heard_at.load(Ordering::Acquire));
+            if turn % 2 == 0 && shared.heard_turn.load(Ordering::Acquire) == turn {
+                break seen;
+            }
+            std::hint::spin_loop();
+        };
+        let later = clock::nanos(when) as i128 - at as i128;
+        pos as i64 + (later * self.rate as i128 / 1_000_000_000) as i64
+    }
+
     pub fn is_playing(&self) -> bool {
         self.remote.shared.playing.load(Ordering::Relaxed)
     }
@@ -275,6 +311,7 @@ fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
     while !quit.load(Ordering::Relaxed) {
         rt.process(block);
         next += Duration::from_millis(10);
+        rt.heard(next);
         match next.checked_duration_since(Instant::now()) {
             Some(wait) => thread::park_timeout(wait),
             None => next = Instant::now(),
@@ -307,11 +344,16 @@ fn stream<T: SizedSample + FromSample<f32>>(
     mut rt: Rt,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let channels = config.channels as usize;
+    let rate = config.sample_rate.0 as f64;
     device.build_output_stream(
         config,
-        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+            let stamp = info.timestamp();
+            let delay = stamp.playback.duration_since(&stamp.callback).unwrap_or_default();
+            let mut heard = Instant::now() + delay;
             for part in data.chunks_mut(MAX_BLOCK * channels) {
-                let mixed = rt.process(part.len() / channels);
+                let frames = part.len() / channels;
+                let mixed = rt.process(frames);
                 for (frame, m) in part.chunks_mut(channels).zip(mixed) {
                     match frame {
                         [mono] => *mono = T::from_sample((m[0] + m[1]) * 0.5),
@@ -323,6 +365,8 @@ fn stream<T: SizedSample + FromSample<f32>>(
                         [] => {}
                     }
                 }
+                heard += Duration::from_secs_f64(frames as f64 / rate);
+                rt.heard(heard);
             }
         },
         |e| eprintln!("loupe: sound output error: {e}"),
@@ -429,6 +473,34 @@ mod tests {
         remote.outbox.push(Msg::Loop(None)).ok().unwrap();
         rt.process(480);
         assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 180 + 480);
+    }
+
+    #[test]
+    fn endless_playback_runs_past_the_loop_and_the_end_of_the_song() {
+        let (mut rt, mut remote) = rig(1000);
+        remote.outbox.push(Msg::Loop(Some((100, 300)))).ok().unwrap();
+        remote.outbox.push(Msg::Seek(100)).ok().unwrap();
+        remote.outbox.push(Msg::Endless(true)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        for _ in 0..3 {
+            rt.process(480);
+        }
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 100 + 1440);
+    }
+
+    #[test]
+    fn the_engine_knows_where_the_song_was_at_an_earlier_moment() {
+        let mut engine = Engine::start(Output::Silent);
+        engine.set_endless(true);
+        engine.seek(10_000);
+        thread::sleep(Duration::from_millis(40));
+        let pressed = Instant::now();
+        engine.play();
+        thread::sleep(Duration::from_millis(300));
+        let was = engine.position_at(pressed);
+        assert!((was - 10_000).abs() < 1_500, "play was pressed at about 10000, got {was}");
+        let now = engine.position_at(Instant::now());
+        assert!((now - was - 14_400).abs() < 1_500, "0.3 s later, got {} more", now - was);
     }
 
     #[test]
