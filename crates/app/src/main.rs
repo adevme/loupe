@@ -4,6 +4,7 @@ mod icons;
 mod theme;
 mod timeline;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +19,8 @@ use loupe_engine::{
     ClipId, Command, CommandError, Engine, Frames, Outcome, Output, Project, Source, TrackId,
 };
 
-use timeline::{Timeline, View};
+use theme::Palette;
+use timeline::{LoopRange, Timeline, View};
 
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
 const MIN_GAIN_DB: f32 = -24.0;
@@ -27,23 +29,25 @@ const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 
 fn main() -> iced::Result {
+    let loaded = Palette::load();
+    let ui_font = loaded.palette.ui;
     iced::application("Loupe", App::update, App::view)
         .subscription(App::subscription)
-        .theme(|_| theme::theme())
+        .theme(|app: &App| app.palette.iced())
         .font(include_bytes!("../assets/Inter-Regular.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-Medium.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-SemiBold.ttf").as_slice())
         .font(include_bytes!("../assets/JetBrainsMono-Regular.ttf").as_slice())
         .font(include_bytes!("../assets/JetBrainsMono-Medium.ttf").as_slice())
         .font(include_bytes!("../assets/lucide.ttf").as_slice())
-        .default_font(theme::INTER)
+        .default_font(ui_font)
         .antialiasing(true)
         .window(window::Settings {
             size: START_SIZE,
             min_size: Some(Size::new(820.0, 420.0)),
             ..window::Settings::default()
         })
-        .run_with(App::new)
+        .run_with(move || App::new(loaded))
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
@@ -60,6 +64,9 @@ pub enum Message {
     Loaded(PathBuf, Result<Arc<Source>, String>),
     Select(Option<ClipId>),
     LaneClicked(Frames),
+    RulerClicked(Frames),
+    SetLoop(LoopRange),
+    ResizeTrack { track: TrackId, height: f32 },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
     DragEnd,
     Split,
@@ -84,6 +91,9 @@ enum Run {
 }
 
 struct App {
+    palette: Palette,
+    heights: HashMap<TrackId, f32>,
+    loop_range: LoopRange,
     engine: Engine,
     project: Project,
     undo: Vec<Project>,
@@ -98,17 +108,23 @@ struct App {
     bpm: String,
     loading: usize,
     problem: Option<String>,
+    startup_problem: Option<String>,
     cache: Cache,
 }
 
 impl App {
-    fn new() -> (Self, Task<Message>) {
+    fn new(loaded: theme::Loaded) -> (Self, Task<Message>) {
         let silent = std::env::var("LOUPE_AUDIO").as_deref() == Ok("silent");
         let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device });
         let project = Project::new(engine.rate());
         engine.set_project(&project);
+        let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let mut app = Self {
-            problem: engine.output_error().map(|e| format!("No sound: {e}")),
+            palette: loaded.palette,
+            heights: HashMap::new(),
+            loop_range: None,
+            problem: None,
+            startup_problem: no_sound.or(loaded.problem),
             bpm: format_bpm(project.bpm),
             engine,
             project,
@@ -136,6 +152,11 @@ impl App {
                     self.playing = false;
                     self.settle = SETTLE_TICKS;
                 } else {
+                    if let Some((from, to)) = self.loop_range {
+                        if self.playhead < from || self.playhead >= to {
+                            self.seek(from);
+                        }
+                    }
                     self.engine.play();
                     self.playing = true;
                 }
@@ -185,6 +206,15 @@ impl App {
                 self.selected = None;
                 self.seek(at);
             }
+            Message::RulerClicked(at) => {
+                self.set_loop(None);
+                self.seek(at);
+            }
+            Message::SetLoop(range) => self.set_loop(range),
+            Message::ResizeTrack { track, height } => {
+                self.heights.insert(track, height);
+                self.cache.clear();
+            }
             Message::MoveClip { clip, track, start } => {
                 self.edit(Some(Run::Move(clip)), Command::MoveClip { clip, track, start });
             }
@@ -225,6 +255,7 @@ impl App {
                 if holds_selection {
                     self.selected = None;
                 }
+                self.heights.remove(&track);
                 self.edit(None, Command::RemoveTrack(track));
             }
             Message::ToggleMute(track) => {
@@ -311,6 +342,11 @@ impl App {
         }
         self.bpm = format_bpm(self.project.bpm);
         self.changed();
+    }
+
+    fn set_loop(&mut self, range: LoopRange) {
+        self.loop_range = range;
+        self.engine.set_loop(range);
     }
 
     fn seek(&mut self, to: Frames) {
@@ -403,18 +439,22 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let timeline = canvas(Timeline {
             project: &self.project,
+            palette: &self.palette,
             view: self.view,
+            heights: &self.heights,
             selected: self.selected,
             playhead: self.playhead,
+            loop_range: self.loop_range,
             cache: &self.cache,
         })
         .width(Length::Fill)
         .height(Length::Fill);
 
-        column![self.transport(), rule(), timeline, rule(), self.inspector()].into()
+        column![self.transport(), rule(self.palette), timeline, rule(self.palette), self.inspector()].into()
     }
 
     fn transport(&self) -> Element<'_, Message> {
+        let palette = self.palette;
         let seconds = self.playhead as f64 / self.project.rate as f64;
         let beats = seconds * self.project.bpm / 60.0;
         let position = format!("{}.{}", (beats / 4.0) as u64 + 1, beats as u64 % 4 + 1);
@@ -429,43 +469,43 @@ impl App {
             container(icon(if self.playing { "pause" } else { "play" }, 14.0)).center(32),
         )
         .padding(0)
-        .style(theme::solid)
+        .style(move |_, status| palette.solid(status))
         .on_press(Message::TogglePlay);
 
         let tempo = text_input("", &self.bpm)
             .on_input(Message::BpmTyped)
             .on_submit(Message::BpmEntered)
-            .font(theme::MONO)
+            .font(palette.mono)
             .size(13)
             .padding([5, 8])
             .width(64)
-            .style(theme::field);
+            .style(move |_, status| palette.field(status));
 
         let history = row![
-            icon_button("undo-2", (!self.undo.is_empty()).then_some(Message::Undo)),
-            icon_button("redo-2", (!self.redo.is_empty()).then_some(Message::Redo)),
+            icon_button(palette, "undo-2", (!self.undo.is_empty()).then_some(Message::Undo)),
+            icon_button(palette, "redo-2", (!self.redo.is_empty()).then_some(Message::Redo)),
         ]
         .spacing(2);
 
         let import = button(
-            row![icon("folder-open", 14.0), text("Import").size(13).font(theme::MEDIUM)]
+            row![icon("folder-open", 14.0), text("Import").size(13).font(palette.medium)]
                 .spacing(8)
                 .align_y(Alignment::Center),
         )
         .padding([7, 14])
-        .style(theme::outlined)
+        .style(move |_, status| palette.outlined(status))
         .on_press(Message::Import);
 
         container(
             row![
-                text("Loupe").size(16).font(theme::SEMIBOLD),
+                text("Loupe").size(16).font(palette.semibold),
                 Space::with_width(18),
-                icon_button("skip-back", Some(Message::ToStart)),
+                icon_button(palette, "skip-back", Some(Message::ToStart)),
                 play,
                 Space::with_width(10),
-                text(position).size(17).font(theme::MONO).width(64),
-                text(clock).size(12).font(theme::MONO).color(theme::TEXT_DIM).width(84),
-                text("BPM").size(11).font(theme::MEDIUM).color(theme::TEXT_DIM),
+                text(position).size(17).font(palette.mono).width(64),
+                text(clock).size(12).font(palette.mono).color(palette.text_dim).width(84),
+                text("BPM").size(11).font(palette.medium).color(palette.text_dim),
                 tempo,
                 horizontal_space(),
                 history,
@@ -477,27 +517,28 @@ impl App {
         .padding([0, 16])
         .height(52)
         .align_y(Alignment::Center)
-        .style(theme::bar)
+        .style(move |_| palette.bar())
         .into()
     }
 
     fn inspector(&self) -> Element<'_, Message> {
-        let status: Element<'_, Message> = if let Some(problem) = &self.problem {
-            text(problem.as_str()).size(12).color(theme::ROSE).into()
+        let palette = self.palette;
+        let status: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()) {
+            text(problem.as_str()).size(12).color(palette.danger).into()
         } else if self.loading > 0 {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
-            text(format!("Importing {what}…")).size(12).color(theme::TEXT_DIM).into()
+            text(format!("Importing {what}…")).size(12).color(palette.text_dim).into()
         } else {
             Space::with_width(0).into()
         };
 
         let split = button(
-            row![icon("scissors", 13.0), text("Split").size(12.5).font(theme::MEDIUM)]
+            row![icon("scissors", 13.0), text("Split").size(12.5).font(palette.medium)]
                 .spacing(7)
                 .align_y(Alignment::Center),
         )
         .padding([6, 12])
-            .style(theme::outlined)
+            .style(move |_, status| palette.outlined(status))
             .on_press_maybe((!self.split_targets().is_empty()).then_some(Message::Split));
 
         let clip: Element<'_, Message> = match self.selected.and_then(|id| self.project.clip(id)) {
@@ -505,21 +546,21 @@ impl App {
                 let db = (20.0 * clip.gain.max(1e-6).log10()).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
                 let seconds = clip.len as f64 / self.project.rate as f64;
                 row![
-                    text(clip.source.name.as_str()).size(13).font(theme::MEDIUM),
-                    text(format!("{seconds:.3} s")).size(12).font(theme::MONO).color(theme::TEXT_DIM),
+                    text(clip.source.name.as_str()).size(13).font(palette.medium),
+                    text(format!("{seconds:.3} s")).size(12).font(palette.mono).color(palette.text_dim),
                     Space::with_width(12),
-                    text("Clip gain").size(12).color(theme::TEXT_DIM),
+                    text("Clip gain").size(12).color(palette.text_dim),
                     slider(MIN_GAIN_DB..=MAX_GAIN_DB, db, Message::ClipGain)
                         .step(0.1)
                         .default(0.0)
                         .on_release(Message::ClipGainDone)
                         .width(200)
-                        .style(theme::gain),
-                    text(format!("{db:+.1} dB")).size(12).font(theme::MONO).width(70),
+                        .style(move |_, status| palette.gain(status)),
+                    text(format!("{db:+.1} dB")).size(12).font(palette.mono).width(70),
                     split,
                     button(icon("trash-2", 14.0))
                         .padding([6, 10])
-                        .style(theme::outlined)
+                        .style(move |_, status| palette.outlined(status))
                         .on_press(Message::Delete),
                 ]
                 .spacing(10)
@@ -527,7 +568,7 @@ impl App {
                 .into()
             }
             None => row![
-                text("Click a clip to work on it alone").size(12.5).color(theme::TEXT_DIM),
+                text("Click a clip to work on it alone").size(12.5).color(palette.text_dim),
                 Space::with_width(12),
                 split,
             ]
@@ -540,7 +581,7 @@ impl App {
             .padding([0, 16])
             .height(48)
             .align_y(Alignment::Center)
-            .style(theme::bar)
+            .style(move |_| palette.bar())
             .into()
     }
 }
@@ -576,14 +617,14 @@ fn icon(name: &str, size: f32) -> iced::widget::Text<'static> {
         .size(size)
 }
 
-fn icon_button(name: &str, on_press: Option<Message>) -> Element<'static, Message> {
+fn icon_button(palette: Palette, name: &str, on_press: Option<Message>) -> Element<'static, Message> {
     button(container(icon(name, 15.0)).center(30))
         .padding(0)
-        .style(theme::ghost)
+        .style(move |_, status| palette.ghost(status))
         .on_press_maybe(on_press)
         .into()
 }
 
-fn rule() -> Element<'static, Message> {
-    container(Space::new(Length::Fill, 1)).style(theme::line).into()
+fn rule(palette: Palette) -> Element<'static, Message> {
+    container(Space::new(Length::Fill, 1)).style(move |_| palette.rule()).into()
 }

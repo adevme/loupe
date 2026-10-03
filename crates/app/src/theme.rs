@@ -1,32 +1,280 @@
+use std::fs;
+use std::path::PathBuf;
+
 use iced::widget::{button, container, slider, text_input};
 use iced::{font, Background, Border, Color, Font, Theme};
 
-pub const BG: Color = Color::from_rgb(0.043, 0.043, 0.051);
-pub const PANEL: Color = Color::from_rgb(0.067, 0.067, 0.082);
-pub const RAISED: Color = Color::from_rgb(0.11, 0.11, 0.135);
-pub const HOVER: Color = Color::from_rgb(0.15, 0.15, 0.18);
-pub const LINE: Color = Color::from_rgb(0.125, 0.125, 0.155);
-pub const TEXT: Color = Color::from_rgb(0.906, 0.906, 0.925);
-pub const TEXT_DIM: Color = Color::from_rgb(0.6, 0.6, 0.66);
-pub const TEXT_FAINT: Color = Color::from_rgb(0.4, 0.4, 0.46);
-pub const ACCENT: Color = Color::from_rgb(0.925, 0.725, 0.38);
-pub const ON_ACCENT: Color = Color::from_rgb(0.08, 0.06, 0.02);
-pub const ROSE: Color = Color::from_rgb(0.984, 0.443, 0.522);
+pub const ICONS: Font = Font::with_name("lucide");
+pub const MIN_TRACK_HEIGHT: f32 = 40.0;
+pub const MAX_TRACK_HEIGHT: f32 = 400.0;
 
-pub const TRACKS: [Color; 6] = [
-    Color::from_rgb(0.45, 0.72, 0.95),
-    Color::from_rgb(0.73, 0.58, 0.96),
-    Color::from_rgb(0.42, 0.82, 0.68),
-    Color::from_rgb(0.96, 0.6, 0.55),
-    Color::from_rgb(0.93, 0.78, 0.45),
-    Color::from_rgb(0.55, 0.62, 0.97),
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub background: Color,
+    pub panel: Color,
+    pub raised: Color,
+    pub hover: Color,
+    pub line: Color,
+    pub text: Color,
+    pub text_dim: Color,
+    pub text_faint: Color,
+    pub accent: Color,
+    pub on_accent: Color,
+    pub danger: Color,
+    pub tracks: [Color; 8],
+    pub ui: Font,
+    pub medium: Font,
+    pub semibold: Font,
+    pub mono: Font,
+    pub track_height: f32,
+}
+
+const NEUTRAL: Palette = Palette {
+    background: Color::from_rgb(0.043, 0.043, 0.051),
+    panel: Color::from_rgb(0.067, 0.067, 0.082),
+    raised: Color::from_rgb(0.11, 0.11, 0.135),
+    hover: Color::from_rgb(0.15, 0.15, 0.18),
+    line: Color::from_rgb(0.125, 0.125, 0.155),
+    text: Color::from_rgb(0.906, 0.906, 0.925),
+    text_dim: Color::from_rgb(0.6, 0.6, 0.66),
+    text_faint: Color::from_rgb(0.4, 0.4, 0.46),
+    accent: Color::from_rgb(0.925, 0.725, 0.38),
+    on_accent: Color::from_rgb(0.08, 0.06, 0.02),
+    danger: Color::from_rgb(0.984, 0.443, 0.522),
+    tracks: [
+        Color::from_rgb(0.45, 0.72, 0.95),
+        Color::from_rgb(0.73, 0.58, 0.96),
+        Color::from_rgb(0.42, 0.82, 0.68),
+        Color::from_rgb(0.96, 0.6, 0.55),
+        Color::from_rgb(0.93, 0.78, 0.45),
+        Color::from_rgb(0.55, 0.62, 0.97),
+        Color::from_rgb(0.4, 0.8, 0.85),
+        Color::from_rgb(0.9, 0.55, 0.8),
+    ],
+    ui: Font::with_name("Inter"),
+    medium: Font { weight: font::Weight::Medium, ..Font::with_name("Inter") },
+    semibold: Font { weight: font::Weight::Semibold, ..Font::with_name("Inter") },
+    mono: Font::with_name("JetBrains Mono"),
+    track_height: 92.0,
+};
+
+const COLOUR_KEYS: [&str; 11] = [
+    "background",
+    "panel",
+    "raised",
+    "hover",
+    "line",
+    "text",
+    "text_dim",
+    "text_faint",
+    "accent",
+    "on_accent",
+    "danger",
 ];
 
-pub const INTER: Font = Font::with_name("Inter");
-pub const MEDIUM: Font = Font { weight: font::Weight::Medium, ..Font::with_name("Inter") };
-pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..Font::with_name("Inter") };
-pub const MONO: Font = Font::with_name("JetBrains Mono");
-pub const ICONS: Font = Font::with_name("lucide");
+pub struct Loaded {
+    pub palette: Palette,
+    pub problem: Option<String>,
+}
+
+impl Palette {
+    pub fn load() -> Loaded {
+        let Some(dir) = config_dir() else {
+            return Loaded { palette: NEUTRAL, problem: None };
+        };
+        let themes = dir.join("themes");
+        let _ = fs::create_dir_all(&themes);
+        let reference = themes.join("default.theme");
+        if !reference.exists() {
+            let _ = fs::write(&reference, NEUTRAL.to_text());
+        }
+        let settings = fs::read_to_string(dir.join("settings")).unwrap_or_default();
+        let chosen = entries(&settings).find(|(_, key, _)| *key == "theme").map(|(_, _, v)| v.to_string());
+        let Some(name) = chosen else {
+            return Loaded { palette: NEUTRAL, problem: None };
+        };
+        let path = themes.join(format!("{name}.theme"));
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => {
+                let problem = format!("Theme \"{name}\" is not at {}", path.display());
+                return Loaded { palette: NEUTRAL, problem: Some(problem) };
+            }
+        };
+        let mut palette = NEUTRAL;
+        let mut problem = None;
+        for (line, key, value) in entries(&text) {
+            if let Err(why) = palette.set(key, value) {
+                problem = Some(format!("Theme \"{name}\" line {line}: {why}"));
+                break;
+            }
+        }
+        Loaded { palette, problem }
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> Result<(), String> {
+        if let Some(index) = key.strip_prefix("track_").and_then(|n| n.parse::<usize>().ok()) {
+            if !(1..=self.tracks.len()).contains(&index) {
+                return Err(format!("track colours go from track_1 to track_{}", self.tracks.len()));
+            }
+            self.tracks[index - 1] = colour(value)?;
+            return Ok(());
+        }
+        match key {
+            "font" => {
+                let family = leak(value);
+                self.ui = Font::with_name(family);
+                self.medium = Font { weight: font::Weight::Medium, ..Font::with_name(family) };
+                self.semibold = Font { weight: font::Weight::Semibold, ..Font::with_name(family) };
+            }
+            "mono" => self.mono = Font::with_name(leak(value)),
+            "track_height" => {
+                let height: f32 = value.parse().map_err(|_| format!("\"{value}\" is not a number"))?;
+                if !(MIN_TRACK_HEIGHT..=MAX_TRACK_HEIGHT).contains(&height) {
+                    return Err(format!("track_height goes from {MIN_TRACK_HEIGHT} to {MAX_TRACK_HEIGHT}"));
+                }
+                self.track_height = height;
+            }
+            _ => {
+                let slot = self.colour_slot(key).ok_or_else(|| format!("\"{key}\" is not a theme key"))?;
+                *slot = colour(value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn colour_slot(&mut self, key: &str) -> Option<&mut Color> {
+        Some(match key {
+            "background" => &mut self.background,
+            "panel" => &mut self.panel,
+            "raised" => &mut self.raised,
+            "hover" => &mut self.hover,
+            "line" => &mut self.line,
+            "text" => &mut self.text,
+            "text_dim" => &mut self.text_dim,
+            "text_faint" => &mut self.text_faint,
+            "accent" => &mut self.accent,
+            "on_accent" => &mut self.on_accent,
+            "danger" => &mut self.danger,
+            _ => return None,
+        })
+    }
+
+    fn to_text(&self) -> String {
+        let mut copy = *self;
+        let mut out = String::from(
+            "# A Loupe theme: one key per line, colours as #rrggbb.\n\
+             # Copy this file, change what you like, then put `theme = <file name>` in the settings file next to the themes folder.\n\n",
+        );
+        for key in COLOUR_KEYS {
+            let value = *copy.colour_slot(key).expect("every listed key has a slot");
+            out.push_str(&format!("{key} = {}\n", hex(value)));
+        }
+        for (i, track) in self.tracks.iter().enumerate() {
+            out.push_str(&format!("track_{} = {}\n", i + 1, hex(*track)));
+        }
+        out.push_str(&format!("font = {}\nmono = {}\ntrack_height = {}\n", family(self.ui), family(self.mono), self.track_height));
+        out
+    }
+
+    pub fn track(&self, index: usize) -> Color {
+        self.tracks[index % self.tracks.len()]
+    }
+
+    pub fn iced(&self) -> Theme {
+        Theme::custom(
+            "Loupe".into(),
+            iced::theme::Palette {
+                background: self.background,
+                text: self.text,
+                primary: self.accent,
+                success: Color::from_rgb(0.204, 0.827, 0.6),
+                danger: self.danger,
+            },
+        )
+    }
+
+    pub fn bar(&self) -> container::Style {
+        container::Style { background: Some(self.panel.into()), ..Default::default() }
+    }
+
+    pub fn rule(&self) -> container::Style {
+        container::Style { background: Some(self.line.into()), ..Default::default() }
+    }
+
+    pub fn ghost(&self, status: button::Status) -> button::Style {
+        let (background, text_color) = match status {
+            button::Status::Active => (None, self.text),
+            button::Status::Hovered => (Some(self.raised.into()), self.text),
+            button::Status::Pressed => (Some(self.hover.into()), self.text),
+            button::Status::Disabled => (None, self.text_faint),
+        };
+        button::Style { background, text_color, border: Border::default().rounded(6), ..Default::default() }
+    }
+
+    pub fn outlined(&self, status: button::Status) -> button::Style {
+        let (background, text_color) = match status {
+            button::Status::Active => (self.raised, self.text),
+            button::Status::Hovered | button::Status::Pressed => (self.hover, self.text),
+            button::Status::Disabled => (self.panel, self.text_faint),
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color,
+            border: Border { color: self.line, width: 1.0, radius: 6.0.into() },
+            ..Default::default()
+        }
+    }
+
+    pub fn solid(&self, status: button::Status) -> button::Style {
+        let background = match status {
+            button::Status::Hovered | button::Status::Pressed => mix(self.accent, Color::WHITE, 0.15),
+            _ => self.accent,
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color: self.on_accent,
+            border: Border::default().rounded(16),
+            ..Default::default()
+        }
+    }
+
+    pub fn field(&self, status: text_input::Status) -> text_input::Style {
+        let border = match status {
+            text_input::Status::Focused => self.accent,
+            text_input::Status::Hovered => self.hover,
+            _ => self.line,
+        };
+        text_input::Style {
+            background: Background::Color(self.background),
+            border: Border { color: border, width: 1.0, radius: 6.0.into() },
+            icon: self.text_dim,
+            placeholder: self.text_faint,
+            value: self.text,
+            selection: alpha(self.accent, 0.35),
+        }
+    }
+
+    pub fn gain(&self, status: slider::Status) -> slider::Style {
+        let handle = match status {
+            slider::Status::Active => self.text,
+            _ => Color::WHITE,
+        };
+        slider::Style {
+            rail: slider::Rail {
+                backgrounds: (self.accent.into(), self.raised.into()),
+                width: 3.0,
+                border: Border::default().rounded(2),
+            },
+            handle: slider::Handle {
+                shape: slider::HandleShape::Circle { radius: 6.0 },
+                background: handle.into(),
+                border_width: 0.0,
+                border_color: Color::TRANSPARENT,
+            },
+        }
+    }
+}
 
 pub fn alpha(color: Color, a: f32) -> Color {
     Color { a, ..color }
@@ -40,96 +288,49 @@ pub fn mix(base: Color, tint: Color, amount: f32) -> Color {
     )
 }
 
-pub fn theme() -> Theme {
-    Theme::custom(
-        "Loupe".into(),
-        iced::theme::Palette {
-            background: BG,
-            text: TEXT,
-            primary: ACCENT,
-            success: Color::from_rgb(0.204, 0.827, 0.6),
-            danger: ROSE,
-        },
-    )
+fn config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return std::env::var_os("APPDATA").map(|appdata| PathBuf::from(appdata).join("loupe"));
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .map(|config| config.join("loupe"))
 }
 
-pub fn bar(_: &Theme) -> container::Style {
-    container::Style { background: Some(PANEL.into()), ..Default::default() }
+fn entries(text: &str) -> impl Iterator<Item = (usize, &str, &str)> {
+    text.lines().enumerate().filter_map(|(i, line)| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        Some((i + 1, key.trim(), value.trim()))
+    })
 }
 
-pub fn line(_: &Theme) -> container::Style {
-    container::Style { background: Some(LINE.into()), ..Default::default() }
+fn colour(value: &str) -> Result<Color, String> {
+    let digits = value.strip_prefix('#').unwrap_or(value);
+    let bad = || format!("\"{value}\" is not a colour; use #rrggbb");
+    if digits.len() != 6 {
+        return Err(bad());
+    }
+    let channel = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).map_err(|_| bad());
+    Ok(Color::from_rgb8(channel(0)?, channel(2)?, channel(4)?))
 }
 
-pub fn ghost(_: &Theme, status: button::Status) -> button::Style {
-    let (background, text_color) = match status {
-        button::Status::Active => (None, TEXT),
-        button::Status::Hovered => (Some(RAISED.into()), TEXT),
-        button::Status::Pressed => (Some(HOVER.into()), TEXT),
-        button::Status::Disabled => (None, TEXT_FAINT),
-    };
-    button::Style { background, text_color, border: Border::default().rounded(6), ..Default::default() }
+fn hex(color: Color) -> String {
+    let [r, g, b, _] = color.into_rgba8();
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-pub fn outlined(_: &Theme, status: button::Status) -> button::Style {
-    let (background, text_color) = match status {
-        button::Status::Active => (RAISED, TEXT),
-        button::Status::Hovered | button::Status::Pressed => (HOVER, TEXT),
-        button::Status::Disabled => (PANEL, TEXT_FAINT),
-    };
-    button::Style {
-        background: Some(background.into()),
-        text_color,
-        border: Border { color: LINE, width: 1.0, radius: 6.0.into() },
-        ..Default::default()
+fn family(font: Font) -> &'static str {
+    match font.family {
+        font::Family::Name(name) => name,
+        _ => "Inter",
     }
 }
 
-pub fn solid(_: &Theme, status: button::Status) -> button::Style {
-    let background = match status {
-        button::Status::Hovered | button::Status::Pressed => Color::from_rgb(0.97, 0.79, 0.47),
-        _ => ACCENT,
-    };
-    button::Style {
-        background: Some(background.into()),
-        text_color: ON_ACCENT,
-        border: Border::default().rounded(16),
-        ..Default::default()
-    }
-}
-
-pub fn field(_: &Theme, status: text_input::Status) -> text_input::Style {
-    let border = match status {
-        text_input::Status::Focused => ACCENT,
-        text_input::Status::Hovered => HOVER,
-        _ => LINE,
-    };
-    text_input::Style {
-        background: Background::Color(BG),
-        border: Border { color: border, width: 1.0, radius: 6.0.into() },
-        icon: TEXT_DIM,
-        placeholder: TEXT_FAINT,
-        value: TEXT,
-        selection: alpha(ACCENT, 0.35),
-    }
-}
-
-pub fn gain(_: &Theme, status: slider::Status) -> slider::Style {
-    let handle = match status {
-        slider::Status::Active => TEXT,
-        _ => Color::WHITE,
-    };
-    slider::Style {
-        rail: slider::Rail {
-            backgrounds: (ACCENT.into(), RAISED.into()),
-            width: 3.0,
-            border: Border::default().rounded(2),
-        },
-        handle: slider::Handle {
-            shape: slider::HandleShape::Circle { radius: 6.0 },
-            background: handle.into(),
-            border_width: 0.0,
-            border_color: Color::TRANSPARENT,
-        },
-    }
+fn leak(value: &str) -> &'static str {
+    Box::leak(value.to_string().into_boxed_str())
 }

@@ -26,6 +26,7 @@ enum Msg {
     Play,
     Stop,
     Seek(Frames),
+    Loop(Option<(Frames, Frames)>),
 }
 
 #[derive(Default)]
@@ -42,6 +43,7 @@ struct Rt {
     pos: Frames,
     playing: bool,
     seek: Option<Frames>,
+    loop_range: Option<(Frames, Frames)>,
     fade: u32,
     fade_len: u32,
     block: Vec<[f32; 2]>,
@@ -65,6 +67,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         pos: 0,
         playing: false,
         seek: None,
+        loop_range: None,
         fade: 0,
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
@@ -83,6 +86,7 @@ impl Rt {
                 Msg::Play => self.playing = true,
                 Msg::Stop => self.playing = false,
                 Msg::Seek(to) => self.seek = Some(to),
+                Msg::Loop(range) => self.loop_range = range,
             }
         }
 
@@ -104,9 +108,12 @@ impl Rt {
             } else {
                 (self.fade as usize).clamp(1, frames - done)
             };
-            let song_end = self.project.length();
-            if self.pos < song_end {
-                part = part.min((song_end - self.pos) as usize);
+            let (stop_at, go_round_to) = match self.loop_range {
+                Some((from, to)) if self.pos >= from && self.pos < to => (to, from),
+                _ => (self.project.length(), 0),
+            };
+            if self.pos < stop_at {
+                part = part.min((stop_at - self.pos) as usize);
             }
             let chunk = &mut out[done..done + part];
             render(&self.project, self.pos, chunk);
@@ -124,8 +131,8 @@ impl Rt {
             }
             self.pos += part as Frames;
             done += part;
-            if rising && song_end > 0 && self.pos == song_end {
-                self.pos = 0;
+            if rising && stop_at > 0 && self.pos == stop_at {
+                self.pos = go_round_to;
             }
         }
         self.shared.pos.store(self.pos, Ordering::Relaxed);
@@ -192,6 +199,10 @@ impl Engine {
 
     pub fn seek(&mut self, to: Frames) {
         self.send(Msg::Seek(to));
+    }
+
+    pub fn set_loop(&mut self, range: Option<(Frames, Frames)>) {
+        self.send(Msg::Loop(range));
     }
 
     pub fn position(&self) -> Frames {
@@ -393,6 +404,19 @@ mod tests {
         let out = rt.process(480).to_vec();
         assert!(out.iter().all(|f| *f == [1.0, 1.0]), "no gap at the join");
         assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 440);
+    }
+
+    #[test]
+    fn a_loop_range_plays_round_and_round() {
+        let (mut rt, mut remote) = rig(1000);
+        remote.outbox.push(Msg::Loop(Some((100, 300)))).ok().unwrap();
+        remote.outbox.push(Msg::Seek(100)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rt.process(480);
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 180);
+        remote.outbox.push(Msg::Loop(None)).ok().unwrap();
+        rt.process(480);
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 180 + 480);
     }
 
     #[test]
