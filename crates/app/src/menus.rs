@@ -9,8 +9,8 @@ use crate::{rule, App, Message, Overlay};
 const MENU_WIDTH: f32 = 220.0;
 const TALLEST_MENU: f32 = 250.0;
 const EDGE_GAP: f32 = 8.0;
-const FILE_MENU_AT: Point = Point::new(76.0, 44.0);
-const HELP_MENU_AT: Point = Point::new(134.0, 44.0);
+const FILE_MENU_AT: Point = Point::new(14.0, 44.0);
+const HELP_MENU_AT: Point = Point::new(72.0, 44.0);
 pub const ENTRY_ID: &str = "overlay-entry";
 
 impl App {

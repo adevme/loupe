@@ -1116,7 +1116,6 @@ impl App {
 
         container(
             row![
-                text("Loupe").size(16).font(palette.semibold),
                 file,
                 help,
                 Space::with_width(6),
