@@ -57,6 +57,13 @@ pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> R
     Ok(())
 }
 
+pub fn render_to_wav(project: &Project, path: &Path, from: Frames, to: Frames) -> Result<(), String> {
+    if to <= from {
+        return Err("there is nothing to write".into());
+    }
+    write_wav(path, project, from, to, &mut |_| {}).map_err(|why| format!("{}: {why}", path.display()))
+}
+
 pub fn next_version_folder(exports: &Path) -> PathBuf {
     let taken = fs::read_dir(exports)
         .into_iter()

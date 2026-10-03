@@ -8,7 +8,7 @@ mod resample;
 mod source;
 
 pub use audio::{Engine, Output};
-pub use export::{export, next_version_folder, ExportPlan};
+pub use export::{export, next_version_folder, render_to_wav, ExportPlan};
 pub use file::{SavedClip, SavedProject, SavedTrack};
 pub use input::{input_devices, Input, InputChoice};
 pub use model::{

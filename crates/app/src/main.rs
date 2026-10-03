@@ -99,6 +99,7 @@ pub enum Message {
     ToggleSelect(ClipId),
     SelectMany(Vec<ClipId>),
     SelectAll,
+    Join,
     LaneClicked(Frames),
     RulerClicked(Frames),
     SetLoop(LoopRange),
@@ -482,6 +483,7 @@ impl App {
                 let every: Vec<ClipId> = self.project.clips().map(|clip| clip.id).collect();
                 self.choose(every);
             }
+            Message::Join => self.join_selection(),
             Message::LaneClicked(at) => {
                 self.choose(None);
                 self.seek(at);
@@ -1427,6 +1429,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("s", true, true) => Some(Message::SaveAs),
                 ("o", true, _) => Some(Message::OpenProject),
                 ("w", true, _) => Some(Message::GoHome),
+                ("g", true, _) => Some(Message::Join),
                 ("a", true, _) => Some(Message::SelectAll),
                 ("e", true, _) => Some(Message::OpenExport),
                 ("z", true, false) => Some(Message::Undo),

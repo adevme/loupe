@@ -1,6 +1,12 @@
-use loupe_engine::{ClipId, Command, Frames, Outcome, TrackId};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use loupe_engine::{render_to_wav, ClipId, Command, Frames, Outcome, Source, TrackId};
 
 use crate::{App, Run};
+
+const TAKES_FOLDER: &str = "Audio";
+const CONSOLIDATED_MARK: &str = " (consolidated";
 
 impl App {
     pub(crate) fn choose(&mut self, clips: impl IntoIterator<Item = ClipId>) {
@@ -93,4 +99,69 @@ impl App {
         });
     }
 
+    pub(crate) fn join_selection(&mut self) {
+        let clips = self.in_song_order();
+        if clips.len() < 2 {
+            return;
+        }
+        match self.consolidate(&clips) {
+            Ok(whole) => self.choose([whole]),
+            Err(why) => self.problem = Some(why),
+        }
+    }
+
+    fn consolidate(&mut self, clips: &[ClipId]) -> Result<ClipId, String> {
+        let track = self.project.track_of(clips[0]).ok_or("Those clips are gone.")?;
+        if clips.iter().any(|clip| self.project.track_of(*clip).map(|t| t.id) != Some(track.id)) {
+            return Err("Select clips on one track to consolidate them.".into());
+        }
+        let folder = self
+            .path
+            .as_deref()
+            .and_then(|file| file.parent())
+            .map(|project| project.join(TAKES_FOLDER))
+            .ok_or("Save the project first. Consolidating makes a new audio file.")?;
+        let chosen: Vec<_> = track.clips.iter().filter(|clip| clips.contains(&clip.id)).collect();
+        let from = chosen.iter().map(|clip| clip.start).min().unwrap_or(0);
+        let to = chosen.iter().map(|clip| clip.end()).max().unwrap_or(0);
+        let track_id = track.id;
+        let first_name = chosen.iter().min_by_key(|clip| clip.start).map(|clip| clip.source.name.clone()).unwrap_or_default();
+        let name = crate::files::file_safe(first_name.split(CONSOLIDATED_MARK).next().unwrap_or(&first_name).trim_end());
+
+        let mut alone = self.project.clone();
+        alone.tracks.retain(|other| other.id == track_id);
+        alone.master = 1.0;
+        for only in &mut alone.tracks {
+            only.gain = 1.0;
+            only.muted = false;
+            only.clips.retain(|clip| clips.contains(&clip.id));
+        }
+
+        std::fs::create_dir_all(&folder).map_err(|why| format!("{}: {why}", folder.display()))?;
+        let file = unused_file(&folder, &name);
+        render_to_wav(&alone, &file, from, to)?;
+        let source = Arc::new(Source::load(&file, self.project.rate)?);
+
+        let joined = self.transact(None, |project| {
+            for clip in clips {
+                project.apply(Command::DeleteClip(*clip))?;
+            }
+            project.apply(Command::AddClip { track: track_id, source, start: from })
+        });
+        match joined {
+            Some(Outcome::Clip(whole)) => Ok(whole),
+            _ => Err("The clips could not be consolidated.".into()),
+        }
+    }
+}
+
+fn unused_file(folder: &std::path::Path, name: &str) -> PathBuf {
+    let first = folder.join(format!("{name} (consolidated).wav"));
+    if !first.exists() {
+        return first;
+    }
+    (2..)
+        .map(|number| folder.join(format!("{name} (consolidated {number}).wav")))
+        .find(|file| !file.exists())
+        .unwrap_or(first)
 }

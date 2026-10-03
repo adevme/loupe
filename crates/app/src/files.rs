@@ -24,7 +24,7 @@ fn make_project_folders(project_file: &Path) {
     }
 }
 
-fn file_safe(typed: &str) -> String {
+pub(crate) fn file_safe(typed: &str) -> String {
     typed.trim().trim_end_matches('.').chars().filter(|c| !NOT_IN_FILE_NAMES.contains(c)).collect()
 }
 
