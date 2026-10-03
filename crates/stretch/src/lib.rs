@@ -40,7 +40,11 @@ pub fn stretch(frames: &[[f32; 2]], rate: u32, ratio: f64) -> Vec<[f32; 2]> {
     let left: Vec<f32> = frames.iter().map(|f| f[0]).collect();
     let right: Vec<f32> = frames.iter().map(|f| f[1]).collect();
     let options = PROCESS_OFFLINE | ENGINE_FINER | CHANNELS_TOGETHER | PITCH_HIGH_QUALITY;
-    let stretcher = Stretcher(unsafe { rubberband_new(rate, 2, options, ratio, 1.0) });
+    let made = unsafe { rubberband_new(rate, 2, options, ratio, 1.0) };
+    if made.is_null() {
+        return frames.to_vec();
+    }
+    let stretcher = Stretcher(made);
     let mut out_left = Vec::with_capacity(wanted + BLOCK);
     let mut out_right = Vec::with_capacity(wanted + BLOCK);
     let mut buffers = [vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]];

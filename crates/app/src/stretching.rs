@@ -6,7 +6,7 @@ use loupe_engine::{ClipId, Command, Frames, Source};
 
 use crate::{App, Message, Run};
 
-const KEPT_STRETCHES: usize = 24;
+const KEPT_BYTES: usize = 256 << 20;
 
 #[derive(Default)]
 pub struct Stretches {
@@ -23,9 +23,14 @@ impl Stretches {
         self.making.retain(|busy| !Arc::ptr_eq(busy, &source));
         self.made.retain(|(from, s, _)| !(*s == stretch && Arc::ptr_eq(from, &source)));
         self.made.push((source, stretch, made));
-        if self.made.len() > KEPT_STRETCHES {
+        while self.made.len() > 1 && self.held_bytes() > KEPT_BYTES {
             self.made.remove(0);
         }
+    }
+
+    fn held_bytes(&self) -> usize {
+        let frame = std::mem::size_of::<[f32; 2]>();
+        self.made.iter().map(|(_, _, made)| made.frames.len() * frame).sum()
     }
 }
 
@@ -90,5 +95,35 @@ impl App {
             Some(made) => self.stretches.keep(source, stretch, made),
             None => self.stretches.making.retain(|busy| !Arc::ptr_eq(busy, &source)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loupe_engine::Source;
+
+    fn take(seconds: usize) -> Arc<Source> {
+        Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; seconds * 48_000]))
+    }
+
+    #[test]
+    fn the_cache_lets_go_of_old_stretches_once_it_is_full() {
+        let mut kept = Stretches::default();
+        for n in 0..20 {
+            let from = take(60);
+            kept.keep(from, 1.0 + n as f64, take(60));
+        }
+        assert!(kept.held_bytes() <= KEPT_BYTES, "it held {} bytes", kept.held_bytes());
+        assert!(!kept.made.is_empty(), "it should keep at least the newest");
+    }
+
+    #[test]
+    fn a_single_huge_stretch_is_still_kept() {
+        let mut kept = Stretches::default();
+        let from = take(600);
+        kept.keep(from.clone(), 2.0, take(600));
+        assert_eq!(kept.made.len(), 1);
+        assert!(kept.find(&from, 2.0).is_some());
     }
 }
