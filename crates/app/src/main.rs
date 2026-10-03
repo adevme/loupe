@@ -11,6 +11,7 @@ mod menus;
 mod mixer;
 mod pointer;
 mod pool;
+mod routing;
 mod recording;
 mod selection;
 mod settings;
@@ -143,6 +144,15 @@ pub enum Message {
     MixerDragged(f32),
     MixerReleased,
     MasterPercent(f32),
+    ToggleMasterMute,
+    ToggleCollapsed(loupe_engine::TrackId),
+    SetTrackParent { track: TrackId, parent: Option<TrackId> },
+    OpenRouting(TrackId),
+    OpenMatrix,
+    AddSend { from: TrackId, to: TrackId },
+    RemoveSend { from: TrackId, to: TrackId },
+    SendGain { from: TrackId, to: TrackId, gain: f32 },
+    SendPreFader { from: TrackId, to: TrackId, pre_fader: bool },
     LevelPressed(mixer::Level),
     OpenClip(ClipId),
     ClipToTrack(ClipId, TrackId),
@@ -221,6 +231,7 @@ enum Run {
     Master,
     Paint,
     Trim(ClipId),
+    Send(TrackId, TrackId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -238,6 +249,8 @@ pub enum Overlay {
     SaveName,
     Export,
     Clip(ClipId),
+    Routing(TrackId),
+    Matrix,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -265,6 +278,8 @@ struct App {
     recording: Option<recording::Recording>,
     input: Option<Input>,
     input_level: f32,
+    track_levels: [f32; loupe_engine::METERS],
+    master_level: f32,
     input_name: Option<String>,
     input_names: Vec<String>,
     practice_input: bool,
@@ -335,6 +350,8 @@ impl App {
             recording: None,
             input: None,
             input_level: 0.0,
+            track_levels: [0.0; loupe_engine::METERS],
+            master_level: 0.0,
             input_name: settings.input.clone(),
             input_names: Vec::new(),
             practice_input: silent,
@@ -488,6 +505,11 @@ impl App {
                 if let Some(input) = &self.input {
                     self.input_level = input.take_peak().max(self.input_level * METER_FALL_PER_TICK);
                 }
+                let (tracks, master) = self.engine.levels();
+                for (shown, now) in self.track_levels.iter_mut().zip(tracks) {
+                    *shown = now.max(*shown * METER_FALL_PER_TICK);
+                }
+                self.master_level = master.max(self.master_level * METER_FALL_PER_TICK);
                 self.engine.collect();
                 self.settle = self.settle.saturating_sub(1);
                 let position = self.engine.position();
@@ -832,6 +854,30 @@ impl App {
             Message::MasterPercent(percent) => {
                 self.edit(Some(Run::Master), Command::SetMasterGain(percent / 100.0));
             }
+            Message::ToggleMasterMute => {
+                self.edit(None, Command::ToggleMasterMute);
+            }
+            Message::ToggleCollapsed(track) => {
+                self.edit(None, Command::ToggleCollapsed(track));
+            }
+            Message::SetTrackParent { track, parent } => {
+                self.overlay = Overlay::None;
+                self.edit(None, Command::SetTrackParent { track, parent });
+            }
+            Message::OpenRouting(track) => self.overlay = Overlay::Routing(track),
+            Message::OpenMatrix => self.overlay = Overlay::Matrix,
+            Message::AddSend { from, to } => {
+                self.edit(None, Command::AddSend { from, to });
+            }
+            Message::RemoveSend { from, to } => {
+                self.edit(None, Command::RemoveSend { from, to });
+            }
+            Message::SendGain { from, to, gain } => {
+                self.edit(Some(Run::Send(from, to)), Command::SetSendGain { from, to, gain });
+            }
+            Message::SendPreFader { from, to, pre_fader } => {
+                self.edit(None, Command::SetSendPreFader { from, to, pre_fader });
+            }
             Message::TogglePool => {
                 self.pool_open = !self.pool_open;
                 self.overlay = Overlay::None;
@@ -978,7 +1024,7 @@ impl App {
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
             _ => None,
         });
-        let watching = self.exporting || self.copied.is_some() || self.input.is_some() || self.opening.is_some();
+        let watching = self.exporting || self.copied.is_some() || self.input.is_some() || self.opening.is_some() || self.master_level > 0.0005;
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
@@ -1498,7 +1544,8 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::Space) => Some(Message::TogglePlay),
         keyboard::Key::Named(Named::Home) => Some(Message::ToStart),
         keyboard::Key::Named(Named::Escape) => Some(Message::CloseOverlay),
-        keyboard::Key::Named(Named::F9) => Some(Message::ToggleMixer),
+        keyboard::Key::Named(Named::F6) => Some(Message::ToggleMixer),
+        keyboard::Key::Named(Named::F7) => Some(Message::OpenMatrix),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {

@@ -10,6 +10,7 @@ pub fn glyph(name: &str) -> char {
         "settings" => '\u{e154}',
         "sliders-vertical" => '\u{e162}',
         "chevron-down" => '\u{e06d}',
+        "chevron-right" => '\u{e06e}',
         "plus" => '\u{e13d}',
         "pencil" => '\u{e1f9}',
         "slice" => '\u{e2f0}',

@@ -10,6 +10,7 @@ use crate::theme::{self, Palette};
 use crate::{icons, Message};
 
 pub const HEADER_W: f32 = 200.0;
+const INDENT_W: f32 = 14.0;
 const SCROLLBAR_H: f32 = 18.0;
 const RULER_H: f32 = 30.0;
 const LANES_TOP: f32 = SCROLLBAR_H + RULER_H;
@@ -158,7 +159,9 @@ enum Hit<'a> {
     Resize(&'a Track),
     Mute(&'a Track),
     Arm(&'a Track),
+    Route(&'a Track),
     Remove(&'a Track),
+    Collapse(&'a Track),
     AddTrack,
     Grip(&'a Clip, Grip),
     Edge(&'a Clip, Edge),
@@ -181,7 +184,29 @@ impl Timeline<'_> {
     }
 
     fn height_of(&self, track: &Track) -> f32 {
+        if self.hidden(track) {
+            return 0.0;
+        }
         self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height)
+    }
+
+    fn hidden(&self, track: &Track) -> bool {
+        let mut at = track.parent;
+        let mut steps = 0;
+        while let Some(id) = at {
+            let Some(parent) = self.project.tracks.iter().find(|t| t.id == id) else {
+                return false;
+            };
+            if parent.collapsed {
+                return true;
+            }
+            steps += 1;
+            if steps > self.project.tracks.len() {
+                return false;
+            }
+            at = parent.parent;
+        }
+        false
     }
 
     fn track_top(&self, index: usize) -> f32 {
@@ -287,6 +312,13 @@ impl Timeline<'_> {
         Rectangle::new(corner, Size::new(28.0, 22.0))
     }
 
+    fn route_button(&self, index: usize) -> Rectangle {
+        let arm = self.arm_button(index);
+        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let left = if roomy { arm.x + arm.width + ARM_GAP } else { arm.x - ARM_GAP - ARM_BUTTON };
+        Rectangle::new(Point::new(left, arm.y), Size::new(ARM_BUTTON, arm.height))
+    }
+
     fn arm_button(&self, index: usize) -> Rectangle {
         let mute = self.mute_button(index);
         let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
@@ -299,6 +331,11 @@ impl Timeline<'_> {
         let height = self.height_of(&self.project.tracks[index]);
         let inset = if height >= ROOMY_HEADER_H { 9.0 } else { 5.0 };
         Rectangle::new(Point::new(16.0, top + height - inset), Size::new(HEADER_W - 32.0, METER_THICKNESS))
+    }
+
+    fn collapse_button(&self, index: usize) -> Rectangle {
+        let depth = self.project.depth_of(self.project.tracks[index].id).min(4) as f32;
+        Rectangle::new(Point::new(depth * INDENT_W, self.track_top(index) + 8.0), Size::new(22.0, 24.0))
     }
 
     fn remove_button(&self, index: usize) -> Rectangle {
@@ -443,8 +480,14 @@ impl Timeline<'_> {
                 if self.arm_button(i).contains(p) {
                     return Hit::Arm(track);
                 }
+                if self.route_button(i).contains(p) {
+                    return Hit::Route(track);
+                }
                 if self.remove_button(i).contains(p) {
                     return Hit::Remove(track);
+                }
+                if self.collapse_button(i).contains(p) && self.project.tracks.iter().any(|t| t.parent == Some(track.id)) {
+                    return Hit::Collapse(track);
                 }
             } else if self.add_button().contains(p) {
                 return Hit::AddTrack;
@@ -610,7 +653,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                     }
                     (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
                     (_, Hit::Arm(track)) => Some(Message::ToggleArm(track.id)),
+                    (_, Hit::Route(track)) => Some(Message::OpenRouting(track.id)),
                     (_, Hit::Remove(track)) => Some(Message::RemoveTrack(track.id)),
+                    (_, Hit::Collapse(track)) => Some(Message::ToggleCollapsed(track.id)),
                     (_, Hit::AddTrack) => Some(Message::AddTrack),
                     (_, Hit::Grip(clip, grip)) => {
                         let curve_at_grab = match grip {
@@ -990,7 +1035,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         }
         match (self.tool, cursor.position_in(bounds).map(|p| self.hit(p))) {
             (_, Some(Hit::Resize(_))) => mouse::Interaction::ResizingVertically,
-            (_, Some(Hit::Mute(_) | Hit::Arm(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => {
+            (_, Some(Hit::Mute(_) | Hit::Arm(_) | Hit::Route(_) | Hit::Remove(_) | Hit::AddTrack | Hit::Tool(_))) => {
                 mouse::Interaction::Pointer
             }
             (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
@@ -1050,6 +1095,9 @@ impl Timeline<'_> {
         for (i, track) in self.project.tracks.iter().enumerate() {
             let top = self.track_top(i) - LANES_TOP;
             let height = self.height_of(track);
+            if height <= 0.0 {
+                continue;
+            }
             if top > size.height || top + height < 0.0 {
                 continue;
             }
@@ -1345,6 +1393,9 @@ impl Timeline<'_> {
         for (i, track) in self.project.tracks.iter().enumerate() {
             let top = self.track_top(i) - LANES_TOP;
             let height = self.height_of(track);
+            if height <= 0.0 {
+                continue;
+            }
             if top > size.height || top + height < 0.0 {
                 continue;
             }
@@ -1355,9 +1406,29 @@ impl Timeline<'_> {
                 theme::mix(p.panel, self.colour_of(i), tint),
             );
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
+            let depth = self.project.depth_of(track.id).min(4) as f32;
+            let indent = depth * INDENT_W;
+            if depth > 0.0 {
+                frame.fill_rectangle(
+                    Point::new(indent - 7.0, top + 6.0),
+                    Size::new(2.0, height - 13.0),
+                    theme::alpha(self.colour_of(i), 0.7),
+                );
+            }
+            if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) {
+                frame.fill_text(Text {
+                    content: icons::glyph(if track.collapsed { "chevron-right" } else { "chevron-down" }).to_string(),
+                    position: Point::new(indent + 6.0, top + 20.0),
+                    color: p.text_dim,
+                    size: 13.0.into(),
+                    font: theme::ICONS,
+                    vertical_alignment: alignment::Vertical::Center,
+                    ..Text::default()
+                });
+            }
             frame.fill_text(Text {
                 content: shorten(&track.name, if height >= ROOMY_HEADER_H { 20 } else { 14 }),
-                position: Point::new(16.0, top + 20.0),
+                position: Point::new(16.0 + indent + if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) { 14.0 } else { 0.0 }, top + 20.0),
                 color: if track.muted { p.text_dim } else { p.text },
                 size: 13.0.into(),
                 font: p.medium,
@@ -1406,6 +1477,23 @@ impl Timeline<'_> {
             } else {
                 frame.stroke(&dot, Stroke::default().with_color(p.text_dim).with_width(1.5));
             }
+
+            let route = self.route_button(i);
+            let wired = !track.sends.is_empty() || track.parent.is_some();
+            let pad = Path::new(|b| {
+                b.rounded_rectangle(Point::new(route.x, route.y - LANES_TOP), route.size(), 5.0.into());
+            });
+            frame.fill(&pad, p.raised);
+            frame.fill_text(Text {
+                content: "→".into(),
+                position: Point::new(route.center_x(), route.center_y() - LANES_TOP),
+                color: if wired { p.accent } else { p.text_dim },
+                size: 13.0.into(),
+                font: p.medium,
+                horizontal_alignment: alignment::Horizontal::Center,
+                vertical_alignment: alignment::Vertical::Center,
+                ..Text::default()
+            });
         }
 
         let add = self.add_button();

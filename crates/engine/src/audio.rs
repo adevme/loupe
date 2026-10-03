@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,12 +9,13 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::clock;
 use crate::model::{ClipId, Frames, Project};
-use crate::render::{mix_tracks, scale};
+use crate::render::{mix_tracks_metered, scale, Mixdown};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
 const QUEUE: usize = 256;
 const SILENT_RATE: u32 = 48_000;
+pub const METERS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Output {
@@ -32,8 +33,23 @@ enum Msg {
     Endless(bool),
 }
 
-#[derive(Default)]
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            levels: std::array::from_fn(|_| AtomicU32::new(0)),
+            master_level: AtomicU32::new(0),
+            pos: AtomicU64::new(0),
+            playing: AtomicBool::new(false),
+            heard_turn: AtomicU64::new(0),
+            heard_pos: AtomicU64::new(0),
+            heard_at: AtomicU64::new(0),
+        }
+    }
+}
+
 struct Shared {
+    levels: [AtomicU32; METERS],
+    master_level: AtomicU32,
     pos: AtomicU64,
     playing: AtomicBool,
     heard_turn: AtomicU64,
@@ -42,6 +58,8 @@ struct Shared {
 }
 
 struct Rt {
+    scratch: Mixdown,
+    peaks: [f32; METERS],
     project: Arc<Project>,
     inbox: Consumer<Msg>,
     retired: Producer<Arc<Project>>,
@@ -69,6 +87,8 @@ fn pair(rate: u32) -> (Rt, Remote) {
     let (retired_tx, retired_rx) = RingBuffer::new(QUEUE);
     let shared = Arc::new(Shared::default());
     let rt = Rt {
+        scratch: Mixdown::default(),
+        peaks: [0.0; METERS],
         project: Arc::new(Project::new(rate)),
         inbox,
         retired: retired_tx,
@@ -113,6 +133,10 @@ impl Rt {
                 }
                 if !self.playing {
                     out[done..].fill([0.0; 2]);
+                    for slot in self.shared.levels.iter() {
+                        slot.store(0f32.to_bits(), Ordering::Relaxed);
+                    }
+                    self.shared.master_level.store(0f32.to_bits(), Ordering::Relaxed);
                     break;
                 }
             }
@@ -131,9 +155,19 @@ impl Rt {
                 part = part.min((stop_at - self.pos) as usize);
             }
             let chunk = &mut out[done..done + part];
-            mix_tracks(&self.project, self.pos, chunk, self.audition);
-            scale(chunk, self.master, self.project.master);
-            self.master = self.project.master;
+            self.peaks = [0.0; METERS];
+            mix_tracks_metered(&self.project, self.pos, chunk, self.audition, Some(&mut self.peaks), &mut self.scratch);
+            let target = if self.project.master_muted { 0.0 } else { self.project.master };
+            scale(chunk, self.master, target);
+            self.master = target;
+            let mut top = 0.0f32;
+            for frame in chunk.iter() {
+                top = top.max(frame[0].abs()).max(frame[1].abs());
+            }
+            for (slot, peak) in self.shared.levels.iter().zip(self.peaks) {
+                slot.store(peak.to_bits(), Ordering::Relaxed);
+            }
+            self.shared.master_level.store(top.to_bits(), Ordering::Relaxed);
             if !rising || self.fade < self.fade_len {
                 for frame in chunk.iter_mut() {
                     self.fade = if rising {
@@ -237,6 +271,12 @@ impl Engine {
 
     pub fn position(&self) -> Frames {
         self.remote.shared.pos.load(Ordering::Relaxed)
+    }
+
+    pub fn levels(&self) -> ([f32; METERS], f32) {
+        let shared = &self.remote.shared;
+        let tracks = std::array::from_fn(|i| f32::from_bits(shared.levels[i].load(Ordering::Relaxed)));
+        (tracks, f32::from_bits(shared.master_level.load(Ordering::Relaxed)))
     }
 
     pub fn set_endless(&mut self, endless: bool) {
@@ -390,6 +430,39 @@ mod tests {
         let source = Arc::new(Source::from_frames("one", vec![[1.0, 1.0]; len]));
         p.apply(Command::AddClip { track, source, start: 0 }).unwrap();
         p
+    }
+
+    #[test]
+    fn levels_fall_to_nothing_when_stopped() {
+        let mut engine = Engine::start(Output::Silent);
+        engine.set_project(&steady(SILENT_RATE as usize * 5));
+        engine.play();
+        thread::sleep(Duration::from_millis(150));
+        engine.stop();
+        thread::sleep(Duration::from_millis(150));
+        let (tracks, master) = engine.levels();
+        assert_eq!(tracks[0], 0.0, "track level stayed at {}", tracks[0]);
+        assert_eq!(master, 0.0, "master level stayed at {master}");
+    }
+
+    #[test]
+    fn the_engine_publishes_levels_while_playing() {
+        let mut engine = Engine::start(Output::Silent);
+        engine.set_project(&steady(SILENT_RATE as usize * 5));
+        engine.play();
+        thread::sleep(Duration::from_millis(200));
+        let (tracks, master) = engine.levels();
+        assert!(tracks[0] > 0.0, "track level stayed at {}", tracks[0]);
+        assert!(master > 0.0, "master level stayed at {master}");
+    }
+
+    #[test]
+    fn a_playing_track_reports_a_level() {
+        let project = steady(256);
+        let mut out = vec![[0.0f32; 2]; 64];
+        let mut peaks = [0.0f32; METERS];
+        crate::render::mix_tracks_metered(&project, 0, &mut out, None, Some(&mut peaks), &mut crate::render::Mixdown::default());
+        assert!(peaks[0] > 0.0, "track 0 should report a level, got {}", peaks[0]);
     }
 
     fn rig(len: usize) -> (Rt, Remote) {

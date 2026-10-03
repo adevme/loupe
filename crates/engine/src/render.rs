@@ -1,8 +1,9 @@
-use crate::model::{Clip, ClipId, Frames, Project};
+use crate::model::{Clip, ClipId, Frames, Project, Track, TrackId};
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
     mix_tracks(project, pos, out, None);
-    scale(out, project.master, project.master);
+    let level = if project.master_muted { 0.0 } else { project.master };
+    scale(out, level, level);
 }
 
 pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
@@ -17,59 +18,179 @@ pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
     }
 }
 
+#[derive(Default)]
+pub struct Mixdown {
+    buffers: Vec<Vec<[f32; 2]>>,
+    pre: Vec<[f32; 2]>,
+    order: Vec<TrackId>,
+    index: Vec<usize>,
+}
+
+impl Mixdown {
+    pub fn room_for(&mut self, tracks: usize, frames: usize) {
+        if self.buffers.len() < tracks {
+            self.buffers.resize_with(tracks, Vec::new);
+        }
+        for buffer in self.buffers.iter_mut().take(tracks) {
+            if buffer.len() < frames {
+                buffer.resize(frames, [0.0; 2]);
+            }
+        }
+        if self.pre.len() < frames {
+            self.pre.resize(frames, [0.0; 2]);
+        }
+    }
+}
+
 pub fn mix_tracks(project: &Project, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
+    let mut scratch = Mixdown::default();
+    mix_tracks_metered(project, pos, out, only, None, &mut scratch);
+}
+
+pub fn mix_tracks_metered(
+    project: &Project,
+    pos: Frames,
+    out: &mut [[f32; 2]],
+    only: Option<ClipId>,
+    mut peaks: Option<&mut [f32]>,
+    scratch: &mut Mixdown,
+) {
     out.fill([0.0; 2]);
-    let end = pos + out.len() as Frames;
-    for track in &project.tracks {
-        if track.muted && only.is_none() {
+    let len = out.len();
+    let count = project.tracks.len();
+    scratch.room_for(count, len);
+    scratch.order.clear();
+    match project.render_order() {
+        Some(order) => scratch.order.extend(order),
+        None => return,
+    }
+    scratch.index.clear();
+    for id in &scratch.order {
+        scratch.index.push(project.tracks.iter().position(|t| t.id == *id).unwrap_or(usize::MAX));
+    }
+    for (index, track) in project.tracks.iter().enumerate() {
+        let buffer = &mut scratch.buffers[index][..len];
+        buffer.fill([0.0; 2]);
+        lay_clips(track, pos, buffer, only);
+    }
+    for step in 0..scratch.order.len() {
+        let index = scratch.index[step];
+        if index == usize::MAX {
             continue;
         }
-        for clip in &track.clips {
-            let silenced = match only {
-                Some(chosen) => clip.id != chosen || clip.muted,
-                None => clip.muted,
-            };
-            if silenced || clip.end() <= pos || clip.start >= end {
-                continue;
+        let track = &project.tracks[index];
+        let silent = track.muted && only.is_none();
+        let keep_pre = track.sends.iter().any(|send| send.pre_fader);
+        if keep_pre {
+            scratch.pre[..len].copy_from_slice(&scratch.buffers[index][..len]);
+        }
+        let gain = if silent { 0.0 } else { track.gain };
+        for frame in scratch.buffers[index][..len].iter_mut() {
+            frame[0] *= gain;
+            frame[1] *= gain;
+        }
+        if let Some(slot) = peaks.as_deref_mut().and_then(|p| p.get_mut(index)) {
+            let mut top = 0.0f32;
+            for frame in &scratch.buffers[index][..len] {
+                top = top.max(frame[0].abs()).max(frame[1].abs());
             }
-            let from = clip.start.max(pos);
-            let to = clip.end().min(end);
-            let source = &clip.source.frames;
-            let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
-            let count = ((to - from) as usize).min(source.len() - source_from);
-            let gain = clip.gain * track.gain;
-            let target = &mut out[(from - pos) as usize..][..count];
-            let audio = &source[source_from..][..count];
-            let first = from - clip.start;
-            let fade_in_frames = (clip.fade_in.len.saturating_sub(first) as usize).min(count);
-            let steady_end = clip.len - clip.fade_out.len;
-            let fade_out_from = (steady_end.saturating_sub(first) as usize).clamp(fade_in_frames, count);
-            mix_faded(&mut target[..fade_in_frames], &audio[..fade_in_frames], gain, clip, first);
-            mix(&mut target[fade_in_frames..fade_out_from], &audio[fade_in_frames..fade_out_from], gain);
-            mix_faded(
-                &mut target[fade_out_from..],
-                &audio[fade_out_from..],
-                gain,
-                clip,
-                first + fade_out_from as Frames,
-            );
+            *slot = top;
+        }
+        for send in &track.sends {
+            let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
+                continue;
+            };
+            let gain = send.gain;
+            if send.pre_fader {
+                for i in 0..len {
+                    let from = scratch.pre[i];
+                    let dest = &mut scratch.buffers[target][i];
+                    dest[0] += from[0] * gain;
+                    dest[1] += from[1] * gain;
+                }
+            } else {
+                for i in 0..len {
+                    let from = scratch.buffers[index][i];
+                    let dest = &mut scratch.buffers[target][i];
+                    dest[0] += from[0] * gain;
+                    dest[1] += from[1] * gain;
+                }
+            }
+        }
+        match track.parent.and_then(|parent| project.tracks.iter().position(|t| t.id == parent)) {
+            Some(target) => {
+                for i in 0..len {
+                    let from = scratch.buffers[index][i];
+                    let dest = &mut scratch.buffers[target][i];
+                    dest[0] += from[0];
+                    dest[1] += from[1];
+                }
+            }
+            None => {
+                for (dest, from) in out.iter_mut().zip(&scratch.buffers[index][..len]) {
+                    dest[0] += from[0];
+                    dest[1] += from[1];
+                }
+            }
         }
     }
 }
 
-fn mix(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32) {
-    for (o, s) in target.iter_mut().zip(audio) {
-        o[0] += s[0] * gain;
-        o[1] += s[1] * gain;
+fn lay_clips(track: &Track, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
+    let end = pos + out.len() as Frames;
+    for clip in &track.clips {
+        let silenced = match only {
+            Some(chosen) => clip.id != chosen || clip.muted,
+            None => clip.muted,
+        };
+        if silenced || clip.end() <= pos || clip.start >= end {
+            continue;
+        }
+        let from = clip.start.max(pos);
+        let to = clip.end().min(end);
+        let source = &clip.source.frames;
+        let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
+        let count = ((to - from) as usize).min(source.len() - source_from);
+        let gain = clip.gain;
+        let target = &mut out[(from - pos) as usize..][..count];
+        let audio = &source[source_from..][..count];
+        let first = from - clip.start;
+        let fade_in_frames = (clip.fade_in.len.saturating_sub(first) as usize).min(count);
+        let steady_end = clip.len - clip.fade_out.len;
+        let fade_out_from = (steady_end.saturating_sub(first) as usize).clamp(fade_in_frames, count);
+        mix_faded(&mut target[..fade_in_frames], &audio[..fade_in_frames], gain, clip, first);
+        mix(&mut target[fade_in_frames..fade_out_from], &audio[fade_in_frames..fade_out_from], gain);
+        mix_faded(
+            &mut target[fade_out_from..],
+            &audio[fade_out_from..],
+            gain,
+            clip,
+            first + fade_out_from as Frames,
+        );
     }
 }
 
-fn mix_faded(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32, clip: &Clip, first: Frames) {
+fn mix(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32) -> f32 {
+    let mut top = 0.0f32;
+    for (o, s) in target.iter_mut().zip(audio) {
+        let (l, r) = (s[0] * gain, s[1] * gain);
+        o[0] += l;
+        o[1] += r;
+        top = top.max(l.abs()).max(r.abs());
+    }
+    top
+}
+
+fn mix_faded(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32, clip: &Clip, first: Frames) -> f32 {
+    let mut top = 0.0f32;
     for (i, (o, s)) in target.iter_mut().zip(audio).enumerate() {
         let level = gain * clip.fade_level(first + i as Frames);
-        o[0] += s[0] * level;
-        o[1] += s[1] * level;
+        let (l, r) = (s[0] * level, s[1] * level);
+        o[0] += l;
+        o[1] += r;
+        top = top.max(l.abs()).max(r.abs());
     }
+    top
 }
 
 #[cfg(test)]
@@ -302,5 +423,110 @@ mod tests {
         assert_eq!(out[70], [10.0, -10.0]);
         p.apply(Command::DeleteClip(c)).unwrap();
         assert!(whole(&p, 200).iter().all(|f| *f == [0.0, 0.0]));
+    }
+}
+
+#[cfg(test)]
+mod master_mute {
+    use crate::model::{Command, Project};
+    use crate::render::render;
+
+    #[test]
+    fn a_muted_master_renders_silence() {
+        let mut project = Project::new(48_000);
+        project.apply(Command::AddTrack { name: "t".into() }).unwrap();
+        let mut out = vec![[0.5f32; 2]; 64];
+        project.apply(Command::ToggleMasterMute).unwrap();
+        render(&project, 0, &mut out);
+        assert!(out.iter().all(|frame| frame[0] == 0.0 && frame[1] == 0.0));
+    }
+}
+
+#[cfg(test)]
+mod routing {
+    use super::*;
+    use crate::model::{Command, Outcome};
+    use crate::source::Source;
+    use std::sync::Arc;
+
+    fn ones(len: usize) -> Arc<Source> {
+        Arc::new(Source::from_frames("ones", vec![[1.0, 1.0]; len]))
+    }
+
+    fn track(p: &mut Project) -> TrackId {
+        match p.apply(Command::AddTrack { name: "T".into() }) {
+            Ok(Outcome::Track(id)) => id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn heard(project: &Project, len: usize) -> Vec<[f32; 2]> {
+        let mut out = vec![[0.0; 2]; len];
+        mix_tracks(project, 0, &mut out, None);
+        out
+    }
+
+    #[test]
+    fn a_folder_fader_scales_every_child() {
+        let mut p = Project::new(48_000);
+        let folder = track(&mut p);
+        let child = track(&mut p);
+        p.apply(Command::AddClip { track: child, source: ones(8), start: 0 }).unwrap();
+        p.apply(Command::SetTrackParent { track: child, parent: Some(folder) }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 1.0);
+        p.apply(Command::SetTrackGain { track: folder, gain: 0.5 }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 0.5);
+    }
+
+    #[test]
+    fn muting_a_folder_silences_its_children() {
+        let mut p = Project::new(48_000);
+        let folder = track(&mut p);
+        let child = track(&mut p);
+        p.apply(Command::AddClip { track: child, source: ones(8), start: 0 }).unwrap();
+        p.apply(Command::SetTrackParent { track: child, parent: Some(folder) }).unwrap();
+        p.apply(Command::SetTrackMuted { track: folder, muted: true }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 0.0);
+    }
+
+    #[test]
+    fn a_send_adds_the_signal_to_its_target() {
+        let mut p = Project::new(48_000);
+        let from = track(&mut p);
+        let to = track(&mut p);
+        p.apply(Command::AddClip { track: from, source: ones(8), start: 0 }).unwrap();
+        p.apply(Command::AddSend { from, to }).unwrap();
+        p.apply(Command::SetSendGain { from, to, gain: 0.5 }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 1.5);
+    }
+
+    #[test]
+    fn a_pre_fader_send_ignores_the_track_fader() {
+        let mut p = Project::new(48_000);
+        let from = track(&mut p);
+        let to = track(&mut p);
+        p.apply(Command::AddClip { track: from, source: ones(8), start: 0 }).unwrap();
+        p.apply(Command::AddSend { from, to }).unwrap();
+        p.apply(Command::SetSendPreFader { from, to, pre_fader: true }).unwrap();
+        p.apply(Command::SetTrackGain { track: from, gain: 0.0 }).unwrap();
+        assert_eq!(heard(&p, 4)[0][0], 1.0);
+    }
+
+    #[test]
+    fn a_send_that_would_feed_back_is_refused() {
+        let mut p = Project::new(48_000);
+        let a = track(&mut p);
+        let b = track(&mut p);
+        p.apply(Command::AddSend { from: a, to: b }).unwrap();
+        assert!(p.apply(Command::AddSend { from: b, to: a }).is_err());
+    }
+
+    #[test]
+    fn a_track_cannot_sit_inside_its_own_child() {
+        let mut p = Project::new(48_000);
+        let parent = track(&mut p);
+        let child = track(&mut p);
+        p.apply(Command::SetTrackParent { track: child, parent: Some(parent) }).unwrap();
+        assert!(p.apply(Command::SetTrackParent { track: parent, parent: Some(child) }).is_err());
     }
 }

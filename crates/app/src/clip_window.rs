@@ -12,7 +12,7 @@ const LABEL_WIDTH: f32 = 90.0;
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackChoice {
     pub id: TrackId,
-    name: String,
+    pub name: String,
 }
 
 impl fmt::Display for TrackChoice {

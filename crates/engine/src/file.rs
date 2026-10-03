@@ -12,6 +12,7 @@ pub struct SavedProject {
     pub rate: u32,
     pub bpm: f64,
     pub master: f32,
+    pub master_muted: bool,
     pub sources: Vec<PathBuf>,
     pub tracks: Vec<SavedTrack>,
 }
@@ -24,6 +25,9 @@ pub struct SavedTrack {
     pub colour: Option<[u8; 3]>,
     pub height: Option<f32>,
     pub clips: Vec<SavedClip>,
+    pub parent: Option<usize>,
+    pub collapsed: bool,
+    pub sends: Vec<(usize, f32, bool)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -47,6 +51,7 @@ impl SavedProject {
             rate: project.rate,
             bpm: project.bpm,
             master: project.master,
+            master_muted: project.master_muted,
             sources: project.sources.iter().map(|source| source.path.clone()).collect(),
             tracks: project
                 .tracks
@@ -57,6 +62,15 @@ impl SavedProject {
                     muted: track.muted,
                     colour: track.colour,
                     height: height_of(track.id),
+                    parent: track.parent.and_then(|id| project.tracks.iter().position(|t| t.id == id)),
+                    collapsed: track.collapsed,
+                    sends: track
+                        .sends
+                        .iter()
+                        .filter_map(|send| {
+                            project.tracks.iter().position(|t| t.id == send.to).map(|to| (to, send.gain, send.pre_fader))
+                        })
+                        .collect(),
                     clips: track
                         .clips
                         .iter()
@@ -77,17 +91,21 @@ impl SavedProject {
     }
 
     pub fn to_text(&self) -> String {
-        let mut out = format!("{HEADER}\nrate {}\nbpm {}\nmaster {}\n", self.rate, self.bpm, self.master);
+        let mut out = format!("{HEADER}\nrate {}\nbpm {}\nmaster {}\nmaster_muted {}\n", self.rate, self.bpm, self.master, self.master_muted as u8);
         for path in &self.sources {
             out.push_str(&format!("source {}\n", path.display()));
         }
         for track in &self.tracks {
             let colour = track.colour.map_or("-".to_string(), |[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"));
             let height = track.height.map_or("-".to_string(), |h| h.to_string());
+            let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} colour={colour} height={height} name={}\n",
-                track.gain, track.muted as u8, track.name
+                "track gain={} muted={} colour={colour} height={height} parent={parent} collapsed={} name={}\n",
+                track.gain, track.muted as u8, track.collapsed as u8, track.name
             ));
+            for (to, gain, pre) in &track.sends {
+                out.push_str(&format!("send to={to} gain={gain} pre={}\n", *pre as u8));
+            }
             for clip in &track.clips {
                 out.push_str(&format!(
                     "clip source={} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}\n",
@@ -113,7 +131,7 @@ impl SavedProject {
             Some((_, HEADER)) => {}
             _ => return Err("this is not a Loupe project file".into()),
         }
-        let mut saved = Self { rate: 0, bpm: 120.0, master: 1.0, sources: Vec::new(), tracks: Vec::new() };
+        let mut saved = Self { rate: 0, bpm: 120.0, master: 1.0, master_muted: false, sources: Vec::new(), tracks: Vec::new() };
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
             let bad = |what: &str| format!("line {number}: {what}");
@@ -121,6 +139,7 @@ impl SavedProject {
                 "rate" => saved.rate = rest.parse().map_err(|_| bad("the sample rate is not a number"))?,
                 "bpm" => saved.bpm = rest.parse().map_err(|_| bad("the tempo is not a number"))?,
                 "master" => saved.master = rest.parse().map_err(|_| bad("the master level is not a number"))?,
+                "master_muted" => saved.master_muted = rest.trim() != "0",
                 "source" => saved.sources.push(PathBuf::from(rest)),
                 "track" => {
                     let (fields, name) = rest.split_once("name=").ok_or_else(|| bad("the track has no name"))?;
@@ -132,7 +151,17 @@ impl SavedProject {
                         colour: fields.get("colour").and_then(|value| colour_from(value)),
                         height: number_in(&fields, "height"),
                         clips: Vec::new(),
+                        parent: fields.get("parent").and_then(|v| v.parse::<usize>().ok()),
+                        collapsed: fields.get("collapsed") == Some(&"1"),
+                        sends: Vec::new(),
                     });
+                }
+                "send" => {
+                    let fields = fields_of(rest);
+                    let track = saved.tracks.last_mut().ok_or_else(|| bad("a send before any track"))?;
+                    let to = fields.get("to").and_then(|v| v.parse::<usize>().ok()).ok_or_else(|| bad("the send has no target"))?;
+                    let gain = number_in(&fields, "gain").unwrap_or(1.0);
+                    track.sends.push((to, gain, fields.get("pre") == Some(&"1")));
                 }
                 "clip" => {
                     let fields = fields_of(rest);
@@ -168,6 +197,9 @@ impl SavedProject {
         let mut heights = Vec::new();
         let _ = project.apply(Command::SetBpm(self.bpm));
         let _ = project.apply(Command::SetMasterGain(self.master));
+        if self.master_muted {
+            let _ = project.apply(Command::ToggleMasterMute);
+        }
         for source in sources {
             let _ = project.apply(Command::AddSource(source.clone()));
         }
@@ -196,6 +228,22 @@ impl SavedProject {
                 for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
                     let fade = Fade { len: rescale(fade.len), curve: fade.curve };
                     let _ = project.apply(Command::SetClipFade { clip: id, edge, fade });
+                }
+            }
+        }
+        let ids: Vec<_> = project.tracks.iter().map(|t| t.id).collect();
+        for (saved, track) in self.tracks.iter().zip(&ids) {
+            if let Some(parent) = saved.parent.and_then(|p| ids.get(p)) {
+                let _ = project.apply(Command::SetTrackParent { track: *track, parent: Some(*parent) });
+            }
+            if saved.collapsed {
+                let _ = project.apply(Command::ToggleCollapsed(*track));
+            }
+            for (to, gain, pre) in &saved.sends {
+                let Some(to) = ids.get(*to) else { continue };
+                if project.apply(Command::AddSend { from: *track, to: *to }).is_ok() {
+                    let _ = project.apply(Command::SetSendGain { from: *track, to: *to, gain: *gain });
+                    let _ = project.apply(Command::SetSendPreFader { from: *track, to: *to, pre_fader: *pre });
                 }
             }
         }
@@ -294,5 +342,41 @@ mod tests {
         assert!(SavedProject::parse("loupe project 1\nbpm 120\n").is_err());
         assert!(SavedProject::parse("loupe project 1\nrate 48000\nclip source=0 start=0\n").is_err());
         assert!(SavedProject::parse("loupe project 1\nrate 48000\nwidget 3\n").is_err());
+    }
+}
+
+#[cfg(test)]
+mod routing_round_trip {
+    use super::*;
+    use crate::model::{Command, Outcome};
+    use crate::source::Source;
+
+    #[test]
+    fn folders_and_sends_survive_a_save_and_open() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(folder)) = p.apply(Command::AddTrack { name: "Vox".into() }) else {
+            panic!("no track")
+        };
+        let Ok(Outcome::Track(child)) = p.apply(Command::AddTrack { name: "Take".into() }) else {
+            panic!("no track")
+        };
+        let Ok(Outcome::Track(verb)) = p.apply(Command::AddTrack { name: "Verb".into() }) else {
+            panic!("no track")
+        };
+        p.apply(Command::SetTrackParent { track: child, parent: Some(folder) }).unwrap();
+        p.apply(Command::ToggleCollapsed(folder)).unwrap();
+        p.apply(Command::AddSend { from: child, to: verb }).unwrap();
+        p.apply(Command::SetSendGain { from: child, to: verb, gain: 0.25 }).unwrap();
+        p.apply(Command::SetSendPreFader { from: child, to: verb, pre_fader: true }).unwrap();
+        let saved = SavedProject::capture(&p, |_| None);
+        let text = saved.to_text();
+        let read = SavedProject::parse(&text).unwrap();
+        let sources: Vec<Arc<Source>> = Vec::new();
+        let (back, _) = read.build(&sources, 48_000);
+        assert_eq!(back.tracks[1].parent, Some(back.tracks[0].id));
+        assert!(back.tracks[0].collapsed);
+        assert_eq!(back.tracks[1].sends.len(), 1);
+        assert_eq!(back.tracks[1].sends[0].gain, 0.25);
+        assert!(back.tracks[1].sends[0].pre_fader);
     }
 }

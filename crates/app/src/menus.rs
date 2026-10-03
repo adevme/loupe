@@ -29,6 +29,8 @@ impl App {
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
+            Overlay::Routing(track) => self.centred(self.routing_sheet(*track)),
+            Overlay::Matrix => self.centred(self.matrix_sheet()),
         }
     }
 
@@ -101,6 +103,8 @@ impl App {
             items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
             items.push(self.item("Save as template…", "", Some(Message::SaveAsTemplate)));
             items.push(self.item("Export…", "Ctrl+E", Some(Message::OpenExport)));
+            items.push(rule(self.palette));
+            items.push(self.item("Routing matrix", "F7", Some(Message::OpenMatrix)));
         }
         items.push(rule(self.palette));
         let audio = if self.pool_open { "Hide all audio" } else { "Show all audio" };
@@ -111,11 +115,29 @@ impl App {
     }
 
     fn track_menu(&self, track: TrackId) -> Element<'_, Message> {
-        self.menu(vec![
+        let inside = self.project.tracks.iter().find(|t| t.id == track).and_then(|t| t.parent).is_some();
+        let above = self
+            .project
+            .tracks
+            .iter()
+            .position(|t| t.id == track)
+            .filter(|i| *i > 0)
+            .map(|i| self.project.tracks[i - 1].id);
+        let mut items = vec![
             self.item("Rename", "", Some(Message::StartRename(track))),
             self.item("Change colour", "", Some(Message::StartColour(track))),
             self.item("Duplicate", "", Some(Message::DuplicateTrack(track))),
-        ])
+        ];
+        items.push(self.item(
+            "Put inside the track above",
+            "",
+            above.map(|parent| Message::SetTrackParent { track, parent: Some(parent) }),
+        ));
+        if inside {
+            items.push(self.item("Take out of its folder", "", Some(Message::SetTrackParent { track, parent: None })));
+        }
+        items.push(self.item("Routing…", "", Some(Message::OpenRouting(track))));
+        self.menu(items)
     }
 
     fn entry_field<'a>(&'a self, placeholder: &'a str) -> Element<'a, Message> {

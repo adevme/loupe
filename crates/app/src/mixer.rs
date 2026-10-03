@@ -1,16 +1,16 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, column, container, mouse_area, scrollable, text, text_input, vertical_slider, Space};
+use iced::widget::{button, canvas, column, container, mouse_area, row as hrow, scrollable, text, text_input, vertical_slider, Space};
 use iced::{mouse, Alignment, Color, Element, Length};
 
 use loupe_engine::{ClipId, TrackId};
 
-use crate::{App, Message};
+use crate::{upright_rule, App, Message};
 
 pub const MIXER_HEIGHT: f32 = 236.0;
 pub const SHORTEST_MIXER: f32 = 150.0;
 const GRAB_BAR: f32 = 6.0;
 const STRIP_MARGIN: f32 = 32.0;
-const STRIP_WIDTH: f32 = 78.0;
+const STRIP_WIDTH: f32 = 96.0;
 const NAME_LENGTH: usize = 9;
 pub const SILENT_DB: f32 = -60.0;
 pub const LOUDEST_DB: f32 = 6.0;
@@ -87,6 +87,45 @@ impl App {
             .into()
     }
 
+    fn master_strip(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let muted = self.project.master_muted;
+        let percent = self.project.master * 100.0;
+        container(
+            column![
+                container(Space::new(Length::Fill, 3)).style(move |_| container::Style {
+                    background: Some(palette.accent.into()),
+                    ..Default::default()
+                }),
+                text("Master").size(12).font(palette.semibold),
+                hrow![
+                    vertical_slider(0.0..=LOUDEST_MASTER_PERCENT, percent, Message::MasterPercent)
+                        .step(1.0)
+                        .default(100.0)
+                        .on_release(Message::DragEnd)
+                        .height(Length::Fill)
+                        .style(move |_, status| palette.slider(status)),
+                    meter(palette, self.master_level),
+                ]
+                .spacing(10)
+                .height(Length::Fill)
+                .align_y(Alignment::Center),
+                self.level_readout(Level::Master, self.project.master),
+                button(text("M").size(11.5).font(palette.semibold))
+                    .padding([3, 9])
+                    .style(move |_, status| palette.mute(muted, status))
+                    .on_press(Message::ToggleMasterMute),
+            ]
+            .spacing(8)
+            .align_x(Alignment::Center),
+        )
+        .padding(8)
+        .width(STRIP_WIDTH)
+        .height(self.mixer_height - STRIP_MARGIN - GRAB_BAR)
+        .style(move |_| palette.strip())
+        .into()
+    }
+
     pub(crate) fn mixer(&self) -> Element<'_, Message> {
         let palette = self.palette;
         if self.project.tracks.is_empty() {
@@ -96,8 +135,9 @@ impl App {
                 .style(move |_| palette.bar())
                 .into();
         }
-        let strips = self.project.tracks.iter().map(|track| {
+        let strips = self.project.tracks.iter().enumerate().map(|(index, track)| {
             let id = track.id;
+            let level = self.track_levels.get(index).copied().unwrap_or(0.0);
             let db = db_from_gain(track.gain);
             let colour = match track.colour {
                 Some([r, g, b]) => Color::from_rgb8(r, g, b),
@@ -105,6 +145,9 @@ impl App {
             };
             let name: String = track.name.chars().take(NAME_LENGTH).collect();
             let muted = track.muted;
+            let count = track.sends.len();
+            let wired = count > 0 || track.parent.is_some();
+            let routes = if count > 0 { format!("→{count}") } else { "→".to_string() };
             container(
                 column![
                     container(Space::new(Length::Fill, 3)).style(move |_| container::Style {
@@ -112,17 +155,30 @@ impl App {
                         ..Default::default()
                     }),
                     text(name).size(12).font(palette.medium),
-                    vertical_slider(SILENT_DB..=LOUDEST_DB, db, move |db| Message::TrackGain(id, db))
-                        .step(0.1)
-                        .default(0.0)
-                        .on_release(Message::DragEnd)
-                        .height(Length::Fill)
-                        .style(move |_, status| palette.slider(status)),
+                    hrow![
+                        vertical_slider(SILENT_DB..=LOUDEST_DB, db, move |db| Message::TrackGain(id, db))
+                            .step(0.1)
+                            .default(0.0)
+                            .on_release(Message::DragEnd)
+                            .height(Length::Fill)
+                            .style(move |_, status| palette.slider(status)),
+                        meter(palette, level),
+                    ]
+                    .spacing(10)
+                    .height(Length::Fill)
+                    .align_y(Alignment::Center),
                     self.level_readout(Level::Track(id), track.gain),
-                    button(text("M").size(11.5).font(palette.semibold))
-                        .padding([3, 9])
-                        .style(move |_, status| palette.mute(muted, status))
-                        .on_press(Message::ToggleMute(id)),
+                    hrow![
+                        button(text("M").size(11.5).font(palette.semibold))
+                            .padding([3, 9])
+                            .style(move |_, status| palette.mute(muted, status))
+                            .on_press(Message::ToggleMute(id)),
+                        button(text(routes).size(11.5).font(palette.semibold))
+                            .padding([3, 7])
+                            .style(move |_, status| palette.toggled(wired, status))
+                            .on_press(Message::OpenRouting(id)),
+                    ]
+                    .spacing(6),
                 ]
                 .spacing(8)
                 .align_x(Alignment::Center),
@@ -137,11 +193,73 @@ impl App {
         let grab_bar = mouse_area(container(Space::new(Length::Fill, GRAB_BAR)).style(move |_| palette.bar()))
             .on_press(Message::MixerGrabbed)
             .interaction(mouse::Interaction::ResizingVertically);
-        let strips = container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
+        let faders = container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
             .padding([4, 10])
+            .width(Length::Fill)
+            .height(self.mixer_height - GRAB_BAR);
+        let master = container(self.master_strip())
+            .padding([4, 10])
+            .height(self.mixer_height - GRAB_BAR);
+        let strips = container(iced::widget::row![master, upright_rule(palette), faders].align_y(Alignment::Center))
             .width(Length::Fill)
             .height(self.mixer_height - GRAB_BAR)
             .style(move |_| palette.bar());
         column![grab_bar, strips].into()
     }
+}
+pub const METER_W: f32 = 14.0;
+const FLOOR_DB: f32 = -60.0;
+const MID_DB: f32 = -12.0;
+const HIGH_DB: f32 = -6.0;
+
+pub struct Meter {
+    level: f32,
+    palette: crate::theme::Palette,
+}
+
+impl canvas::Program<Message> for Meter {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        _theme: &iced::Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let p = self.palette;
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let h = bounds.height;
+        let w = bounds.width;
+        frame.fill_rectangle(iced::Point::ORIGIN, iced::Size::new(w, h), crate::theme::mix(p.panel, p.background, 0.6));
+        let db = 20.0 * self.level.max(1e-6).log10();
+        let up = |db: f32| ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0) * h;
+        let filled = up(db);
+        let zones = [(FLOOR_DB, p.meter_low), (MID_DB, p.meter_mid), (HIGH_DB, p.meter_high)];
+        for (i, (from_db, colour)) in zones.iter().enumerate() {
+            let from = up(*from_db);
+            let to = zones.get(i + 1).map_or(h, |(next, _)| up(*next)).min(filled);
+            if to > from {
+                let colour = if self.level >= 1.0 { p.danger } else { *colour };
+                frame.fill_rectangle(iced::Point::new(0.0, h - to), iced::Size::new(w, to - from), colour);
+            }
+        }
+        for mark in [-6.0, -12.0, -24.0, -48.0] {
+            let y = h - up(mark);
+            frame.fill_rectangle(iced::Point::new(0.0, y), iced::Size::new(w, 1.0), crate::theme::alpha(p.text_faint, 0.5));
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn meter(palette: crate::theme::Palette, level: f32) -> Element<'static, Message> {
+    let db = if level <= 0.0 { "-inf".to_string() } else { format!("{:.1}", 20.0 * level.log10()) };
+    column![
+        canvas(Meter { level, palette }).width(METER_W).height(Length::Fill),
+        text(db).size(10).font(palette.mono).color(palette.text_faint),
+    ]
+    .spacing(4)
+    .align_x(Alignment::Center)
+    .into()
 }
