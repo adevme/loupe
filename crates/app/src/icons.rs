@@ -15,6 +15,7 @@ pub fn glyph(name: &str) -> char {
         "slice" => '\u{e2f0}',
         "volume-x" => '\u{e1ac}',
         "eraser" => '\u{e28f}',
+        "square" => '\u{e167}',
         _ => '?',
     }
 }

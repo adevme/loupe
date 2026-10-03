@@ -2,7 +2,7 @@ use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, column, container, mouse_area, scrollable, text, text_input, vertical_slider, Space};
 use iced::{mouse, Alignment, Color, Element, Length};
 
-use loupe_engine::TrackId;
+use loupe_engine::{ClipId, TrackId};
 
 use crate::{App, Message};
 
@@ -19,6 +19,7 @@ pub const LEVEL_ENTRY_ID: &str = "level-entry";
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Level {
     Track(TrackId),
+    Clip(ClipId),
     Master,
 }
 
@@ -28,7 +29,7 @@ pub fn db_from_typed(typed: &str) -> Option<f32> {
     if number == "-inf" {
         return Some(SILENT_DB);
     }
-    number.parse::<f32>().ok().filter(|db| db.is_finite()).map(|db| db.clamp(SILENT_DB, LOUDEST_DB))
+    number.parse::<f32>().ok().filter(|db| db.is_finite())
 }
 
 pub fn gain_from_db(db: f32) -> f32 {
@@ -51,7 +52,7 @@ pub fn level_text(gain: f32) -> String {
     if gain <= 0.0 {
         "-inf".to_string()
     } else {
-        format!("{:+.1}", db_from_gain(gain))
+        format!("{:+.1}", (20.0 * gain.log10()).max(SILENT_DB))
     }
 }
 

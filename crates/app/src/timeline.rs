@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
 use iced::{alignment, keyboard, mouse, Color, Point, Rectangle, Renderer, Size, Theme};
@@ -26,6 +27,7 @@ const TOOL_BUTTON: f32 = 26.0;
 const TOOL_GAP: f32 = 6.0;
 const TOOLS_LEFT: f32 = 12.0;
 const EDGE_GRIP: f32 = 6.0;
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const MIN_CLIP_PX_FOR_EDGES: f32 = 20.0;
 const SHORTEST_CLIP: Frames = 16;
 const HANDLE_RADIUS: f32 = 4.5;
@@ -93,6 +95,7 @@ pub struct Timeline<'a> {
 #[derive(Default)]
 pub struct Interaction {
     drag: Option<Drag>,
+    last_press: Option<(ClipId, Instant)>,
     modifiers: keyboard::Modifiers,
 }
 
@@ -471,6 +474,13 @@ impl canvas::Program<Message> for Timeline<'_> {
                 let Some(p) = cursor.position_in(bounds) else {
                     return (Ignored, None);
                 };
+                if let (Tool::Pencil, Hit::Clip(clip) | Hit::Edge(clip, _)) = (self.tool, self.hit(p)) {
+                    let pressed_twice = state.last_press.is_some_and(|(last, at)| last == clip.id && at.elapsed() < DOUBLE_CLICK);
+                    state.last_press = (!pressed_twice).then(|| (clip.id, Instant::now()));
+                    if pressed_twice {
+                        return (Captured, Some(Message::OpenClip(clip.id)));
+                    }
+                }
                 let message = match (self.tool, self.hit(p)) {
                     (_, Hit::Tool(tool)) => Some(Message::SetTool(tool)),
                     (Tool::Razor, Hit::Clip(_) | Hit::Grip(..) | Hit::Lane) => {

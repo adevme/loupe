@@ -7,8 +7,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 
-use crate::model::{Frames, Project};
-use crate::render::render;
+use crate::model::{ClipId, Frames, Project};
+use crate::render::render_choice;
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -27,6 +27,7 @@ enum Msg {
     Stop,
     Seek(Frames),
     Loop(Option<(Frames, Frames)>),
+    Audition(Option<ClipId>),
 }
 
 #[derive(Default)]
@@ -44,6 +45,7 @@ struct Rt {
     playing: bool,
     seek: Option<Frames>,
     loop_range: Option<(Frames, Frames)>,
+    audition: Option<ClipId>,
     fade: u32,
     fade_len: u32,
     block: Vec<[f32; 2]>,
@@ -68,6 +70,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         playing: false,
         seek: None,
         loop_range: None,
+        audition: None,
         fade: 0,
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
@@ -87,6 +90,7 @@ impl Rt {
                 Msg::Stop => self.playing = false,
                 Msg::Seek(to) => self.seek = Some(to),
                 Msg::Loop(range) => self.loop_range = range,
+                Msg::Audition(clip) => self.audition = clip,
             }
         }
 
@@ -116,7 +120,7 @@ impl Rt {
                 part = part.min((stop_at - self.pos) as usize);
             }
             let chunk = &mut out[done..done + part];
-            render(&self.project, self.pos, chunk);
+            render_choice(&self.project, self.pos, chunk, self.audition);
             if !rising || self.fade < self.fade_len {
                 for frame in chunk.iter_mut() {
                     self.fade = if rising {
@@ -203,6 +207,10 @@ impl Engine {
 
     pub fn set_loop(&mut self, range: Option<(Frames, Frames)>) {
         self.send(Msg::Loop(range));
+    }
+
+    pub fn audition(&mut self, clip: Option<ClipId>) {
+        self.send(Msg::Audition(clip));
     }
 
     pub fn position(&self) -> Frames {

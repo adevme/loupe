@@ -1,14 +1,22 @@
-use crate::model::{Clip, Frames, Project};
+use crate::model::{Clip, ClipId, Frames, Project};
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
+    render_choice(project, pos, out, None);
+}
+
+pub fn render_choice(project: &Project, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
     out.fill([0.0; 2]);
     let end = pos + out.len() as Frames;
     for track in &project.tracks {
-        if track.muted {
+        if track.muted && only.is_none() {
             continue;
         }
         for clip in &track.clips {
-            if clip.muted || clip.end() <= pos || clip.start >= end {
+            let silenced = match only {
+                Some(chosen) => clip.id != chosen || clip.muted,
+                None => clip.muted,
+            };
+            if silenced || clip.end() <= pos || clip.start >= end {
                 continue;
             }
             let from = clip.start.max(pos);
@@ -60,7 +68,7 @@ fn mix_faded(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32, clip: &Clip
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ClipId, Command, Edge, Fade, Outcome, TrackId};
+    use crate::model::{Command, Edge, Fade, Outcome, TrackId};
     use crate::source::Source;
     use std::sync::Arc;
 
@@ -225,6 +233,22 @@ mod tests {
         assert_eq!(out[500], [0.0, 0.0]);
         p.apply(Command::SetClipMuted { clip: right, muted: false }).unwrap();
         assert_eq!(whole(&p, 1000)[500], [500.0, -500.0]);
+    }
+
+    #[test]
+    fn one_clip_can_be_heard_alone_unless_it_is_muted() {
+        let mut p = Project::new(48_000);
+        let a = track(&mut p);
+        let b = track(&mut p);
+        let wanted = clip(&mut p, a, counting(100), 0);
+        clip(&mut p, b, counting(100), 0);
+        p.apply(Command::SetTrackMuted { track: a, muted: true }).unwrap();
+        let mut out = vec![[9.0; 2]; 100];
+        render_choice(&p, 0, &mut out, Some(wanted));
+        assert_eq!(out[10], [10.0, -10.0]);
+        p.apply(Command::SetClipMuted { clip: wanted, muted: true }).unwrap();
+        render_choice(&p, 0, &mut out, Some(wanted));
+        assert_eq!(out[10], [0.0, 0.0]);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clip_window;
 mod files;
 mod home;
 mod icons;
@@ -116,6 +117,10 @@ pub enum Message {
     MixerReleased,
     MasterGain(f32),
     LevelPressed(mixer::Level),
+    OpenClip(ClipId),
+    ClipToTrack(ClipId, TrackId),
+    ToggleClipMute(ClipId),
+    TogglePreview(ClipId),
     LevelEntered,
     SetTool(Tool),
     Refresh,
@@ -171,6 +176,7 @@ pub enum Overlay {
     Colour { track: TrackId, at: Point },
     ConfirmDiscard(Pending),
     TemplateName,
+    Clip(ClipId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -192,6 +198,7 @@ struct App {
     tool: Tool,
     level_press: Option<(mixer::Level, Instant)>,
     editing_level: Option<mixer::Level>,
+    preview: Option<clip_window::Preview>,
     engine: Engine,
     project: Project,
     undo: Vec<Project>,
@@ -241,6 +248,7 @@ impl App {
             tool: Tool::default(),
             level_press: None,
             editing_level: None,
+            preview: None,
             problem: None,
             startup_problem: no_sound.or(loaded.problem).or(no_folder),
             bpm: format_bpm(project.bpm),
@@ -447,7 +455,24 @@ impl App {
             Message::CloseOverlay => {
                 self.overlay = Overlay::None;
                 self.editing_level = None;
+                self.stop_preview();
             }
+            Message::OpenClip(clip) => {
+                self.selected = Some(clip);
+                self.overlay = Overlay::Clip(clip);
+                self.cache.clear();
+            }
+            Message::ClipToTrack(clip, track) => {
+                if let Some(start) = self.project.clip(clip).map(|clip| clip.start) {
+                    self.edit(None, Command::MoveClip { clip, track, start });
+                }
+            }
+            Message::ToggleClipMute(clip) => {
+                if let Some(muted) = self.project.clip(clip).map(|clip| !clip.muted) {
+                    self.edit(None, Command::SetClipMuted { clip, muted });
+                }
+            }
+            Message::TogglePreview(clip) => self.toggle_preview(clip),
             Message::DeleteClip(clip) => {
                 if self.selected == Some(clip) {
                     self.selected = None;
@@ -569,6 +594,7 @@ impl App {
                     let gain = match level {
                         mixer::Level::Master => Some(self.project.master),
                         mixer::Level::Track(track) => self.project.track(track).map(|track| track.gain),
+                        mixer::Level::Clip(clip) => self.project.clip(clip).map(|clip| clip.gain),
                     };
                     if let Some(gain) = gain {
                         self.entry = mixer::level_text(gain);
@@ -582,10 +608,14 @@ impl App {
             }
             Message::LevelEntered => {
                 if let (Some(level), Some(db)) = (self.editing_level.take(), mixer::db_from_typed(&self.entry)) {
-                    let gain = mixer::gain_from_db(db);
+                    let fader = mixer::gain_from_db(db.clamp(mixer::SILENT_DB, mixer::LOUDEST_DB));
                     let command = match level {
-                        mixer::Level::Master => Command::SetMasterGain(gain),
-                        mixer::Level::Track(track) => Command::SetTrackGain { track, gain },
+                        mixer::Level::Master => Command::SetMasterGain(fader),
+                        mixer::Level::Track(track) => Command::SetTrackGain { track, gain: fader },
+                        mixer::Level::Clip(clip) => {
+                            let gain = 10f32.powf(db.clamp(timeline::MIN_GAIN_DB, timeline::MAX_GAIN_DB) / 20.0);
+                            Command::SetClipGain { clip, gain }
+                        }
                     };
                     self.edit(None, command);
                 }

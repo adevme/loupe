@@ -20,6 +20,7 @@ impl App {
             Overlay::Settings => self.centred(self.settings_sheet()),
             Overlay::ConfirmDiscard(_) => self.centred(self.discard_sheet()),
             Overlay::TemplateName => self.centred(self.template_sheet()),
+            Overlay::Clip(clip) => self.centred(self.clip_sheet(*clip)),
             Overlay::FileMenu => self.floating(FILE_MENU_AT, self.file_menu()),
             Overlay::HelpMenu => self.floating(HELP_MENU_AT, self.menu(vec![self.item("About", "", Some(Message::OpenAbout))])),
             Overlay::About => self.centred(self.about_sheet()),
