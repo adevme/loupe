@@ -2,18 +2,20 @@ mod biquad;
 mod compressor;
 mod delay;
 mod eq;
+mod history;
 mod limiter;
 mod reverb;
 mod scope;
 mod smooth;
 
 pub use biquad::{Coefficients, Shape};
-pub use compressor::Compressor;
-pub use delay::Delay;
+pub use compressor::{Compressor, Curve, STYLES};
+pub use delay::{echo_seconds, Delay, NOTES};
 pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
+pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use scope::Scope;
 pub use limiter::Limiter;
-pub use reverb::Reverb;
+pub use reverb::{decay_seconds, Reverb};
 
 pub type Frame = [f32; 2];
 
@@ -109,6 +111,8 @@ pub trait Effect: Send {
     fn latency(&self) -> usize {
         0
     }
+
+    fn set_tempo(&mut self, _bpm: f32) {}
 
     fn set_by_id(&mut self, id: &str, value: f32) -> bool {
         match self.params().iter().position(|param| param.id == id) {
