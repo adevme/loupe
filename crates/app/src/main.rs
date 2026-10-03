@@ -36,12 +36,12 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+const TOP_BAR_HEIGHT: f32 = 53.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 fn main() -> iced::Result {
     let settings = Settings::load();
     let loaded = Palette::load(settings.theme.as_deref());
-    let scale = settings.scale;
     let ui_font = loaded.palette.ui;
     iced::application(App::title, App::update, App::view)
         .subscription(App::subscription)
@@ -60,7 +60,7 @@ fn main() -> iced::Result {
             min_size: Some(Size::new(820.0, 420.0)),
             ..window::Settings::default()
         })
-        .run_with(move || App::new(loaded, scale))
+        .run_with(move || App::new(loaded, settings))
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
@@ -109,6 +109,9 @@ pub enum Message {
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
     ToggleMixer,
+    MixerGrabbed,
+    MixerDragged(f32),
+    MixerReleased,
     MasterGain(f32),
     LevelPressed(mixer::Level),
     LevelEntered,
@@ -187,6 +190,8 @@ struct App {
     overlay: Overlay,
     entry: String,
     mixer_open: bool,
+    mixer_height: f32,
+    resizing_mixer: bool,
     pool_open: bool,
     path: Option<PathBuf>,
     dirty: bool,
@@ -194,7 +199,8 @@ struct App {
 }
 
 impl App {
-    fn new(loaded: theme::Loaded, scale: f64) -> (Self, Task<Message>) {
+    fn new(loaded: theme::Loaded, settings: Settings) -> (Self, Task<Message>) {
+        let scale = settings.scale;
         let silent = std::env::var("LOUPE_AUDIO").as_deref() == Ok("silent");
         let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device });
         let project = Project::new(engine.rate());
@@ -228,6 +234,8 @@ impl App {
             overlay: Overlay::None,
             entry: String::new(),
             mixer_open: false,
+            mixer_height: settings.mixer_height.unwrap_or(mixer::MIXER_HEIGHT).max(mixer::SHORTEST_MIXER),
+            resizing_mixer: false,
             pool_open: false,
             path: None,
             dirty: false,
@@ -453,6 +461,18 @@ impl App {
                 }
             }
             Message::ToggleMixer => self.mixer_open = !self.mixer_open,
+            Message::MixerGrabbed => self.resizing_mixer = true,
+            Message::MixerDragged(pointer_y) => {
+                let below = if self.status().is_some() { STATUS_HEIGHT + 1.0 } else { 0.0 };
+                let tallest = (self.window.height - TOP_BAR_HEIGHT - below).max(mixer::SHORTEST_MIXER);
+                self.mixer_height = (self.window.height - below - pointer_y).clamp(mixer::SHORTEST_MIXER, tallest);
+            }
+            Message::MixerReleased => {
+                self.resizing_mixer = false;
+                if let Err(why) = settings::save("mixer_height", &self.mixer_height.round().to_string()) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
             Message::TrackGain(track, db) => {
                 let gain = mixer::gain_from_db(db);
                 self.edit(Some(Run::TrackGain(track)), Command::SetTrackGain { track, gain });
@@ -609,7 +629,16 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, ticks])
+        let mixer_drag = if self.resizing_mixer {
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::MixerDragged(position.y)),
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_)) => Some(Message::MixerReleased),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([shortcuts, window, ticks, mixer_drag])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {

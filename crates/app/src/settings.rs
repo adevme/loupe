@@ -8,6 +8,7 @@ const SETTINGS_FILE: &str = "settings";
 pub struct Settings {
     pub theme: Option<String>,
     pub scale: f64,
+    pub mixer_height: Option<f32>,
 }
 
 impl Settings {
@@ -17,6 +18,7 @@ impl Settings {
         Self {
             theme: value_of("theme").map(str::to_string),
             scale: value_of("scale").and_then(|value| value.parse().ok()).map_or(1.0, clamp_scale),
+            mixer_height: value_of("mixer_height").and_then(|value| value.parse().ok()),
         }
     }
 }

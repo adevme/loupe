@@ -1,14 +1,16 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, column, container, mouse_area, scrollable, text, text_input, vertical_slider, Space};
-use iced::{Alignment, Color, Element, Length};
+use iced::{mouse, Alignment, Color, Element, Length};
 
 use loupe_engine::TrackId;
 
 use crate::{App, Message};
 
-const MIXER_HEIGHT: f32 = 236.0;
+pub const MIXER_HEIGHT: f32 = 236.0;
+pub const SHORTEST_MIXER: f32 = 150.0;
+const GRAB_BAR: f32 = 6.0;
+const STRIP_MARGIN: f32 = 32.0;
 const STRIP_WIDTH: f32 = 78.0;
-const STRIP_HEIGHT: f32 = 204.0;
 const NAME_LENGTH: usize = 9;
 pub const SILENT_DB: f32 = -60.0;
 pub const LOUDEST_DB: f32 = 6.0;
@@ -78,7 +80,7 @@ impl App {
         if self.project.tracks.is_empty() {
             return container(text("Each track gets a fader here.").size(12.5).color(palette.text_dim))
                 .center_x(Length::Fill)
-                .center_y(MIXER_HEIGHT)
+                .center_y(self.mixer_height)
                 .style(move |_| palette.bar())
                 .into();
         }
@@ -115,16 +117,19 @@ impl App {
             )
             .padding(8)
             .width(STRIP_WIDTH)
-            .height(STRIP_HEIGHT)
+            .height(self.mixer_height - STRIP_MARGIN - GRAB_BAR)
             .style(move |_| palette.strip())
             .into()
         });
         let row = iced::widget::row(strips).spacing(8);
-        container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
-            .padding(10)
+        let grab_bar = mouse_area(container(Space::new(Length::Fill, GRAB_BAR)).style(move |_| palette.bar()))
+            .on_press(Message::MixerGrabbed)
+            .interaction(mouse::Interaction::ResizingVertically);
+        let strips = container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
+            .padding([4, 10])
             .width(Length::Fill)
-            .height(MIXER_HEIGHT)
-            .style(move |_| palette.bar())
-            .into()
+            .height(self.mixer_height - GRAB_BAR)
+            .style(move |_| palette.bar());
+        column![grab_bar, strips].into()
     }
 }
