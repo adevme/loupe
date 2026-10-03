@@ -5,6 +5,7 @@ use vst3::{ComPtr, Steinberg::{IPluginFactory, IPluginFactoryTrait}};
 
 pub struct Library {
     factory: ComPtr<IPluginFactory>,
+    us: vst3::ComWrapper<crate::context::Us>,
     exit: Option<unsafe extern "C" fn() -> bool>,
     _lib: libloading::Library,
 }
@@ -55,7 +56,16 @@ impl Library {
             let raw = get_factory();
             let factory = ComPtr::from_raw(raw).ok_or("the plugin gave back no factory")?;
             let exit = lib.get::<unsafe extern "C" fn() -> bool>(exit_name()).ok().map(|symbol| *symbol);
-            Ok(Self { factory, exit, _lib: lib })
+            let us = crate::context::ours();
+            if let Some(newer) = factory.cast::<vst3::Steinberg::IPluginFactory3>() {
+                let context = us
+                    .as_com_ref::<vst3::Steinberg::FUnknown>()
+                    .map(|found| found.as_ptr())
+                    .unwrap_or(std::ptr::null_mut());
+                use vst3::Steinberg::IPluginFactory3Trait;
+                newer.setHostContext(context);
+            }
+            Ok(Self { factory, us, exit, _lib: lib })
         }
     }
 
@@ -154,6 +164,7 @@ impl Effect {
             .as_com_ref::<vst3::Steinberg::FUnknown>()
             .map(|found| found.as_ptr())
             .unwrap_or(std::ptr::null_mut());
+        let _ = &library.us;
         unsafe {
             if component.initialize(context) != kResultOk {
                 return Err("the plugin would not start up".into());

@@ -16,8 +16,12 @@ mod com {
     }
 
     pub fn start() {
+        let model = match std::env::var("LOUPE_COM").as_deref() {
+            Ok("mta") => 0x0,
+            _ => 0x2,
+        };
         unsafe {
-            CoInitializeEx(std::ptr::null_mut(), 0x2);
+            CoInitializeEx(std::ptr::null_mut(), model);
         }
     }
 
