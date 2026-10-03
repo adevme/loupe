@@ -1,4 +1,4 @@
-use crate::biquad::{Biquad, Coefficients, Shape};
+use crate::biquad::{Biquad, Coefficients, Shape, BUTTERWORTH};
 use crate::smooth::Smoothed;
 use crate::{settled, Effect, Frame, Param, Unit, Values, DEFAULT_RATE};
 
@@ -120,7 +120,7 @@ impl Reverb {
             self.keep[line] = 10f32.powf(-3.0 * length / (decay * self.rate));
         }
         self.damp = (-std::f32::consts::TAU * self.values.get(3) / self.rate).exp();
-        self.low_cut = Coefficients::design(Shape::LowCut, self.rate, self.values.get(4), 0.0, 0.0);
+        self.low_cut = Coefficients::design(Shape::LowCut, self.rate, self.values.get(4), BUTTERWORTH, 0.0);
         self.width.aim(self.values.get(5) / 100.0);
         self.mix.aim(self.values.get(6) / 100.0);
     }

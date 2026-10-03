@@ -2,7 +2,7 @@ use std::f32::consts::TAU;
 
 use crate::{settled, Frame};
 
-const BUTTERWORTH_Q: f32 = std::f32::consts::FRAC_1_SQRT_2;
+pub const BUTTERWORTH: f32 = std::f32::consts::FRAC_1_SQRT_2;
 const LOWEST_HZ: f32 = 10.0;
 const HIGHEST_OF_NYQUIST: f32 = 0.98;
 
@@ -13,6 +13,8 @@ pub enum Shape {
     Bell,
     HighShelf,
     HighCut,
+    Notch,
+    BandPass,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,7 +31,7 @@ impl Coefficients {
 
     pub fn design(shape: Shape, rate: f32, hz: f32, q: f32, gain_db: f32) -> Self {
         let hz = hz.clamp(LOWEST_HZ, rate * 0.5 * HIGHEST_OF_NYQUIST);
-        let q = if matches!(shape, Shape::LowCut | Shape::HighCut) { BUTTERWORTH_Q } else { q.max(0.05) };
+        let q = q.max(0.025);
         let (sin, cos) = (TAU * hz / rate).sin_cos();
         let alpha = sin / (2.0 * q);
         let a = 10f32.powf(gain_db / 40.0);
@@ -38,6 +40,8 @@ impl Coefficients {
             Shape::LowCut => ((1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             Shape::HighCut => ((1.0 - cos) / 2.0, 1.0 - cos, (1.0 - cos) / 2.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             Shape::Bell => (1.0 + alpha * a, -2.0 * cos, 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * cos, 1.0 - alpha / a),
+            Shape::Notch => (1.0, -2.0 * cos, 1.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
+            Shape::BandPass => (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos, 1.0 - alpha),
             Shape::LowShelf => (
                 a * ((a + 1.0) - (a - 1.0) * cos + lift),
                 2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
@@ -56,6 +60,21 @@ impl Coefficients {
             ),
         };
         Self { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }
+    }
+
+    pub fn gentle(shape: Shape, rate: f32, hz: f32) -> Self {
+        let hz = hz.clamp(LOWEST_HZ, rate * 0.5 * HIGHEST_OF_NYQUIST);
+        let k = (std::f32::consts::PI * hz / rate).tan();
+        let a1 = (k - 1.0) / (k + 1.0);
+        match shape {
+            Shape::LowCut => Self { b0: 1.0 / (1.0 + k), b1: -1.0 / (1.0 + k), b2: 0.0, a1, a2: 0.0 },
+            Shape::HighCut => Self { b0: k / (1.0 + k), b1: k / (1.0 + k), b2: 0.0, a1, a2: 0.0 },
+            _ => Self::PASS,
+        }
+    }
+
+    pub fn wide(&self) -> [f64; 5] {
+        [self.b0, self.b1, self.b2, self.a1, self.a2].map(f64::from)
     }
 
     pub fn response_db(&self, rate: f32, hz: f32) -> f32 {
@@ -106,11 +125,20 @@ mod tests {
         let bell = Coefficients::design(Shape::Bell, RATE, 1000.0, 1.0, 6.0);
         assert!((bell.response_db(RATE, 1000.0) - 6.0).abs() < 0.01);
         assert!(bell.response_db(RATE, 50.0).abs() < 0.2);
-        let low_cut = Coefficients::design(Shape::LowCut, RATE, 100.0, 1.0, 0.0);
+        let low_cut = Coefficients::design(Shape::LowCut, RATE, 100.0, std::f32::consts::FRAC_1_SQRT_2, 0.0);
         assert!((low_cut.response_db(RATE, 100.0) + 3.01).abs() < 0.05);
         assert!(low_cut.response_db(RATE, 25.0) < -23.0);
         assert!(low_cut.response_db(RATE, 5000.0).abs() < 0.01);
-        let high_cut = Coefficients::design(Shape::HighCut, RATE, 5000.0, 1.0, 0.0);
+        let high_cut = Coefficients::design(Shape::HighCut, RATE, 5000.0, std::f32::consts::FRAC_1_SQRT_2, 0.0);
+        let notch = Coefficients::design(Shape::Notch, RATE, 3000.0, 4.0, 0.0);
+        assert!(notch.response_db(RATE, 3000.0) < -60.0);
+        assert!(notch.response_db(RATE, 1000.0).abs() < 0.3);
+        let band = Coefficients::design(Shape::BandPass, RATE, 500.0, 2.0, 0.0);
+        assert!(band.response_db(RATE, 500.0).abs() < 0.01);
+        assert!(band.response_db(RATE, 5000.0) < -20.0);
+        let gentle = Coefficients::gentle(Shape::LowCut, RATE, 100.0);
+        assert!((gentle.response_db(RATE, 100.0) + 3.01).abs() < 0.05);
+        assert!((gentle.response_db(RATE, 25.0) - gentle.response_db(RATE, 50.0) + 5.5).abs() < 0.6);
         assert!(high_cut.response_db(RATE, 20_000.0) < -20.0);
         let low_shelf = Coefficients::design(Shape::LowShelf, RATE, 200.0, 0.707, -9.0);
         assert!((low_shelf.response_db(RATE, 20.0) + 9.0).abs() < 0.3);

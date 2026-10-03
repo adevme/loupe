@@ -4,12 +4,14 @@ mod delay;
 mod eq;
 mod limiter;
 mod reverb;
+mod scope;
 mod smooth;
 
 pub use biquad::{Coefficients, Shape};
 pub use compressor::Compressor;
 pub use delay::Delay;
-pub use eq::Equalizer;
+pub use eq::{knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
+pub use scope::Scope;
 pub use limiter::Limiter;
 pub use reverb::Reverb;
 
@@ -25,6 +27,7 @@ pub enum Unit {
     Ratio,
     Width,
     Switch,
+    Choice,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +45,7 @@ pub struct Param {
     pub default: f32,
     pub unit: Unit,
     pub skew: Skew,
+    pub choices: &'static [&'static str],
 }
 
 impl Param {
@@ -50,7 +54,16 @@ impl Param {
             Unit::Hertz | Unit::Milliseconds | Unit::Seconds | Unit::Ratio => Skew::Logarithmic,
             _ => Skew::Linear,
         };
-        Self { id, name, min, max, default, unit, skew }
+        Self { id, name, min, max, default, unit, skew, choices: &[] }
+    }
+
+    pub const fn choice(id: &'static str, name: &'static str, choices: &'static [&'static str], default: usize) -> Self {
+        let max = if choices.is_empty() { 1.0 } else { (choices.len() - 1) as f32 };
+        Self { id, name, min: 0.0, max, default: default as f32, unit: Unit::Choice, skew: Skew::Linear, choices }
+    }
+
+    pub fn chosen(&self, value: f32) -> Option<&'static str> {
+        self.choices.get(self.clamp(value) as usize).copied()
     }
 
     pub fn clamp(&self, value: f32) -> f32 {
@@ -58,7 +71,7 @@ impl Param {
             return self.default;
         }
         let value = value.clamp(self.min, self.max);
-        if self.unit == Unit::Switch {
+        if matches!(self.unit, Unit::Switch | Unit::Choice) {
             value.round()
         } else {
             value

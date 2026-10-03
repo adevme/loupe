@@ -1,4 +1,4 @@
-use crate::biquad::{Biquad, Coefficients, Shape};
+use crate::biquad::{Biquad, Coefficients, Shape, BUTTERWORTH};
 use crate::smooth::Smoothed;
 use crate::{Effect, Frame, Param, Unit, Values, DEFAULT_RATE};
 
@@ -52,8 +52,8 @@ impl Delay {
         self.feedback.aim(self.values.get(1) / 100.0);
         self.mix.aim(self.values.get(2) / 100.0);
         self.ping_pong = self.values.get(3) > 0.5;
-        self.low_cut = Coefficients::design(Shape::LowCut, self.rate, self.values.get(4), 0.0, 0.0);
-        self.high_cut = Coefficients::design(Shape::HighCut, self.rate, self.values.get(5), 0.0, 0.0);
+        self.low_cut = Coefficients::design(Shape::LowCut, self.rate, self.values.get(4), BUTTERWORTH, 0.0);
+        self.high_cut = Coefficients::design(Shape::HighCut, self.rate, self.values.get(5), BUTTERWORTH, 0.0);
     }
 
     fn read(&self, back: f32) -> Frame {
