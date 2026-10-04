@@ -260,7 +260,7 @@ fn main() {
                     Ok(effect) => {
                         let latency = effect.latency();
                         open = Some(effect);
-                        Reply::Loaded { inputs: 2, outputs: 2, latency }
+                        Reply::Loaded { inputs: 2, outputs: 2, latency, ara: false }
                     }
                     Err(why) => Reply::Trouble(why),
                 }

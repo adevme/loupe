@@ -2357,6 +2357,7 @@ dependencies = [
  "clap-sys",
  "libloading 0.8.9",
  "loupe-stock",
+ "symphonia",
  "vst3",
 ]
 
