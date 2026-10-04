@@ -5,13 +5,14 @@ use std::sync::{Arc, Mutex};
 use loupe_engine::{Chains, ClipId, Project, TrackId};
 use loupe_plugins::rack::{Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
-use loupe_stock::{History, Readings, Scopes};
+use loupe_stock::{Findings, History, Readings, Scopes};
 
 #[derive(Clone, Default)]
 pub struct Peek {
     pub scopes: Option<Arc<Scopes>>,
     pub history: Option<Arc<History>>,
     pub meter: Option<Arc<Readings>>,
+    pub findings: Option<Arc<Findings>>,
     pub knobs: Vec<String>,
 }
 
@@ -134,31 +135,31 @@ impl Racks {
         for (id, rack) in self.chains.iter_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
-                let (scopes, history, meter) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history(), made.meter()),
-                    None => (None, None, None),
+                let (scopes, history, meter, findings) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
+                    None => (None, None, None, None),
                 };
-                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, knobs }));
+                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, knobs }));
             }
         }
         for (id, rack) in self.clips.iter_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
-                let (scopes, history, meter) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history(), made.meter()),
-                    None => (None, None, None),
+                let (scopes, history, meter, findings) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
+                    None => (None, None, None, None),
                 };
-                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, knobs }));
+                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, knobs }));
             }
         }
         if let Some(rack) = self.master.as_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
-                let (scopes, history, meter) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history(), made.meter()),
-                    None => (None, None, None),
+                let (scopes, history, meter, findings) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
+                    None => (None, None, None, None),
                 };
-                found.push((Spot::Master(slot), Peek { scopes, history, meter, knobs }));
+                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, knobs }));
             }
         }
         let Ok(mut held) = self.peeks.lock() else { return };

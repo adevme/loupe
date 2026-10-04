@@ -76,6 +76,7 @@ pub fn shown(param: &Param, value: f32) -> String {
         (Unit::Milliseconds, _) => format!("{value:.0} ms"),
         (Unit::Seconds, _) => format!("{value:.2} s"),
         (Unit::Percent | Unit::Width, _) => format!("{value:.0}%"),
+        (Unit::Semitones, _) => format!("{value:+.1} st"),
         (Unit::Ratio, "ratio") => format!("{value:.1} : 1"),
         (Unit::Ratio, "wobble_rate") => format!("{value:.2} Hz"),
         (Unit::Ratio, "bass_decay") => format!("x {value:.2}"),

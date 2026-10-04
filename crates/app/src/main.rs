@@ -23,6 +23,7 @@ mod stretching;
 mod stockwin;
 mod printing;
 mod chains;
+mod keying;
 mod recording;
 mod takes;
 mod selection;
@@ -129,6 +130,8 @@ pub enum Message {
     Import,
     Picked(Vec<PathBuf>),
     Dropped(PathBuf),
+    KeyTold(loupe_stock_ui::KeyMessage),
+    KeyFileHeard(String, Result<loupe_stock::Heard, String>),
     Loaded(PathBuf, Result<Arc<Source>, String>),
     Select(Option<ClipId>),
     ToggleSelect(ClipId),
@@ -868,7 +871,12 @@ impl App {
                 );
             }
             Message::Picked(paths) => return self.import(paths),
+            Message::KeyTold(message) => self.key_told(message),
+            Message::KeyFileHeard(name, result) => self.key_file_heard(name, result),
             Message::Dropped(path) => {
+                if self.key_wants_file() {
+                    return self.read_key_from(path);
+                }
                 if let Overlay::Sampler(track) = self.overlay {
                     return self.load_sample(track, path);
                 }
@@ -2863,7 +2871,7 @@ fn unfocus() -> Task<Message> {
     iced_runtime::task::widget(Unfocus).discard()
 }
 
-fn format_bpm(bpm: f64) -> String {
+pub(crate) fn format_bpm(bpm: f64) -> String {
     let text = format!("{bpm:.2}");
     text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
