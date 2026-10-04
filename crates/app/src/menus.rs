@@ -35,6 +35,7 @@ impl App {
             Overlay::ScriptsMenu => self.floating(self.under_the_bar(SCRIPTS_MENU_LEFT), self.scripts_menu()),
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
+            Overlay::MixerMenu { at } => self.floating(*at, self.mixer_menu()),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
             Overlay::Inputs { track, at, inputs } => self.floating(*at, self.input_menu(*track, *inputs)),
@@ -159,6 +160,16 @@ impl App {
         items.push(self.item("Close project", "Ctrl+W", Some(Message::GoHome)));
         self.menu(items)
     }
+    fn mixer_menu(&self) -> Element<'_, Message> {
+        let alone = self.mixer_window.is_some();
+        let move_it = if alone { Message::MixerBackUnderTheSong } else { Message::MixerToItsOwnWindow };
+        let items = vec![
+            self.item(if alone { "Mixer in its own window ✓" } else { "Mixer in its own window" }, "", Some(move_it)),
+            self.item("Hide the mixer", "F6", Some(Message::ToggleMixer)),
+        ];
+        self.menu(items)
+    }
+
 
     fn track_menu(&self, track: TrackId) -> Element<'_, Message> {
         let inside = self.project.tracks.iter().find(|t| t.id == track).and_then(|t| t.parent).is_some();

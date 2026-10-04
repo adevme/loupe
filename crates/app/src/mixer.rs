@@ -11,6 +11,7 @@ pub const SHORTEST_MIXER: f32 = 150.0;
 const MIXER_WINDOW: iced::Size = iced::Size::new(1000.0, 360.0);
 const SHORTEST_MIXER_WINDOW: f32 = 420.0;
 const GRAB_BAR: f32 = 6.0;
+const MENU_INSET: f32 = 12.0;
 const STRIP_MARGIN: f32 = 24.0;
 const STRIP_WIDTH: f32 = 120.0;
 const NAME_LENGTH: usize = 11;
@@ -145,16 +146,6 @@ impl App {
             .into()
     }
 
-    fn mixer_window_button(&self) -> Element<'_, Message> {
-        let palette = self.palette;
-        let alone = self.mixer_window.is_some();
-        button(text(if alone { "Dock" } else { "Pop out" }).size(10.5).font(palette.medium))
-            .padding([2, 6])
-            .style(move |_, status| palette.outlined(status))
-            .on_press(if alone { Message::MixerBackUnderTheSong } else { Message::MixerToItsOwnWindow })
-            .into()
-    }
-
     fn readouts(&self, level: Level, gain: f32, peak: f32) -> Element<'_, Message> {
         let palette = self.palette;
         hrow![
@@ -180,9 +171,7 @@ impl App {
                     background: Some(palette.accent.into()),
                     ..Default::default()
                 }),
-                hrow![strip_title(palette, "", "Master".to_string()), self.mixer_window_button()]
-                    .spacing(5)
-                    .align_y(Alignment::Center),
+                strip_title(palette, "", "Master".to_string()),
                 self.master_fx_block(),
                 hrow![
                     mouse_area(
@@ -352,11 +341,18 @@ impl App {
         let master = container(self.master_strip())
             .padding([6, 10])
             .height(self.mixer_tall());
-        container(iced::widget::row![master, upright_rule(palette), faders].align_y(Alignment::Center))
+        let strips = container(iced::widget::row![master, upright_rule(palette), faders].align_y(Alignment::Center))
             .width(Length::Fill)
             .height(self.mixer_tall())
-            .style(move |_| palette.floor())
-            .into()
+            .style(move |_| palette.floor());
+        mouse_area(strips).on_right_press(Message::MixerMenu { at: self.mixer_menu_at() }).into()
+    }
+
+    fn mixer_menu_at(&self) -> iced::Point {
+        match self.mixer_window {
+            Some(_) => iced::Point::new(MENU_INSET, MENU_INSET),
+            None => iced::Point::new(MENU_INSET, (self.window.height - self.mixer_height + GRAB_BAR).max(MENU_INSET)),
+        }
     }
 }
 

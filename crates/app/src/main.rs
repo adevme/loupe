@@ -173,6 +173,7 @@ pub enum Message {
     CloseOverlay,
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
+    MixerMenu { at: Point },
     OpenFileMenu,
     OpenHelpMenu,
     OpenScriptsMenu,
@@ -417,6 +418,7 @@ pub enum Overlay {
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
+    MixerMenu { at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
     Inputs { track: TrackId, at: Point, inputs: u16 },
@@ -1246,6 +1248,7 @@ impl App {
             }
             Message::DeleteClip(clip) => self.delete_clips(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
+            Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
             Message::OpenScriptsMenu => {
@@ -1320,8 +1323,12 @@ impl App {
                     }
                 }
             }
-            Message::MixerToItsOwnWindow => return self.mixer_to_its_own_window(),
+            Message::MixerToItsOwnWindow => {
+                self.overlay = Overlay::None;
+                return self.mixer_to_its_own_window();
+            }
             Message::MixerBackUnderTheSong => {
+                self.overlay = Overlay::None;
                 let _ = settings::save("mixer_alone", "no");
                 if let Some(window) = self.mixer_window.take() {
                     return window::close(window);
