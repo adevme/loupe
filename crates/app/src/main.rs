@@ -32,6 +32,7 @@ mod scripting;
 mod scripts;
 mod settings;
 mod spinner;
+mod starting;
 mod theme;
 mod theming;
 mod timeline;
@@ -90,10 +91,10 @@ fn main() -> iced::Result {
     let ui_font = loaded.palette.ui;
     let opens_a_song = std::env::args_os().len() > 1;
     let first_size = if opens_a_song { START_SIZE } else { scaled(HOME_SIZE, settings.scale) };
-    let mut loupe = iced::application(App::title, App::update, App::view)
-        .subscription(App::subscription)
-        .theme(|app: &App| app.palette.iced())
-        .scale_factor(|app: &App| app.scale)
+    let mut loupe = iced::application(starting::Loupe::title, starting::Loupe::update, starting::Loupe::view)
+        .subscription(starting::Loupe::subscription)
+        .theme(starting::Loupe::theme)
+        .scale_factor(starting::Loupe::scale)
         .font(include_bytes!("../assets/Inter-Regular.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-Medium.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-SemiBold.ttf").as_slice())
@@ -111,7 +112,7 @@ fn main() -> iced::Result {
     if let Some(font) = icon_font {
         loupe = loupe.font(font);
     }
-    let ran = loupe.run_with(move || App::new(loaded, settings, shift_at_start));
+    let ran = loupe.run_with(move || starting::Loupe::starting(loaded, settings, shift_at_start));
     backup::mark_closed();
     usage::finish();
     ran
@@ -155,6 +156,7 @@ pub enum Message {
     ToggleSolo(TrackId),
     TrackPan(TrackId, f32),
     ModifiersChanged(keyboard::Modifiers),
+    FirstFrame,
     ToggleArm(TrackId),
     InputChosen(String),
     BpmTyped(String),
@@ -999,6 +1001,7 @@ impl App {
                 self.listen_if_armed();
             }
             Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+            Message::FirstFrame => {}
             Message::TrackPan(track, pan) => {
                 let pan = pan.clamp(-1.0, 1.0);
                 self.edit(Some(Run::Pan(track)), Command::SetTrackPan { track, pan });
