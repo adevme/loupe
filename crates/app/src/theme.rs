@@ -591,7 +591,7 @@ impl Palette {
     }
 
     pub fn top_bar(&self) -> container::Style {
-        container::Style { background: Some(iced::gradient::Linear::new(std::f32::consts::PI).add_stop(0.0, mix(self.panel, Color::WHITE, self.glint() * 0.5)).add_stop(1.0, self.panel).into()), ..Default::default() }
+        container::Style { background: Some(iced::gradient::Linear::new(std::f32::consts::PI).add_stop(0.0, mix(self.panel, Color::WHITE, self.glint() * 1.4)).add_stop(1.0, mix(self.panel, Color::BLACK, self.shade() * 0.07)).into()), ..Default::default() }
     }
 
     pub fn shadow_below(&self, strength: f32) -> container::Style {
