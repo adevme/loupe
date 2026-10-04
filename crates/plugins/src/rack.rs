@@ -8,6 +8,7 @@ pub struct Slot {
     pub index: usize,
     pub name: String,
     pub bypassed: bool,
+    pub record: bool,
     pub trouble: Option<String>,
     pub latency: usize,
     host: Option<Sandbox>,
@@ -42,6 +43,7 @@ pub struct Wanted {
     pub name: String,
     pub bypassed: bool,
     pub state: Vec<u8>,
+    pub record: bool,
 }
 
 pub struct Rack {
@@ -74,6 +76,7 @@ impl Rack {
             index,
             name: name.to_string(),
             bypassed: false,
+            record: false,
             trouble: None,
             latency: 0,
             host: None,
@@ -120,7 +123,7 @@ impl Rack {
     }
 
     pub fn latency(&self) -> usize {
-        self.slots.iter().filter(|slot| !slot.bypassed && slot.trouble.is_none()).map(|slot| slot.latency).sum()
+        self.slots.iter().filter(|slot| !slot.record && !slot.bypassed && slot.trouble.is_none()).map(|slot| slot.latency).sum()
     }
 
     pub fn tweak(&mut self, slot: usize, knob: usize, value: f32) {
@@ -273,10 +276,31 @@ impl Rack {
         self.process_with(audio, &[]);
     }
 
+    pub fn process_takes(&mut self, audio: &mut Vec<[f32; 2]>) {
+        self.run(audio, &[], true);
+    }
+
+    pub fn takes_latency(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.record && !slot.bypassed && slot.trouble.is_none()).map(|slot| slot.latency).sum()
+    }
+
+    pub fn has_takes(&self) -> bool {
+        self.slots.iter().any(|slot| slot.record)
+    }
+
+    pub fn ready(&mut self) -> bool {
+        self.take_arrivals();
+        !self.still_opening()
+    }
+
     pub fn process_with(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) {
+        self.run(audio, side, false);
+    }
+
+    fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool) {
         self.take_arrivals();
         for slot in self.slots.iter_mut() {
-            if slot.bypassed || slot.trouble.is_some() {
+            if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
                 continue;
             }
             if let Some(made) = slot.built.as_mut() {
@@ -294,13 +318,14 @@ impl Rack {
     pub fn reconcile(&mut self, want: &[Wanted]) -> Vec<String> {
         let mut pool: Vec<Slot> = self.slots.drain(..).collect();
         let mut troubles = Vec::new();
-        for Wanted { path, index, name, bypassed, state } in want {
+        for Wanted { path, index, name, bypassed, state, record } in want {
             let found = pool.iter().position(|slot| &slot.path == path && slot.index == *index && slot.working());
             match found {
                 Some(at) => {
                     let mut slot = pool.remove(at);
                     slot.name = name.clone();
                     slot.bypassed = *bypassed;
+                    slot.record = *record;
                     if let Some(made) = slot.built.as_mut() {
                         put_knobs(made.as_mut(), state);
                     }
@@ -312,6 +337,7 @@ impl Rack {
                         index: *index,
                         name: name.clone(),
                         bypassed: *bypassed,
+                        record: *record,
                         trouble: None,
                         latency: 0,
                         host: None,
@@ -450,8 +476,8 @@ mod tests {
     fn reconcile_keeps_what_is_still_wanted_and_drops_the_rest() {
         let mut rack = rack();
         let want = vec![
-            Wanted { path: PathBuf::from("one.vst3"), index: 0, name: "One".into(), bypassed: false, state: Vec::new() },
-            Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: true, state: Vec::new() },
+            Wanted { path: PathBuf::from("one.vst3"), index: 0, name: "One".into(), bypassed: false, state: Vec::new(), record: false },
+            Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: true, state: Vec::new(), record: false },
         ];
         // Opening happens on its own thread now, so nothing has gone wrong yet.
         let troubles = rack.reconcile(&want);
@@ -469,7 +495,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(rack.slots().iter().all(|slot| slot.trouble.is_some()));
-        let shorter = vec![Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: false, state: Vec::new() }];
+        let shorter = vec![Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: false, state: Vec::new(), record: false }];
         rack.reconcile(&shorter);
         let names: Vec<_> = rack.slots().iter().map(|slot| slot.name.clone()).collect();
         assert_eq!(names, vec!["Two"]);
@@ -536,6 +562,33 @@ mod built_in_tests {
     }
 
     #[test]
+    fn recording_plugins_only_touch_what_is_being_recorded() {
+        let squash = |record| Wanted {
+            path: PathBuf::from(crate::BUILT_IN),
+            index: 1,
+            name: "Loupe Compressor".into(),
+            bypassed: false,
+            state: Vec::new(),
+            record,
+        };
+        let loudest = |audio: &[[f32; 2]]| audio.iter().fold(0.0f32, |top, frame| top.max(frame[0].abs()));
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), 48_000, 512);
+        assert!(rack.reconcile(&[squash(true)]).is_empty());
+        assert!(rack.has_takes());
+        let mut played = vec![[0.9, 0.9]; 512];
+        rack.process(&mut played);
+        assert_eq!(loudest(&played), 0.9, "the mix never hears a recording plugin");
+        let mut taken = vec![[0.9, 0.9]; 512];
+        rack.process_takes(&mut taken);
+        assert!(loudest(&taken) < 0.9);
+        assert!(rack.reconcile(&[squash(false)]).is_empty());
+        assert!(!rack.has_takes());
+        let mut taken = vec![[0.9, 0.9]; 512];
+        rack.process_takes(&mut taken);
+        assert_eq!(loudest(&taken), 0.9, "a mix plugin never hears the take");
+    }
+
+    #[test]
     fn a_built_in_remembers_its_knobs() {
         let mut rack = Rack::new(PathBuf::from("no-host-here"), 48_000, 512);
         rack.add(Path::new(crate::BUILT_IN), 0, "Loupe EQ").expect("it loads");
@@ -547,6 +600,7 @@ mod built_in_tests {
             name: "Loupe EQ".into(),
             bypassed: false,
             state: first.clone(),
+            record: false,
         }];
         let mut fresh = Rack::new(PathBuf::from("no-host-here"), 48_000, 512);
         assert!(fresh.reconcile(&want).is_empty());

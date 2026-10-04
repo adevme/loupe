@@ -16,6 +16,10 @@ pub trait Chains: Send {
         let _ = audio;
     }
 
+    fn process_takes(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
+        let _ = (track, audio);
+    }
+
     fn follow(&mut self, project: &Project) -> Vec<String> {
         let _ = project;
         Vec::new()
@@ -519,6 +523,7 @@ mod tests {
             name: "x".into(),
             bypassed: false,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddFx { track: one, fx }).unwrap();
         let target = Target::TrackFx { track: one, slot: 0, knob: 2 };
@@ -586,6 +591,7 @@ mod tests {
             name: "x".into(),
             bypassed: false,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddClipFx { clip: loud, fx }).unwrap();
         let mut racks = ClipDoubler { on: loud, ran: 0 };
@@ -634,6 +640,7 @@ mod tests {
             name: "duck".into(),
             bypassed: false,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddFx { track: beat, fx }).unwrap();
         let mut racks = Ducker { on: beat, heard: 0.0 };
@@ -686,6 +693,7 @@ mod tests {
             name: "slow".into(),
             bypassed: false,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddFx { track: slow, fx }).unwrap();
         let mut racks = Late { on: slow, by: 32, held: Vec::new() };
@@ -743,6 +751,7 @@ mod tests {
             name: "x".into(),
             bypassed: false,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddFx { track: vox, fx }).unwrap();
         let mut racks = Doubler { seen: Vec::new() };

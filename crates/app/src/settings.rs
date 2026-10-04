@@ -26,6 +26,7 @@ pub struct Settings {
     pub last_version: Option<String>,
     pub metronome: bool,
     pub count_in_bars: u32,
+    pub hear_input: bool,
     pub snap: bool,
     pub midi_inputs: Option<Vec<String>>,
     pub audio: loupe_engine::Device,
@@ -50,6 +51,7 @@ impl Settings {
             last_version: value_of("last_version").map(str::to_string),
             metronome: value_of("metronome") == Some("on"),
             count_in_bars: value_of("count_in").and_then(count_in_from).unwrap_or(0),
+            hear_input: value_of("hear_input") != Some("off"),
             snap: value_of("snap") != Some("off"),
             // Empty means every MIDI input; a list means only those, kept tab separated.
             midi_inputs: value_of("midi_inputs").map(|value| value.split('\t').filter(|name| !name.is_empty()).map(str::to_string).collect()),

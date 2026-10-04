@@ -21,6 +21,7 @@ const TAKE_QUEUE: usize = 1 << 19;
 const TAKE_SETTLES_FOR: Duration = Duration::from_millis(30);
 const KEEPER_RESTS_FOR: Duration = Duration::from_millis(15);
 const TAKE_CHANNELS: u16 = 1;
+const EAR_QUEUE: usize = 1 << 14;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputChoice {
@@ -48,6 +49,7 @@ struct Heard {
 struct Tap {
     heard: Arc<Heard>,
     queue: Producer<f32>,
+    ear: Option<Producer<f32>>,
     was_taking: bool,
 }
 
@@ -67,6 +69,9 @@ impl Tap {
             if taking && self.queue.push(sample).is_err() {
                 lost += 1;
             }
+            if let Some(ear) = self.ear.as_mut() {
+                let _ = ear.push(sample);
+            }
         }
         note(&self.heard.peak, loudest);
         if lost > 0 {
@@ -83,6 +88,7 @@ enum Order {
 pub struct Input {
     heard: Arc<Heard>,
     rate: u32,
+    ear: Option<Consumer<f32>>,
     orders: Option<mpsc::Sender<Order>>,
     quit: Arc<AtomicBool>,
     host: Option<thread::JoinHandle<()>>,
@@ -102,7 +108,8 @@ impl Input {
         let heard = Arc::new(Heard::default());
         let quit = Arc::new(AtomicBool::new(false));
         let (queue_in, queue_out) = RingBuffer::new(TAKE_QUEUE);
-        let tap = Tap { heard: heard.clone(), queue: queue_in, was_taking: false };
+        let (ear_in, ear_out) = RingBuffer::new(EAR_QUEUE);
+        let tap = Tap { heard: heard.clone(), queue: queue_in, ear: Some(ear_in), was_taking: false };
         let (opened_tx, opened_rx) = mpsc::channel();
         let host = thread::Builder::new()
             .name("loupe-input".into())
@@ -120,11 +127,15 @@ impl Input {
                 move || keep_takes(queue_out, heard, rate, orders_rx)
             })
             .map_err(|why| why.to_string())?;
-        Ok(Self { heard, rate, orders: Some(orders), quit, host: Some(host), keeper: Some(keeper) })
+        Ok(Self { heard, rate, ear: Some(ear_out), orders: Some(orders), quit, host: Some(host), keeper: Some(keeper) })
     }
 
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    pub(crate) fn take_ear(&mut self) -> Option<Consumer<f32>> {
+        self.ear.take()
     }
 
     pub fn take_peak(&self) -> f32 {
@@ -375,7 +386,7 @@ mod tests {
     fn nothing_is_queued_until_a_take_begins_and_overflow_is_counted() {
         let heard = Arc::new(Heard::default());
         let (queue, mut kept) = RingBuffer::new(4);
-        let mut tap = Tap { heard: heard.clone(), queue, was_taking: false };
+        let mut tap = Tap { heard: heard.clone(), queue, ear: None, was_taking: false };
         tap.hear([0.5, 0.5].into_iter(), Instant::now());
         assert!(kept.pop().is_err());
         assert_eq!(heard.began.load(Ordering::Relaxed), 0);

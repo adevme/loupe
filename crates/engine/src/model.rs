@@ -116,6 +116,7 @@ pub struct Fx {
     pub name: String,
     pub bypassed: bool,
     pub state: Vec<u8>,
+    pub record: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +136,7 @@ pub struct Track {
     pub fx: Vec<Fx>,
     pub instrument: Instrument,
     pub sample: Option<Arc<Source>>,
+    pub print_takes: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -164,6 +166,7 @@ pub enum Command {
     SetTrackPan { track: TrackId, pan: f32 },
     SetTrackSolo { track: TrackId, solo: bool },
     SetRecordsNotes { track: TrackId, on: bool },
+    SetPrintTakes { track: TrackId, on: bool },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
     PasteClip { track: TrackId, clip: Clip },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
@@ -318,7 +321,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None, print_takes: false });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -383,6 +386,11 @@ impl Project {
             Command::SetRecordsNotes { track, on } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].records_notes = on;
+                Ok(Outcome::Done)
+            }
+            Command::SetPrintTakes { track, on } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].print_takes = on;
                 Ok(Outcome::Done)
             }
             Command::SetTrackSolo { track, solo } => {

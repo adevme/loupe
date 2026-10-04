@@ -21,6 +21,7 @@ mod plugins;
 mod racks;
 mod stretching;
 mod stockwin;
+mod printing;
 mod recording;
 mod selection;
 mod sampler_sheet;
@@ -117,7 +118,7 @@ const HOME_SIZE: Size = Size::new(940.0, 600.0);
 pub enum Message {
     TogglePlay,
     ToggleRecord,
-    TakeReady { tracks: Vec<TrackId>, start: i64, keep_from: i64, warning: Option<String>, result: Result<Arc<Source>, String> },
+    TakeReady { start: i64, keep_from: i64, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
     ToStart,
     Seek(Frames),
     Tick,
@@ -229,6 +230,9 @@ pub enum Message {
     NewNotesClip(TrackId),
     UseInstrument(TrackId, Instrument),
     ToggleRecordsNotes(TrackId),
+    TogglePrintTakes(TrackId),
+    ShowChain(TrackId, bool),
+    HearInputToggled,
     OpenSampler(TrackId),
     SamplerChanged(TrackId, loupe_engine::Sampler),
     PickSample(TrackId),
@@ -511,6 +515,8 @@ struct App {
     usage: usage::Usage,
     metronome: bool,
     count_in_bars: u32,
+    hear_input: bool,
+    rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
     snap: bool,
@@ -624,6 +630,8 @@ impl App {
             usage: usage_now,
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
+            hear_input: settings.hear_input,
+            rec_shown: HashSet::new(),
             copied_clips: None,
             scripts: Vec::new(),
             snap: settings.snap,
@@ -761,8 +769,12 @@ impl App {
         }
         match message {
             Message::ToggleRecord => return self.toggle_recording(),
-            Message::TakeReady { tracks, start, keep_from, warning, result } => {
-                self.place_take(tracks, start, keep_from, result);
+            Message::TakeReady { start, keep_from, warning, result } => {
+                let printing = result.as_ref().ok().and_then(|(_, trouble)| trouble.clone());
+                self.place_take(start, keep_from, result.map(|(sources, _)| sources));
+                if let Some(why) = printing {
+                    self.problem = Some(format!("The take is kept dry, the Rec plugins could not be printed: {why}"));
+                }
                 if warning.is_some() {
                     self.problem = warning;
                 }
@@ -1018,6 +1030,26 @@ impl App {
             Message::PickSample(track) => return self.pick_sample(track),
             Message::SampleFile(track, path) => return self.load_sample(track, path),
             Message::SampleLoaded(track, result) => self.sample_loaded(track, result),
+            Message::TogglePrintTakes(track) => {
+                self.overlay = Overlay::None;
+                if let Some(on) = self.project.track(track).map(|t| !t.print_takes) {
+                    self.edit(None, Command::SetPrintTakes { track, on });
+                }
+            }
+            Message::ShowChain(track, record) => {
+                if record {
+                    self.rec_shown.insert(track);
+                } else {
+                    self.rec_shown.remove(&track);
+                }
+            }
+            Message::HearInputToggled => {
+                self.hear_input = !self.hear_input;
+                if let Err(why) = settings::save("hear_input", if self.hear_input { "on" } else { "off" }) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+                self.listen_if_armed();
+            }
             Message::ToggleRecordsNotes(track) => {
                 self.overlay = Overlay::None;
                 if let Some(on) = self.project.track(track).map(|t| !t.records_notes) {
@@ -1237,6 +1269,7 @@ impl App {
                         name: plugin.name.clone(),
                         bypassed: false,
                         state: Vec::new(),
+                        record: false,
                     };
                     self.overlay = Overlay::None;
                     self.plugin_uses.reached_for(&plugin.name);
@@ -1377,6 +1410,7 @@ impl App {
                         name: plugin.name.clone(),
                         bypassed: false,
                         state: Vec::new(),
+                        record: self.rec_shown.contains(&track),
                     };
                     self.overlay = Overlay::None;
                     self.plugin_uses.reached_for(&plugin.name);
@@ -1401,6 +1435,7 @@ impl App {
                         name: plugin.name.clone(),
                         bypassed: false,
                         state: Vec::new(),
+                        record: false,
                     };
                     self.overlay = Overlay::Clip(clip);
                     self.plugin_uses.reached_for(&plugin.name);
@@ -2176,12 +2211,15 @@ impl App {
     }
 
     pub(crate) fn listen_if_armed(&mut self) {
-        let wants_audio = self.project.tracks.iter().any(|track| self.armed.contains(&track.id) && !track.records_notes);
-        if !wants_audio {
+        let heard: Vec<TrackId> = self.project.tracks.iter().filter(|track| self.armed.contains(&track.id) && !track.records_notes).map(|track| track.id).collect();
+        if heard.is_empty() {
+            self.engine.hear_on(&[]);
+            self.engine.stop_hearing();
             self.input = None;
             self.input_level = 0.0;
             return;
         }
+        self.engine.hear_on(if self.hear_input { &heard } else { &[] });
         if self.input.is_some() {
             return;
         }
@@ -2191,7 +2229,10 @@ impl App {
             (false, None) => InputChoice::SystemDefault,
         };
         match Input::open(choice) {
-            Ok(input) => self.input = Some(input),
+            Ok(mut input) => {
+                self.engine.hear(&mut input);
+                self.input = Some(input);
+            }
             Err(why) => {
                 self.armed.clear();
                 self.problem = Some(format!("Could not open the recording input: {why}"));
@@ -2603,6 +2644,12 @@ impl App {
             text("MIDI keyboards").size(13).font(palette.medium),
             text(self.keyboards_found()).size(12).color(palette.text_dim),
             self.midi_picker(),
+            text("Hear yourself").size(13).font(palette.medium),
+            text("Armed tracks play what the input hears, through their Rec plugins. Use headphones, or speakers will howl.").size(12).color(palette.text_dim),
+            button(text(if self.hear_input { "On" } else { "Off" }).size(12.5))
+                .padding([4, 12])
+                .style(move |_, status| palette.toggled(self.hear_input, status))
+                .on_press(Message::HearInputToggled),
             text("Count in").size(13).font(palette.medium),
             text("Bars of clicks before recording starts, when Loupe is stopped. The take begins where the playhead was.").size(12).color(palette.text_dim),
             pick_list(COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).text_size(13).padding([5, 10]).width(160),

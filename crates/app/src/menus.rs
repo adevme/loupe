@@ -163,6 +163,8 @@ impl App {
         items.push(self.item("New note clip", "", Some(Message::NewNotesClip(track))));
         let keys = self.project.track(track).is_some_and(|t| t.records_notes);
         items.push(self.item(if keys { "Record notes from keys ✓" } else { "Record notes from keys" }, "", Some(Message::ToggleRecordsNotes(track))));
+        let printing = self.project.track(track).is_some_and(|t| t.print_takes);
+        items.push(self.item(if printing { "Keep Rec plugins in takes ✓" } else { "Keep Rec plugins in takes" }, "", Some(Message::TogglePrintTakes(track))));
         let playing = self.project.track(track).map(|t| t.instrument);
         let synth = matches!(playing, Some(loupe_engine::Instrument::Synth(_)));
         let drums = matches!(playing, Some(loupe_engine::Instrument::Drums));

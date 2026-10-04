@@ -49,6 +49,7 @@ pub struct SavedTrack {
     pub fx: Vec<SavedFx>,
     pub instrument: Instrument,
     pub sample: Option<usize>,
+    pub print_takes: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -58,6 +59,7 @@ pub struct SavedFx {
     pub name: String,
     pub bypassed: bool,
     pub state: Vec<u8>,
+    pub record: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +98,7 @@ impl SavedProject {
                     name: fx.name.clone(),
                     bypassed: fx.bypassed,
                     state: fx.state.clone(),
+                    record: fx.record,
                 })
                 .collect(),
             sources: project.sources.iter().map(|source| source.path.clone()).collect(),
@@ -140,6 +143,7 @@ impl SavedProject {
                     collapsed: track.collapsed,
                     instrument: track.instrument,
                     sample: track.sample.as_ref().and_then(|sample| project.sources.iter().position(|kept| Arc::ptr_eq(kept, sample))),
+                    print_takes: track.print_takes,
                     sends: track
                         .sends
                         .iter()
@@ -156,6 +160,7 @@ impl SavedProject {
                             name: fx.name.clone(),
                             bypassed: fx.bypassed,
                             state: fx.state.clone(),
+                            record: fx.record,
                         })
                         .collect(),
                     clips: track
@@ -181,6 +186,7 @@ impl SavedProject {
                                     name: fx.name.clone(),
                                     bypassed: fx.bypassed,
                                     state: fx.state.clone(),
+                                    record: fx.record,
                                 })
                                 .collect(),
                         })
@@ -207,8 +213,8 @@ impl SavedProject {
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             let sample = track.sample.map_or("-".to_string(), |s| s.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} sample={sample} name={}\n",
-                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, instrument_text(&track.instrument), track.name
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} sample={sample} print={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, instrument_text(&track.instrument), track.print_takes as u8, track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -217,8 +223,8 @@ impl SavedProject {
                 out.push_str(&format!("fxpath {}\n", fx.path.display()));
                 let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
                 out.push_str(&format!(
-                    "fx index={} bypass={} state={state} name={}\n",
-                    fx.index, fx.bypassed as u8, fx.name
+                    "fx index={} bypass={} rec={} state={state} name={}\n",
+                    fx.index, fx.bypassed as u8, fx.record as u8, fx.name
                 ));
             }
             for clip in &track.clips {
@@ -308,6 +314,7 @@ impl SavedProject {
                         fx: Vec::new(),
                         instrument: fields.get("instrument").and_then(|text| instrument_from(text)).unwrap_or_default(),
                         sample: fields.get("sample").and_then(|text| text.parse::<usize>().ok()),
+                        print_takes: fields.get("print") == Some(&"1"),
                     });
                 }
                 "send" => {
@@ -333,6 +340,7 @@ impl SavedProject {
                         name: name.to_string(),
                         bypassed: fields.get("bypass") == Some(&"1"),
                         state,
+                        record: fields.get("rec") == Some(&"1"),
                     };
                     if kind == "masterfx" {
                         saved.master_fx.push(fx);
@@ -443,6 +451,7 @@ impl SavedProject {
                 name: fx.name.clone(),
                 bypassed: fx.bypassed,
                 state: fx.state.clone(),
+                record: fx.record,
             }));
         }
         for saved in &self.tracks {
@@ -454,6 +463,7 @@ impl SavedProject {
             let _ = project.apply(Command::SetTrackPan { track, pan: saved.pan });
             let _ = project.apply(Command::SetTrackSolo { track, solo: saved.solo });
             let _ = project.apply(Command::SetRecordsNotes { track, on: saved.records_notes });
+            let _ = project.apply(Command::SetPrintTakes { track, on: saved.print_takes });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
             let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
             if let Some(sample) = saved.sample.and_then(|index| sources.get(index)) {
@@ -495,6 +505,7 @@ impl SavedProject {
                         name: fx.name.clone(),
                         bypassed: fx.bypassed,
                         state: fx.state.clone(),
+                        record: fx.record,
                     };
                     let _ = project.apply(Command::AddClipFx { clip: id, fx: added });
                 }
@@ -529,6 +540,7 @@ impl SavedProject {
                     name: fx.name.clone(),
                     bypassed: fx.bypassed,
                     state: fx.state.clone(),
+                    record: fx.record,
                 };
                 let _ = project.apply(Command::AddFx { track: *track, fx: added });
             }
@@ -753,6 +765,25 @@ mod routing_round_trip {
     use crate::source::Source;
 
     #[test]
+    fn rec_plugins_and_printing_survive_a_save_and_open() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let denoise = crate::model::Fx { path: PathBuf::from("quiet.vst3"), index: 0, name: "Denoise".into(), bypassed: false, state: Vec::new(), record: true };
+        let glue = crate::model::Fx { path: PathBuf::from("glue.vst3"), index: 0, name: "Glue".into(), bypassed: false, state: Vec::new(), record: false };
+        p.apply(Command::AddFx { track, fx: denoise.clone() }).unwrap();
+        p.apply(Command::AddFx { track, fx: glue.clone() }).unwrap();
+        p.apply(Command::SetPrintTakes { track, on: true }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert_eq!(back.tracks[0].fx, vec![denoise, glue]);
+        assert!(back.tracks[0].print_takes);
+        let older = text.replace(" rec=1", "").replace(" print=1", "");
+        let (old, _) = SavedProject::parse(&older).unwrap().build(&[], 48_000);
+        assert!(old.tracks[0].fx.iter().all(|fx| !fx.record), "songs from before keep every plugin in the mix");
+        assert!(!old.tracks[0].print_takes);
+    }
+
+    #[test]
     fn master_plugins_survive_a_save_and_open_and_stay_off_the_tracks() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
@@ -762,6 +793,7 @@ mod routing_round_trip {
             name: "On the track".into(),
             bypassed: false,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddFx { track, fx: on_track }).unwrap();
         let over_all = crate::model::Fx {
@@ -770,6 +802,7 @@ mod routing_round_trip {
             name: "Over the mix".into(),
             bypassed: true,
             state: vec![9, 8, 7],
+            record: false,
         };
         p.apply(Command::AddMasterFx(over_all.clone())).unwrap();
         let text = SavedProject::capture(&p, |_| None).to_text();
@@ -792,6 +825,7 @@ mod routing_round_trip {
             name: "Glue".into(),
             bypassed: false,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddMasterFx(fx)).unwrap();
         let target = crate::envelope::Target::MasterFx { slot: 0, knob: 3 };
@@ -901,6 +935,7 @@ mod routing_round_trip {
             name: "FabFilter Pro-Q 4".into(),
             bypassed: false,
             state: vec![0, 1, 2, 250, 255],
+            record: false,
         };
         let comp = crate::model::Fx {
             path: PathBuf::from("/plugins/Pro C 2.vst3"),
@@ -908,6 +943,7 @@ mod routing_round_trip {
             name: "FabFilter Pro-C 2".into(),
             bypassed: true,
             state: Vec::new(),
+            record: false,
         };
         p.apply(Command::AddFx { track, fx: eq }).unwrap();
         p.apply(Command::AddFx { track, fx: comp }).unwrap();

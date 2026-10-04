@@ -64,6 +64,7 @@ impl Racks {
                     name: fx.name.clone(),
                     bypassed: fx.bypassed,
                     state: fx.state.clone(),
+                    record: fx.record,
                 })
                 .collect();
             let rack = self.master.get_or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
@@ -84,6 +85,7 @@ impl Racks {
                     name: fx.name.clone(),
                     bypassed: fx.bypassed,
                     state: fx.state.clone(),
+                    record: fx.record,
                 })
                 .collect();
             let rack = self
@@ -109,6 +111,7 @@ impl Racks {
                         name: fx.name.clone(),
                         bypassed: fx.bypassed,
                         state: fx.state.clone(),
+                        record: false,
                     })
                     .collect();
                 let rack = self
@@ -296,6 +299,18 @@ impl Chains for Racks {
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
         rack.process_with(&mut self.scratch, side);
+        let shared = self.scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+    }
+
+    fn process_takes(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
+        let Some(rack) = self.chains.get_mut(&track) else { return };
+        if !rack.has_takes() {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.extend_from_slice(audio);
+        rack.process_takes(&mut self.scratch);
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }

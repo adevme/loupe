@@ -12,7 +12,7 @@ use crate::devices::{self, Device, Running};
 use crate::instrument::Note;
 use crate::midi_in::{KeyEvent, KeySender};
 use crate::model::{ClipId, Frames, Project, TrackId};
-use crate::render::{mix_tracks_metered, scale, Chains, Mixdown};
+use crate::render::{mix_tracks_metered, pan_gains, scale, Chains, Mixdown};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -20,6 +20,7 @@ const QUEUE: usize = 256;
 const SILENT_RATE: u32 = 48_000;
 pub const METERS: usize = 64;
 const TAPE: usize = 4096;
+const MOST_HEARD: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TapedKey {
@@ -54,6 +55,8 @@ enum Msg {
     KeysGoTo(Option<TrackId>),
     Metronome(bool),
     CountIn(Frames),
+    Hear(Option<(Consumer<f32>, u32)>),
+    HearOn([Option<TrackId>; MOST_HEARD]),
 }
 
 impl Default for Shared {
@@ -107,6 +110,21 @@ struct Rt {
     metronome: bool,
     count_in: Frames,
     count_in_len: Frames,
+    ear: Ear,
+    done_feeds: Producer<Consumer<f32>>,
+}
+
+#[derive(Default)]
+struct Ear {
+    feed: Option<Consumer<f32>>,
+    rate: u32,
+    on: [Option<TrackId>; MOST_HEARD],
+    filling: bool,
+    phase: f64,
+    was: f32,
+    next: f32,
+    voice: Vec<f32>,
+    track: Vec<[f32; 2]>,
 }
 
 const MOST_LIVE_NOTES: usize = 32;
@@ -126,6 +144,7 @@ struct Remote {
     handed_back: Consumer<Box<dyn Chains>>,
     tape: Consumer<TapedKey>,
     shared: Arc<Shared>,
+    done_feeds: Consumer<Consumer<f32>>,
 }
 
 fn pair(rate: u32) -> (Rt, Remote) {
@@ -134,6 +153,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
     let (retired_tx, retired_rx) = RingBuffer::new(QUEUE);
     let (back_tx, back_rx) = RingBuffer::new(QUEUE);
     let (tape_in, tape_out) = RingBuffer::new(TAPE);
+    let (done_in, done_out) = RingBuffer::new(4);
     let shared = Arc::new(Shared::default());
     let rt = Rt {
         live: Vec::with_capacity(MOST_LIVE_NOTES),
@@ -144,6 +164,8 @@ fn pair(rate: u32) -> (Rt, Remote) {
         metronome: false,
         count_in: 0,
         count_in_len: 0,
+        ear: Ear { voice: vec![0.0; MAX_BLOCK], track: vec![[0.0; 2]; MAX_BLOCK], ..Ear::default() },
+        done_feeds: done_in,
         scratch: Mixdown::default(),
         chains: None,
         peaks: [0.0; METERS],
@@ -163,7 +185,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
     };
-    (rt, Remote { keys: Arc::new(std::sync::Mutex::new(keys_in)), outbox, retired: retired_rx, handed_back: back_rx, tape: tape_out, shared })
+    (rt, Remote { keys: Arc::new(std::sync::Mutex::new(keys_in)), outbox, retired: retired_rx, handed_back: back_rx, tape: tape_out, shared, done_feeds: done_out })
 }
 
 impl Rt {
@@ -199,6 +221,18 @@ impl Rt {
                     self.count_in = len;
                     self.count_in_len = len;
                 }
+                Msg::Hear(feed) => {
+                    let (feed, rate) = match feed {
+                        Some((feed, rate)) => (Some(feed), rate),
+                        None => (None, 0),
+                    };
+                    if let Some(old) = std::mem::replace(&mut self.ear.feed, feed) {
+                        let _ = self.done_feeds.push(old);
+                    }
+                    self.ear.rate = rate;
+                    self.ear.filling = true;
+                }
+                Msg::HearOn(on) => self.ear.on = on,
                 Msg::Seek(to) => self.seek = Some(to),
                 Msg::Loop(range) => self.loop_range = range,
                 Msg::Audition(clip) => self.audition = clip,
@@ -319,8 +353,75 @@ impl Rt {
             }
         }
         self.play_live(frames);
+        self.hear_input(frames);
         self.shared.pos.store(self.pos, Ordering::Relaxed);
         &self.block[..frames]
+    }
+
+    fn hear_input(&mut self, frames: usize) {
+        let ear = &mut self.ear;
+        let Some(feed) = ear.feed.as_mut() else { return };
+        let step = ear.rate as f64 / self.project.rate.max(1) as f64;
+        let wanted = (frames as f64 * step).ceil() as usize + 2;
+        let waiting = feed.slots();
+        if ear.on.iter().all(Option::is_none) {
+            if let Ok(old) = feed.read_chunk(waiting) {
+                old.commit_all();
+            }
+            ear.filling = true;
+            return;
+        }
+        if ear.filling {
+            if waiting < wanted * 2 {
+                return;
+            }
+            ear.filling = false;
+        } else if waiting > wanted * 4 {
+            if let Ok(old) = feed.read_chunk(waiting - wanted * 2) {
+                old.commit_all();
+            }
+        }
+        for at in 0..frames {
+            while ear.phase >= 1.0 {
+                ear.was = ear.next;
+                ear.next = match feed.pop() {
+                    Ok(sample) if sample.is_finite() => sample,
+                    Ok(_) => 0.0,
+                    Err(_) => {
+                        ear.filling = true;
+                        0.0
+                    }
+                };
+                ear.phase -= 1.0;
+            }
+            ear.voice[at] = ear.was + (ear.next - ear.was) * ear.phase as f32;
+            ear.phase += step;
+        }
+        let master = if self.project.master_muted { 0.0 } else { self.project.master };
+        for id in ear.on.iter().flatten() {
+            let Some(index) = self.project.tracks.iter().position(|track| track.id == *id) else { continue };
+            let track = &self.project.tracks[index];
+            let sound = &mut ear.track[..frames];
+            for (frame, sample) in sound.iter_mut().zip(&ear.voice[..frames]) {
+                *frame = [*sample, *sample];
+            }
+            if let Some(racks) = self.chains.as_deref_mut() {
+                racks.process_takes(*id, sound);
+            }
+            let gain = if track.muted { 0.0 } else { track.gain * master };
+            let (left, right) = pan_gains(track.pan);
+            let mut top = 0.0f32;
+            for (out, frame) in self.block[..frames].iter_mut().zip(sound.iter()) {
+                let heard = [frame[0] * gain * left, frame[1] * gain * right];
+                top = top.max(heard[0].abs()).max(heard[1].abs());
+                out[0] += heard[0];
+                out[1] += heard[1];
+            }
+            if let Some(level) = self.shared.levels.get(index) {
+                level.fetch_max(top.to_bits(), Ordering::Relaxed);
+            }
+            self.shared.master_level.fetch_max(top.to_bits(), Ordering::Relaxed);
+        }
     }
 
     fn taped(&mut self, track: TrackId, key: u8, velocity: f32) {
@@ -519,6 +620,25 @@ impl Engine {
         self.send(Msg::TweakClip { clip, slot, knob, value });
     }
 
+    pub fn hear(&mut self, input: &mut crate::input::Input) {
+        let rate = input.rate();
+        if let Some(feed) = input.take_ear() {
+            self.send(Msg::Hear(Some((feed, rate))));
+        }
+    }
+
+    pub fn stop_hearing(&mut self) {
+        self.send(Msg::Hear(None));
+    }
+
+    pub fn hear_on(&mut self, tracks: &[TrackId]) {
+        let mut on = [None; MOST_HEARD];
+        for (slot, track) in on.iter_mut().zip(tracks) {
+            *slot = Some(*track);
+        }
+        self.send(Msg::HearOn(on));
+    }
+
     pub fn drop_chains(&mut self) {
         self.send(Msg::Chains(None));
     }
@@ -529,6 +649,7 @@ impl Engine {
 
     pub fn collect(&mut self) {
         while self.remote.retired.pop().is_ok() {}
+        while self.remote.done_feeds.pop().is_ok() {}
     }
 
     fn send(&mut self, mut msg: Msg) {
@@ -937,6 +1058,68 @@ mod tests {
         remote.outbox.push(Msg::Silence).ok().unwrap();
         rt.process(64);
         assert!(rt.live.is_empty());
+    }
+
+    struct Halves;
+
+    impl Chains for Halves {
+        fn process_with(&mut self, _: TrackId, audio: &mut [[f32; 2]], _: &[[f32; 2]]) {
+            audio.fill([9.0; 2]);
+        }
+
+        fn process_takes(&mut self, _: TrackId, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                frame[0] *= 0.5;
+                frame[1] *= 0.5;
+            }
+        }
+    }
+
+    #[test]
+    fn the_input_is_heard_on_armed_tracks_through_their_recording_plugins_only() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        project.apply(Command::SetTrackPan { track: vocal, pan: 0.0 }).unwrap();
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Halves)))).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(1 << 14);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE)))).ok().unwrap();
+        for _ in 0..4_000 {
+            mic.push(0.8).unwrap();
+        }
+        assert!(rt.process(256).iter().all(|f| *f == [0.0, 0.0]), "nothing is armed yet");
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        for _ in 0..4_000 {
+            mic.push(0.8).unwrap();
+        }
+        rt.process(256);
+        let heard = rt.process(256).to_vec();
+        let (left, _) = pan_gains(0.0);
+        for frame in heard {
+            assert!((frame[0] - 0.8 * 0.5 * left).abs() < 1e-4, "got {frame:?}");
+        }
+        assert!(!rt.playing, "hearing the input does not start the song");
+        remote.outbox.push(Msg::HearOn([None; MOST_HEARD])).ok().unwrap();
+        assert!(rt.process(256).iter().all(|f| *f == [0.0, 0.0]));
+    }
+
+    #[test]
+    fn the_input_catches_up_rather_than_falling_further_behind() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(1 << 14);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE)))).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        for _ in 0..10_000 {
+            mic.push(0.5).unwrap();
+        }
+        rt.process(256);
+        rt.process(256);
+        let left = rt.ear.feed.as_ref().unwrap().slots();
+        assert!(left <= 4 * 260, "{left} samples still waiting");
     }
 
     #[test]

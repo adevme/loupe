@@ -33,6 +33,16 @@ pub fn float_header(channels: u16, rate: u32, frames: u32) -> Vec<u8> {
     header
 }
 
+pub fn write_frames(path: &Path, frames: &[[f32; 2]], rate: u32) -> io::Result<()> {
+    let mut out = io::BufWriter::new(fs::File::create(path)?);
+    out.write_all(&float_header(2, rate, frames.len() as u32))?;
+    for frame in frames {
+        out.write_all(&frame[0].to_le_bytes())?;
+        out.write_all(&frame[1].to_le_bytes())?;
+    }
+    out.flush()
+}
+
 fn word(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
 }

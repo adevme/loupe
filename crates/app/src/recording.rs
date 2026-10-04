@@ -109,40 +109,68 @@ impl App {
         });
         let rate = self.project.rate;
         let tracks = recording.tracks;
+        self.gather_fx_state();
+        let printing: Vec<(TrackId, Vec<loupe_plugins::rack::Wanted>)> = tracks
+            .iter()
+            .filter_map(|id| self.project.track(*id))
+            .filter(|track| track.print_takes)
+            .map(|track| (track.id, crate::printing::wanted(&track.fx)))
+            .filter(|(_, want)| !want.is_empty())
+            .collect();
+        let host = loupe_plugins::sandbox::host_beside_us();
         let keep_from = if recording.counted_in { recording.from as i64 } else { 0 };
         self.loading += 1;
         let (done, loaded) = oneshot::channel();
         std::thread::spawn(move || {
-            let _ = done.send(Source::load(&take.path, rate).map(Arc::new));
+            let read = Source::load(&take.path, rate).map(Arc::new).map(|dry| {
+                let mut trouble = None;
+                let sources = tracks
+                    .iter()
+                    .map(|id| match printing.iter().find(|(track, _)| track == id) {
+                        Some((_, want)) => match crate::printing::print_take(&dry, &take.path, want, rate, &host) {
+                            Ok(printed) => (*id, Arc::new(printed)),
+                            Err(why) => {
+                                trouble = Some(why);
+                                (*id, dry.clone())
+                            }
+                        },
+                        None => (*id, dry.clone()),
+                    })
+                    .collect();
+                (sources, trouble)
+            });
+            let _ = done.send(read);
         });
         Task::perform(
             async move { loaded.await.unwrap_or_else(|_| Err("reading the take stopped unexpectedly".into())) },
-            move |result| Message::TakeReady { tracks: tracks.clone(), start, keep_from, warning: warning.clone(), result },
+            move |result| Message::TakeReady { start, keep_from, warning: warning.clone(), result },
         )
     }
 
-    pub(crate) fn place_take(&mut self, tracks: Vec<TrackId>, start: i64, keep_from: i64, result: Result<Arc<Source>, String>) {
+    pub(crate) fn place_take(&mut self, start: i64, keep_from: i64, result: Result<Vec<(TrackId, Arc<Source>)>, String>) {
         self.loading = self.loading.saturating_sub(1);
-        let source = match result {
-            Ok(source) => source,
+        let sources = match result {
+            Ok(sources) => sources,
             Err(why) => {
                 self.problem = Some(format!("Could not read the take: {why}"));
                 return;
             }
         };
         let cut = (keep_from.max(0) - start).max(0) as Frames;
-        let whole = source.frames.len() as Frames;
+        let Some(whole) = sources.first().map(|(_, source)| source.frames.len() as Frames) else {
+            return;
+        };
         if cut >= whole {
             return;
         }
         let start = (start + cut as i64) as Frames;
         let mut placed = Vec::new();
         self.transact(None, |project| {
-            for track in tracks {
+            for (track, source) in sources {
                 if project.track(track).is_none() {
                     continue;
                 }
-                let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source: source.clone(), start })? else {
+                let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source, start })? else {
                     return Err(CommandError::NoSuchClip);
                 };
                 if cut > 0 {

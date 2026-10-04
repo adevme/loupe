@@ -412,7 +412,7 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Resu
                 .cloned()
                 .ok_or_else(|| fail(format!("no plugin called {name} was found")))?;
             let (name, path, index) = found;
-            h.apply(Command::AddFx { track: TrackId(track), fx: Fx { path, index, name, bypassed: false, state: Vec::new() } })?;
+            h.apply(Command::AddFx { track: TrackId(track), fx: Fx { path, index, name, bypassed: false, state: Vec::new(), record: false } })?;
             Ok(h.track(track)?.fx.len())
         });
         def!("set_plugin_knob", |_, (track, slot, knob, value): (u64, usize, Value, f32)| {

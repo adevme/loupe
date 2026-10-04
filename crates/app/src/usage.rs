@@ -210,6 +210,7 @@ mod tests {
             last_version: None,
             metronome: false,
             count_in_bars: 0,
+            hear_input: true,
             snap: true,
             audio: loupe_engine::Device::default(),
         };

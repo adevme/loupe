@@ -12,6 +12,8 @@ const NAME_LENGTH: usize = 20;
 const DOT: f32 = 9.0;
 const MASTER_SLOT_HINT: &str = "Click to open it, right click to remove. These run over the whole mix.";
 const SLOT_HINT: &str = "Click to open it, drag to reorder, right click to remove, middle click for its knobs";
+const MIX_HINT: &str = "Mix plugins: what the track plays through";
+const REC_HINT: &str = "Rec plugins: only what you hear while recording on this track";
 
 pub fn find_plugins() -> Vec<Found> {
     let mut found = newest_shells(loupe_plugins::everything());
@@ -25,8 +27,9 @@ impl App {
         let Some(found) = self.project.tracks.iter().find(|t| t.id == track) else {
             return Space::new(Length::Fill, 0).into();
         };
+        let record = self.rec_shown.contains(&track);
         let mut rows = column![].spacing(2);
-        for (slot, fx) in found.fx.iter().enumerate() {
+        for (slot, fx) in found.fx.iter().enumerate().filter(|(_, fx)| fx.record == record) {
             let short = shorten(&fx.name);
             let on = !fx.bypassed;
             let dragged = self.fx_drag.map(|(held, from, _)| held == track && from == slot).unwrap_or(false);
@@ -63,6 +66,20 @@ impl App {
             .width(Length::Fill)
             .style(move |_, status| palette.ghost(status))
             .on_press(Message::OpenPlugins(track));
+        let taking = found.fx.iter().filter(|fx| fx.record).count();
+        let tab = |label: String, rec: bool, hint: &'static str| {
+            let on = rec == record;
+            mouse_area(
+                button(text(label).size(10.5).wrapping(iced::widget::text::Wrapping::None))
+                    .padding([1, 4])
+                    .style(move |_, status| palette.toggled(on, status))
+                    .on_press(Message::ShowChain(track, rec)),
+            )
+            .on_enter(Message::Hint(Some(hint)))
+            .on_exit(Message::Hint(None))
+        };
+        let rec_label = if taking > 0 { format!("Rec {taking}") } else { "Rec".to_string() };
+        let add = row![tab("Mix".to_string(), false, MIX_HINT), tab(rec_label, true, REC_HINT), add].spacing(2);
         column![scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4))), add]
             .spacing(3)
             .width(Length::Fill)
@@ -73,7 +90,7 @@ impl App {
         let Some(found) = self.project.tracks.iter().find(|t| t.id == track) else {
             return text("This track is gone.").size(13).into();
         };
-        let heading = format!("Plugins for {}", found.name);
+        let heading = if self.rec_shown.contains(&track) { format!("Rec plugins for {}", found.name) } else { format!("Plugins for {}", found.name) };
         return self.picker(heading, &move |which| Message::AddPlugin(track, which));
     }
 
