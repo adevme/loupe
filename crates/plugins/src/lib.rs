@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 mod scan;
 pub mod ara;
 pub mod ara_audio;

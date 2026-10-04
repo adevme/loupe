@@ -187,7 +187,6 @@ fn number_after(text: &str, key: &str) -> Option<f32> {
 
 fn ports_in(region: &str) -> Vec<Port> {
     let mut ports = Vec::new();
-    // A plugin lists its ports once, so the first list is the whole of it.
     if let Some(start) = region.find("lv2:port") {
         let rest = &region[start + "lv2:port".len()..];
         let stop = rest.find("\n\t.").or_else(|| rest.find("\n.")).unwrap_or(rest.len());

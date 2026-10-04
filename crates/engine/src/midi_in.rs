@@ -35,8 +35,6 @@ pub struct MidiKeys {
 }
 
 impl MidiKeys {
-    /// Every MIDI input on the machine, whether or not it is being listened to. A
-    /// keyboard often shows up twice, once for notes and once for its DAW controls.
     pub fn around() -> Vec<String> {
         let Ok(probe) = MidiInput::new(CLIENT) else {
             return Vec::new();
@@ -44,7 +42,6 @@ impl MidiKeys {
         probe.ports().iter().filter_map(|port| probe.port_name(port).ok()).collect()
     }
 
-    /// Opens the ports the user has picked. `wanted` empty means every one of them.
     pub fn open(sender: KeySender, wanted: &[String]) -> Result<Self, String> {
         let probe = MidiInput::new(CLIENT).map_err(|why| why.to_string())?;
         let ports = probe.ports();

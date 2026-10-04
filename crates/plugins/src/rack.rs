@@ -3,8 +3,6 @@ use std::path::{Path, PathBuf};
 use crate::sandbox::Sandbox;
 use crate::wire::{Ask, Region, Reply};
 
-/// What a plugin opening on its own thread hands back. The flag on the error side
-/// says whether the host died rather than refused, which is what gets reported.
 type Arrived = Result<Opened, (String, bool)>;
 
 pub struct Slot {
@@ -19,11 +17,7 @@ pub struct Slot {
     placed: Option<Region>,
     host: Option<Sandbox>,
     built: Option<Box<dyn loupe_stock::Effect>>,
-    /// A plugin being opened on a thread of its own. Starting a host and loading a
-    /// plugin takes seconds, and the song cannot stop while it happens.
     coming: Option<std::sync::mpsc::Receiver<Arrived>>,
-    /// The window was asked for before the plugin had finished opening, so it opens
-    /// as soon as there is something to open.
     wanted_open: bool,
 }
 
@@ -32,7 +26,6 @@ impl Slot {
         (self.host.is_some() || self.built.is_some() || self.coming.is_some()) && self.trouble.is_none()
     }
 
-    /// Still opening, so it passes audio through untouched for now.
     pub fn on_its_way(&self) -> bool {
         self.coming.is_some()
     }
@@ -241,9 +234,6 @@ impl Rack {
         }
     }
 
-    /// Opens the window of any plugin whose window was asked for while it was still
-    /// loading. Talks to the plugin host, so it is only ever called off the audio thread.
-    /// Whether any plugin here is still being opened.
     pub fn still_opening(&self) -> bool {
         self.slots.iter().any(|slot| slot.on_its_way())
     }
@@ -267,7 +257,6 @@ impl Rack {
     }
 
     pub fn show(&mut self, slot: usize) -> Result<(), String> {
-        // Asked for before the plugin finished opening: remember it and open it then.
         if let Some(found) = self.slots.get_mut(slot) {
             if found.on_its_way() {
                 found.wanted_open = true;
@@ -441,7 +430,6 @@ impl Rack {
                         wanted_open: false,
                     };
                     if is_built_in(path) {
-                        // Loupe's own plugins are already in the program, so they are ready at once.
                         match self.make_built(*index) {
                             Ok(mut made) => {
                                 put_knobs(made.as_mut(), state);
@@ -454,9 +442,6 @@ impl Rack {
                             }
                         }
                     } else {
-                        // Starting a host and loading a plugin takes seconds. Doing that here
-                        // would stop the song and the window, so it happens on its own thread
-                        // and the slot passes audio through until it arrives.
                         let (done, waiting) = std::sync::mpsc::channel();
                         let (host, rate, block) = (self.host.clone(), self.rate, self.block);
                         let (where_from, which, wanted_state) = (path.clone(), *index, state.clone());
@@ -474,8 +459,6 @@ impl Rack {
         troubles
     }
 
-    /// Picks up any plugin that has finished opening on its thread. Takes nothing
-    /// that blocks, so it is safe where the audio is made.
     fn take_arrivals(&mut self) {
         for (at, slot) in self.slots.iter_mut().enumerate() {
             let Some(waiting) = slot.coming.as_ref() else { continue };
@@ -508,9 +491,6 @@ impl Rack {
         Ok(made)
     }
 
-    /// Opens a plugin and waits for it. Only used where the user asked for this one
-    /// plugin and is waiting on the answer, so a host that died is just an error
-    /// shown to them rather than a crash report about something they never saw.
     fn open(&self, path: &Path, index: usize) -> Result<Opened, String> {
         open_on_a_thread(&self.host, path, index, self.rate, self.block, self.region.as_ref(), &[]).map_err(|(why, _)| why)
     }
@@ -571,14 +551,12 @@ mod tests {
             Wanted { path: PathBuf::from("one.vst3"), index: 0, name: "One".into(), bypassed: false, state: Vec::new(), record: false },
             Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: true, state: Vec::new(), record: false },
         ];
-        // Opening happens on its own thread now, so nothing has gone wrong yet.
         let troubles = rack.reconcile(&want);
         assert!(troubles.is_empty());
         assert!(rack.slots().iter().all(|slot| slot.on_its_way()));
         let names: Vec<_> = rack.slots().iter().map(|slot| slot.name.clone()).collect();
         assert_eq!(names, vec!["One", "Two"]);
         assert!(rack.slots()[1].bypassed);
-        // The host is not there, so both come back as trouble once the threads answer.
         let mut audio = vec![[0.0; 2]; 64];
         let gave_up = std::time::Instant::now();
         while rack.slots().iter().any(|slot| slot.on_its_way()) {
@@ -701,8 +679,6 @@ mod built_in_tests {
     }
 }
 
-/// Starts a plugin host and loads one plugin into it. Slow, so it is called from a
-/// thread of its own and the answer comes back down a channel.
 fn open_on_a_thread(
     host: &Path,
     path: &Path,

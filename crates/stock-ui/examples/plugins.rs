@@ -184,7 +184,6 @@ impl Preview {
     fn update(&mut self, message: Message) {
         match message {
             Message::Tab(tab) => self.tab = tab,
-            // Loupe Key only reports what it hears; the song is what acts on it.
             Message::Key(message) => {
                 self.key_editor.update(message);
             }

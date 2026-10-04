@@ -89,8 +89,6 @@ mod real {
     }
 
     const OVERLAPPED_WINDOW: u32 = 0x00CF_0000;
-    /// The same window without the drag edges or the maximise button, for a plugin
-    /// that only draws at one size.
     const FIXED_WINDOW: u32 = 0x00CA_0000;
     const CLIP_CHILDREN: u32 = 0x0200_0000;
     const CHILD: u32 = 0x4000_0000;
@@ -157,7 +155,6 @@ mod real {
     }
 
     unsafe fn chosen_in(list: Handle) -> Option<String> {
-        // The list answers -1 for nothing chosen. Nought is the first preset, not nothing.
         let at = SendMessageW(list, CURRENT, 0, 0);
         if at < 0 {
             return None;
@@ -285,9 +282,6 @@ mod real {
         pub fn show(&self) {
             unsafe {
                 ShowWindow(self.handle, SHOW);
-                // The plugin window belongs to the host, which is not the program the
-                // user is clicking in. Windows leaves another program's window where it
-                // was in the stack, which with Loupe filling the screen means behind it.
                 SetWindowPos(self.handle, TOP, 0, 0, 0, 0, KEEP_PLACE | KEEP_SIZE | AND_SHOW);
                 SetForegroundWindow(self.handle);
             }
@@ -299,8 +293,6 @@ mod real {
             }
         }
 
-        /// The size of the area the plugin draws in, which changes as the user drags
-        /// the frame.
         pub fn inside(&self) -> (i32, i32) {
             unsafe {
                 let mut rect = [0i32; 4];

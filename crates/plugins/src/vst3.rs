@@ -229,8 +229,6 @@ impl Effect {
             document.start_reading();
         }
         let made = unsafe {
-            // The same host context the knobs are read with. Plugins that are handed
-            // nothing here refuse to make their window at all.
             let context = self
                 .us
                 .as_com_ref::<vst3::Steinberg::FUnknown>()
@@ -238,7 +236,6 @@ impl Effect {
                 .unwrap_or(std::ptr::null_mut());
             let mut cid = [0i8; 16];
             let named = (self.component.getControllerClassId(&mut cid) == kResultOk).then(|| cid.map(|c| c as u8));
-            // Some plugins do not say where their controller is, but the file lists it.
             let listed = self
                 ._library
                 .classes()
@@ -257,17 +254,12 @@ impl Effect {
                 }
             }
             match separate {
-                // A plugin whose window lives in a controller of its own will not make
-                // that window until the two halves have been introduced and the
-                // controller has been shown what the processor holds.
                 Some(controller) => {
                     let settings = self.settings().unwrap_or_default();
                     crate::editor::Editor::joined(controller, &self.component, &settings, context)
                 }
                 None if !refused.is_empty() => Err(format!("the window lives in another part of the plugin, and {refused}")),
                 None => {
-                    // One object doing both jobs: it was started when the plugin was
-                    // loaded, and starting it again is not allowed.
                     let controller: ComPtr<IEditController> = self.component.cast().ok_or("this plugin has no window")?;
                     crate::editor::Editor::already_started(controller, context)
                 }

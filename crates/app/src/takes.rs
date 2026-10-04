@@ -18,9 +18,6 @@ impl App {
     }
 }
 
-/// Cuts a clip at both edges of a range and hands back the piece in the middle,
-/// with short fades on every new edge. Comping and punching both need this, and the
-/// piece in the middle is what each of them then does something to.
 fn middle_of(
     project: &mut Project,
     clip: ClipId,
@@ -58,9 +55,6 @@ pub fn comp(project: &mut Project, track: TrackId, take: usize, from: Frames, to
         .ok_or(CommandError::NoSuchTrack)?
         .clips
         .iter()
-        // take_offset, not just the count: a take that would read before the start of
-        // the recording cannot be used, and splitting for it would chop the song up
-        // for nothing.
         .filter(|clip| clip.take_offset(take).is_some() && clip.start < to && clip.end() > from)
         .map(|clip| clip.id)
         .collect();
@@ -84,7 +78,6 @@ pub fn clear_between(project: &mut Project, track: TrackId, from: Frames, to: Fr
         .map(|clip| clip.id)
         .collect();
     for clip in touched {
-        // The middle is going, so it needs no fades of its own.
         let middle = middle_of(project, clip, from, to, fade, false)?;
         project.apply(Command::DeleteClip(middle))?;
     }

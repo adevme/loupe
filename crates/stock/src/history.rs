@@ -72,7 +72,6 @@ pub(crate) struct Gatherer {
 }
 
 impl Gatherer {
-    /// Empty for the next moment, keeping how many samples one moment lasts.
     fn start_again(&mut self) {
         self.count = 0;
         self.loudest_in = 0.0;

@@ -34,8 +34,6 @@ impl App {
             let on = !fx.bypassed;
             let dragged = self.fx_drag.map(|(held, from, _)| held == track && from == slot).unwrap_or(false);
             let landing = self.fx_drag.map(|(held, _, over)| held == track && over == slot).unwrap_or(false);
-            // The strip is narrow, so the name gets the whole row. Everything else is
-            // the dot on the left, or a click of the right button.
             let dot = button(Space::new(DOT, DOT))
                 .padding(0)
                 .style(move |_, status| palette.toggled(!on, status))
@@ -94,8 +92,6 @@ impl App {
         return self.picker(heading, &move |which| Message::AddPlugin(track, which));
     }
 
-    /// The plugins on offer, the ones reached for most often first, with the keyboard
-    /// able to walk the list and pick without touching the mouse.
     pub(crate) fn in_the_picker(&self) -> Vec<usize> {
         let needle = self.plugin_filter.trim().to_lowercase();
         let mut order: Vec<usize> = self
@@ -185,7 +181,6 @@ mod tests {
 
     #[test]
     fn a_long_name_loses_the_maker_not_the_model() {
-        // The slot now has the whole strip width, so most names arrive whole.
         assert_eq!(shorten("FabFilter Pro-Q 4"), "FabFilter Pro-Q 4");
         assert_eq!(shorten("Loupe EQ"), "Loupe EQ");
         assert_eq!(shorten("Valhalla Supermassive"), "Supermassive");
@@ -340,7 +335,6 @@ impl App {
 
 const USES_FILE: &str = "plugin-uses";
 
-/// How often each plugin has been reached for, so the ones actually used come first.
 #[derive(Default)]
 pub struct Uses(std::collections::HashMap<String, u32>);
 
@@ -373,8 +367,6 @@ impl Uses {
     }
 }
 
-/// A Waves shell holds every Waves plugin, and one is installed per version. Showing
-/// each of them is showing the same plugins over and over, so keep the newest shell.
 fn newest_shells(found: Vec<Found>) -> Vec<Found> {
     let family = |name: &str| name.split_whitespace().next().unwrap_or(name).to_string();
     let is_shell = |name: &str| name.to_lowercase().starts_with("waveshell");
@@ -395,7 +387,6 @@ fn newest_shells(found: Vec<Found>) -> Vec<Found> {
 }
 
 impl App {
-    /// The same slot rows as a track, for the plugins over the whole mix.
     pub(crate) fn master_fx_block(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let mut rows = column![].spacing(2);

@@ -1,5 +1,3 @@
-//! Lists the classes a VST3 file offers, and whether each can be made into a
-//! controller, which is where a plugin usually keeps its window.
 fn main() {
     let path = std::env::args().nth(1).expect("give a plugin path");
     let library = match loupe_plugins::vst3::Library::open(std::path::Path::new(&path)) {

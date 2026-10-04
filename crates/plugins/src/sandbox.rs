@@ -41,8 +41,6 @@ impl Sandbox {
         if let Some(root) = crate::presets::root() {
             command.env(crate::presets::FOLDER_VARIABLE, root);
         }
-        // The host has no console of its own to show. Without this, Windows opens a
-        // black box beside Loupe every time a plugin is loaded.
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -127,9 +125,6 @@ impl Sandbox {
         self.lost
     }
 
-    /// Lets the host put its plugin window in front. Windows only allows the program
-    /// the user is working in to do that, and it is Loupe the user clicked in, so
-    /// Loupe has to hand that right over before asking for the window.
     pub fn may_come_forward(&self) {
         #[cfg(windows)]
         {

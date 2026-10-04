@@ -219,8 +219,6 @@ fn main() {
             for asked in pane.pump() {
                 use_preset(asked, open.as_mut(), pane, &loaded_name);
             }
-            // The plugin is not told when the frame is dragged, so watch the size and
-            // hand it on. Without this it keeps drawing at its old size in a bigger hole.
             let now = pane.inside();
             if now != was_sized && now.0 > 0 && now.1 > 0 {
                 was_sized = now;
@@ -309,7 +307,6 @@ fn main() {
             },
             Ask::Load { path, index, rate, block } => {
                 editor = None;
-                // Kept for the window title, so a plugin window says which plugin it is.
                 loaded_name = names_in(&PathBuf::from(&path)).ok().and_then(|names| names.get(index).cloned()).unwrap_or_default();
                 match open_one(&PathBuf::from(&path), index, rate as f64, block, region.as_ref()) {
                     Ok(effect) => {
@@ -373,13 +370,11 @@ fn show(
     }
     let (width, height) = made.size();
     let title = if name.is_empty() { "Plugin" } else { name };
-    // A fresh window starts at the plugin's own size, so forget the last one's.
 
     let pane = window::Window::open(title, width, height, made.can_resize())?;
     if let Some(folder) = preset_folder(name) {
         pane.presets(&loupe_plugins::presets::list(&folder), None);
     }
-    // The window is this process's own and is kept alongside the editor below.
     unsafe { made.attach(pane.inner(), kind) }?;
     pane.show();
     *editor = Some((made, pane));

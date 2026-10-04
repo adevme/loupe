@@ -207,7 +207,6 @@ impl SavedProject {
         for path in &self.sources {
             out.push_str(&format!("source {}\n", path.display()));
         }
-        // Before the tracks, so reading one does not land it on a track by mistake.
         for fx in &self.master_fx {
             let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
             out.push_str(&format!("masterfxpath {}\n", fx.path.display()));
@@ -923,7 +922,6 @@ mod routing_round_trip {
         assert!(!back.master_fx[0].record, "a master plugin is never a Rec plugin");
         assert_eq!(back.master_fx[0].state, vec![4, 5, 6]);
 
-        // The master plugin must not have landed on the track, nor the track's on the master.
         assert!(track.fx.iter().all(|fx| fx.name != "Over the whole mix"));
         assert!(back.master_fx.iter().all(|fx| fx.name != "In the mix"));
     }
@@ -952,7 +950,6 @@ mod routing_round_trip {
         let shape = back.envelope(target).expect("the master envelope came back");
         assert_eq!(shape.value_at(0), Some(0.2));
         assert_eq!(shape.value_at(48_000), Some(0.9));
-        // A knob on a plugin that is not there has no range, so no envelope can point at it.
         assert_eq!(p.range_of(crate::envelope::Target::MasterFx { slot: 4, knob: 0 }), None);
     }
 

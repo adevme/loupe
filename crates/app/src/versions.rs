@@ -205,9 +205,6 @@ impl App {
         }
     }
 
-    /// The updates half of the About window: what is available and the button that
-    /// goes looking. It has no window of its own because on its own it would say
-    /// nothing About does not already say.
     pub(crate) fn updates_block(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let body = column![].spacing(12);
@@ -285,8 +282,6 @@ mod tests {
 }
 
 impl App {
-    /// Looking for a new version is a trip to the Loupe server, so the choice sits
-    /// beside the other settings about what Loupe sends and fetches.
     pub(crate) fn update_settings(&self) -> Element<'_, Message> {
         let palette = self.palette;
         column![

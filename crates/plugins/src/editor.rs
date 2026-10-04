@@ -36,11 +36,6 @@ pub struct Editor {
 }
 
 impl Editor {
-    /// For a plugin that keeps its window in a controller of its own: start the
-    /// controller, show it what the processor holds, and connect the two, which is
-    /// what a plugin expects of a host before it will make its window.
-    /// # Safety
-    /// `context` must be a live host context, or null.
     pub unsafe fn joined(
         controller: ComPtr<IEditController>,
         component: &ComPtr<IComponent>,
@@ -102,14 +97,10 @@ impl Editor {
         ((rect.right - rect.left).max(80), (rect.bottom - rect.top).max(60))
     }
 
-    /// Whether the plugin will redraw itself at another size. A plugin that says no
-    /// gets a window that cannot be dragged, so there is never a gap beside it.
     pub fn can_resize(&self) -> bool {
         unsafe { self.view.canResize() == kResultOk }
     }
 
-    /// Tell the plugin the window is a new size, and let it answer with the size it
-    /// would rather be.
     pub fn resized(&self, width: i32, height: i32) -> (i32, i32) {
         let mut rect = ViewRect { left: 0, top: 0, right: width, bottom: height };
         unsafe {
@@ -121,9 +112,6 @@ impl Editor {
         ((rect.right - rect.left).max(80), (rect.bottom - rect.top).max(60))
     }
 
-    /// # Safety
-    /// `window` must be a live window of the kind `kind` names, and must outlive this
-    /// editor: the plugin draws into it until the editor is dropped.
     pub unsafe fn attach(&self, window: *mut std::ffi::c_void, kind: &[u8]) -> Result<(), String> {
         unsafe {
             if self.view.attached(window, kind.as_ptr() as *const i8) != kResultOk {
@@ -157,11 +145,6 @@ pub fn platform_kind() -> &'static [u8] {
 }
 
 impl Editor {
-    /// For a plugin where one object is both the processor and the window: it was
-    /// started when the plugin was loaded, so it is only given a handler and asked
-    /// for its window.
-    /// # Safety
-    /// `context` must be a live host context, or null.
     pub unsafe fn already_started(
         controller: ComPtr<IEditController>,
         context: *mut vst3::Steinberg::FUnknown,
@@ -173,13 +156,10 @@ impl Editor {
             }
             let mut raw = controller.createView(b"editor\0".as_ptr() as *const i8);
             if raw.is_null() {
-                // Some plugins want starting again before they will part with a window,
-                // even though one object is doing both jobs.
                 controller.initialize(context);
                 raw = controller.createView(b"editor\0".as_ptr() as *const i8);
             }
             let view = ComPtr::from_raw(raw).ok_or("this plugin has no window")?;
-            // One object doing both jobs has nothing to connect itself to.
             Ok(Self { view, _controller: controller, _handler: handler, links: None })
         }
     }

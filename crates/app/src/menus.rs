@@ -393,8 +393,6 @@ pub fn colour_from_hex(typed: &str) -> Option<[u8; 3]> {
 }
 
 impl App {
-    /// Automation for one knob or fader, opened by right clicking the control itself
-    /// rather than by giving every automatable thing its own line in a menu.
     pub(crate) fn automation_sheet(&self, target: loupe_engine::Target) -> Element<'_, Message> {
         let palette = self.palette;
         let shape = self.project.envelope(target);

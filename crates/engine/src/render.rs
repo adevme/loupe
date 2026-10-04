@@ -11,7 +11,6 @@ pub trait Chains: Send {
         self.process(track, audio);
     }
 
-    /// The plugins over the whole mix, run after every track has been summed.
     fn process_master(&mut self, audio: &mut [[f32; 2]]) {
         let _ = audio;
     }
@@ -91,12 +90,10 @@ pub trait Chains: Send {
         Err("plugin windows are not wired up".into())
     }
 
-    /// Whether any plugin is still opening on a thread of its own.
     fn still_opening(&self) -> bool {
         false
     }
 
-    /// Called now and then while plugins are opening, off the audio thread.
     fn nudge(&mut self) {}
 }
 
@@ -116,7 +113,6 @@ pub fn render_through(
     scratch: &mut Mixdown,
     chains: Option<&mut (dyn Chains + '_)>,
 ) {
-    // Master plugins hear the mix before the master fader, the way a mix bus works.
     let mut after = chains;
     mix_tracks_metered(project, pos, out, None, None, scratch, after.as_deref_mut());
     if let Some(chains) = after.as_deref_mut() {

@@ -48,7 +48,6 @@ pub struct Racks {
     block: usize,
     chains: HashMap<TrackId, Rack>,
     clips: HashMap<ClipId, Rack>,
-    /// The plugins over the whole mix.
     master: Option<Rack>,
     scratch: Vec<[f32; 2]>,
     peeks: Peeks,
@@ -173,7 +172,6 @@ impl Racks {
     }
 
     fn publish(&mut self) {
-        // Runs on the thread that draws, so this is where a waiting window may open.
         for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()) {
             let _ = rack.open_waiting();
         }

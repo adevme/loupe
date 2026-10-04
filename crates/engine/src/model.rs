@@ -241,7 +241,6 @@ pub struct Project {
     pub bpm: f64,
     pub master: f32,
     pub master_muted: bool,
-    /// Plugins over the whole mix, after every track has been summed.
     pub master_fx: Vec<Fx>,
     pub tracks: Vec<Track>,
     pub sources: Vec<Arc<Source>>,

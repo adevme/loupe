@@ -18,7 +18,6 @@ fn main() {
         build.cpp_link_stdlib(None);
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        // The single-file build picks vDSP for its FFT on Apple, which lives in Accelerate.
         println!("cargo:rustc-link-lib=framework=Accelerate");
     }
     build.compile("rubberband");

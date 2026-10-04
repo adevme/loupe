@@ -37,9 +37,6 @@ pub fn newest(home: &Path) -> Option<PathBuf> {
     Some(home.join(VERSIONS_FOLDER).join(version).join(program_name()))
 }
 
-/// There is one Loupe. An update replaces the one before it, so everything in the
-/// versions folder that is not the newest goes, and so does anything left there that
-/// is not a version of Loupe at all.
 pub fn clear_the_rest(home: &Path, keep: &Path) -> Vec<PathBuf> {
     let keeping = keep.parent();
     let mut gone = Vec::new();
@@ -48,8 +45,6 @@ pub fn clear_the_rest(home: &Path, keep: &Path) -> Vec<PathBuf> {
         if !folder.is_dir() || Some(folder.as_path()) == keeping {
             continue;
         }
-        // A folder still in use cannot be removed, and that is fine: the next start
-        // finds it again when whatever was holding it has gone.
         if std::fs::remove_dir_all(&folder).is_ok() {
             gone.push(folder);
         }
@@ -65,8 +60,6 @@ fn main() {
         return;
     };
     clear_the_rest(&home, &program);
-    // Wait for Loupe rather than spawning and leaving. Whoever started the launcher
-    // may hold it in a job that is killed when it returns, which would take Loupe with it.
     let _ = Command::new(program).args(std::env::args_os().skip(1)).status();
 }
 
