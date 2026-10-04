@@ -6,6 +6,12 @@ pub const FOLDER_VARIABLE: &str = "LOUPE_PRESETS";
 const EXTENSION: &str = "lpreset";
 const NOT_IN_FILE_NAMES: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
+/// Windows keeps these names for its own devices, whatever the extension.
+const KEPT_BY_WINDOWS: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+    "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
 static ROOT: RwLock<Option<PathBuf>> = RwLock::new(None);
 
 pub fn keep_in(root: PathBuf) {
@@ -19,7 +25,13 @@ pub fn root() -> Option<PathBuf> {
 }
 
 pub fn safe(name: &str) -> String {
-    name.trim().trim_end_matches('.').chars().filter(|c| !NOT_IN_FILE_NAMES.contains(c) && !c.is_control()).collect()
+    let kept: String =
+        name.trim().trim_end_matches('.').chars().filter(|c| !NOT_IN_FILE_NAMES.contains(c) && !c.is_control()).collect();
+    let kept = kept.trim().to_string();
+    if KEPT_BY_WINDOWS.iter().any(|taken| kept.eq_ignore_ascii_case(taken)) {
+        return format!("{kept} preset");
+    }
+    kept
 }
 
 pub fn folder_for(root: &Path, plugin: &str) -> PathBuf {
@@ -74,4 +86,13 @@ mod tests {
         assert!(load(&q, "missing").is_err());
         fs::remove_dir_all(&root).unwrap();
     }
+
+    #[test]
+    fn a_preset_name_cannot_take_a_name_windows_keeps_for_itself() {
+        assert_eq!(safe("Vocal chain"), "Vocal chain");
+        assert_eq!(safe("con"), "con preset", "a device name would not be a file");
+        assert_eq!(safe("LPT9"), "LPT9 preset");
+        assert_eq!(safe("console"), "console", "only the exact names are kept by Windows");
+    }
 }
+

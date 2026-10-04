@@ -151,8 +151,9 @@ mod real {
     }
 
     unsafe fn chosen_in(list: Handle) -> Option<String> {
+        // The list answers -1 for nothing chosen. Nought is the first preset, not nothing.
         let at = SendMessageW(list, CURRENT, 0, 0);
-        if at <= 0 {
+        if at < 0 {
             return None;
         }
         let len = SendMessageW(list, ITEM_LENGTH, at as usize, 0).max(0) as usize;
