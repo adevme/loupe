@@ -1,7 +1,7 @@
 use iced::Element;
 
 use loupe_engine::TrackId;
-use loupe_stock_ui::{Change, ChorusEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock_ui::{Change, ChorusEditor, GateEditor, MeterEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 use crate::racks::Peek;
 use crate::{App, Message};
@@ -16,6 +16,8 @@ pub enum Face {
     Saturation(Box<SaturationEditor>),
     Chorus(Box<ChorusEditor>),
     Transient(Box<TransientEditor>),
+    Gate(Box<GateEditor>),
+    Meter(Box<MeterEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +46,8 @@ impl Window {
             6 => Face::Saturation(Box::new(SaturationEditor::new(look))),
             7 => Face::Chorus(Box::new(ChorusEditor::new(look))),
             8 => Face::Transient(Box::new(TransientEditor::new(peek.history.clone(), look))),
+            9 => Face::Gate(Box::new(GateEditor::new(peek.history.clone(), look))),
+            10 => Face::Meter(Box::new(MeterEditor::new(peek.meter.clone(), look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -57,6 +61,8 @@ impl Window {
                 Face::Saturation(editor) => editor.load(values),
                 Face::Chorus(editor) => editor.load(values),
                 Face::Transient(editor) => editor.load(values),
+                Face::Gate(editor) => editor.load(values),
+                Face::Meter(editor) => editor.load(values),
             }
         }
         Some(Self { spot, slot, name: name.to_string(), face })
@@ -69,6 +75,8 @@ impl Window {
             Face::Limiter(editor) => editor.tick(),
             Face::Deesser(editor) => editor.tick(),
             Face::Transient(editor) => editor.tick(),
+            Face::Gate(editor) => editor.tick(),
+            Face::Meter(editor) => editor.tick(),
             _ => {}
         }
     }
@@ -84,6 +92,8 @@ impl Window {
             Face::Saturation(editor) => editor.update(change),
             Face::Chorus(editor) => editor.update(change),
             Face::Transient(editor) => editor.update(change),
+            Face::Gate(editor) => editor.update(change),
+            Face::Meter(editor) => editor.update(change),
         }
     }
 
@@ -105,6 +115,8 @@ impl Window {
             Face::Saturation(editor) => editor.view().map(Message::StockTurned),
             Face::Chorus(editor) => editor.view().map(Message::StockTurned),
             Face::Transient(editor) => editor.view().map(Message::StockTurned),
+            Face::Gate(editor) => editor.view().map(Message::StockTurned),
+            Face::Meter(editor) => editor.view().map(Message::StockTurned),
         }
     }
 }

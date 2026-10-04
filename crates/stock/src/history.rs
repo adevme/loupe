@@ -31,7 +31,7 @@ impl History {
         self.written.load(Ordering::Acquire)
     }
 
-    fn push(&self, moment: Moment) {
+    pub(crate) fn push(&self, moment: Moment) {
         let at = self.written.load(Ordering::Relaxed);
         let slot = &self.slots[at % KEPT];
         slot[0].store(moment.input.to_bits(), Ordering::Relaxed);

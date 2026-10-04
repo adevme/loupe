@@ -5,12 +5,13 @@ use std::sync::{Arc, Mutex};
 use loupe_engine::{Chains, ClipId, Project, TrackId};
 use loupe_plugins::rack::{Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
-use loupe_stock::{History, Scopes};
+use loupe_stock::{History, Readings, Scopes};
 
 #[derive(Clone, Default)]
 pub struct Peek {
     pub scopes: Option<Arc<Scopes>>,
     pub history: Option<Arc<History>>,
+    pub meter: Option<Arc<Readings>>,
     pub knobs: Vec<String>,
 }
 
@@ -97,21 +98,21 @@ impl Racks {
         for (id, rack) in self.chains.iter_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
-                let (scopes, history) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history()),
-                    None => (None, None),
+                let (scopes, history, meter) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter()),
+                    None => (None, None, None),
                 };
-                found.push((Spot::Track(*id, slot), Peek { scopes, history, knobs }));
+                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, knobs }));
             }
         }
         for (id, rack) in self.clips.iter_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
-                let (scopes, history) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history()),
-                    None => (None, None),
+                let (scopes, history, meter) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter()),
+                    None => (None, None, None),
                 };
-                found.push((Spot::Clip(*id, slot), Peek { scopes, history, knobs }));
+                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, knobs }));
             }
         }
         let Ok(mut held) = self.peeks.lock() else { return };
