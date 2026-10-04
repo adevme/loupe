@@ -81,6 +81,14 @@ pub trait Chains: Send {
         let _ = slot;
         Err("plugin windows are not wired up".into())
     }
+
+    /// Whether any plugin is still opening on a thread of its own.
+    fn still_opening(&self) -> bool {
+        false
+    }
+
+    /// Called now and then while plugins are opening, off the audio thread.
+    fn nudge(&mut self) {}
 }
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {

@@ -436,6 +436,7 @@ struct App {
     writing: Option<loupe_engine::Writer>,
     knob_names: HashMap<(u64, usize, usize, bool), String>,
     hint: Option<&'static str>,
+    plugins_opening: bool,
     reading: Option<String>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
@@ -643,6 +644,7 @@ impl App {
             found: Vec::new(),
             scanning: true,
             hint: None,
+            plugins_opening: false,
             reading: None,
             plugin_filter: String::new(),
             plugin_highlight: 0,
@@ -785,6 +787,9 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                if self.plugins_opening {
+                    self.nudge_racks();
+                }
                 if let Some(recording) = self.recording.as_mut() {
                     recording.taped.extend(self.engine.taped_keys());
                 }
@@ -1789,7 +1794,13 @@ impl App {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(Message::ModifiersChanged(modifiers)),
             _ => None,
         });
-        let watching = self.exporting || self.copied.is_some() || self.input.is_some() || self.opening.is_some() || self.stock.is_some() || self.master_level > 0.0005;
+        let watching = self.exporting
+            || self.copied.is_some()
+            || self.input.is_some()
+            || self.opening.is_some()
+            || self.stock.is_some()
+            || self.plugins_opening
+            || self.master_level > 0.0005;
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
@@ -2132,6 +2143,7 @@ impl App {
             None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone())) as Box<dyn Chains>,
         };
         let troubles = racks.follow(&self.project);
+        self.plugins_opening = racks.still_opening();
         self.knob_names.clear();
         if let Ok(held) = self.peeks.lock() {
             for (spot, peek) in held.iter() {
@@ -2841,5 +2853,17 @@ impl App {
             self.racks = Some(racks);
             self.hand_racks_over();
         }
+    }
+}
+
+impl App {
+    /// While plugins are opening in the background, let the racks publish what has
+    /// arrived and open any window that was asked for early.
+    fn nudge_racks(&mut self) {
+        let Some(mut racks) = self.borrow_racks() else { return };
+        racks.nudge();
+        self.plugins_opening = racks.still_opening();
+        self.racks = Some(racks);
+        self.hand_racks_over();
     }
 }

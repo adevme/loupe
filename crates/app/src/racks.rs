@@ -123,6 +123,10 @@ impl Racks {
     }
 
     fn publish(&mut self) {
+        // Runs on the thread that draws, so this is where a waiting window may open.
+        for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()) {
+            rack.open_waiting();
+        }
         let mut found: Vec<(Spot, Peek)> = Vec::new();
         for (id, rack) in self.chains.iter_mut() {
             for slot in 0..rack.len() {
@@ -250,6 +254,14 @@ impl Chains for Racks {
         if let Some(rack) = self.master.as_mut() {
             rack.automate(slot, knob, value);
         }
+    }
+
+    fn still_opening(&self) -> bool {
+        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).any(|rack| rack.still_opening())
+    }
+
+    fn nudge(&mut self) {
+        self.publish();
     }
 
     fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {

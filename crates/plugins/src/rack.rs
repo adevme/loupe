@@ -15,6 +15,9 @@ pub struct Slot {
     /// A plugin being opened on a thread of its own. Starting a host and loading a
     /// plugin takes seconds, and the song cannot stop while it happens.
     coming: Option<std::sync::mpsc::Receiver<Result<(Sandbox, usize), String>>>,
+    /// The window was asked for before the plugin had finished opening, so it opens
+    /// as soon as there is something to open.
+    wanted_open: bool,
 }
 
 impl Slot {
@@ -76,6 +79,7 @@ impl Rack {
             host: None,
             built: None,
             coming: None,
+            wanted_open: false,
         };
         if is_built_in(&slot.path) {
             match self.make_built(slot.index) {
@@ -189,7 +193,35 @@ impl Rack {
         }
     }
 
+    /// Opens the window of any plugin whose window was asked for while it was still
+    /// loading. Talks to the plugin host, so it is only ever called off the audio thread.
+    /// Whether any plugin here is still being opened.
+    pub fn still_opening(&self) -> bool {
+        self.slots.iter().any(|slot| slot.on_its_way())
+    }
+
+    pub fn open_waiting(&mut self) {
+        let waiting: Vec<usize> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.wanted_open && slot.host.is_some())
+            .map(|(at, _)| at)
+            .collect();
+        for slot in waiting {
+            self.slots[slot].wanted_open = false;
+            let _ = self.tell(slot, Ask::Show);
+        }
+    }
+
     pub fn show(&mut self, slot: usize) -> Result<(), String> {
+        // Asked for before the plugin finished opening: remember it and open it then.
+        if let Some(found) = self.slots.get_mut(slot) {
+            if found.on_its_way() {
+                found.wanted_open = true;
+                return Ok(());
+            }
+        }
         self.tell(slot, Ask::Show)
     }
 
@@ -285,6 +317,7 @@ impl Rack {
                         host: None,
                         built: None,
                         coming: None,
+                        wanted_open: false,
                     };
                     if is_built_in(path) {
                         // Loupe's own plugins are already in the program, so they are ready at once.
