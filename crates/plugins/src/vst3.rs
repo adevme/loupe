@@ -209,15 +209,26 @@ impl Effect {
     pub fn editor(&self) -> Result<crate::editor::Editor, String> {
         use vst3::Steinberg::Vst::IEditController;
         unsafe {
+            // The same host context the knobs are read with. Plugins that are handed
+            // nothing here refuse to make their window at all.
+            let context = self
+                .us
+                .as_com_ref::<vst3::Steinberg::FUnknown>()
+                .map(|found| found.as_ptr())
+                .unwrap_or(std::ptr::null_mut());
             let mut cid = [0i8; 16];
             if self.component.getControllerClassId(&mut cid) == kResultOk {
                 let id = cid.map(|c| c as u8);
                 if let Ok(controller) = self._library.make::<IEditController>(&id) {
-                    return crate::editor::Editor::from(controller);
+                    // A plugin whose window lives in a controller of its own often will
+                    // not make that window until the two halves have been introduced.
+                    return crate::editor::Editor::from_pair(controller, &self.component, context);
                 }
             }
+            // One object doing both jobs: it was started when the plugin was loaded, and
+            // starting it again is not allowed.
             let controller: ComPtr<IEditController> = self.component.cast().ok_or("this plugin has no window")?;
-            crate::editor::Editor::from(controller)
+            crate::editor::Editor::already_started(controller, context)
         }
     }
 

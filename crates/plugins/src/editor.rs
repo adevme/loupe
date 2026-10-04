@@ -33,9 +33,9 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn from(controller: ComPtr<IEditController>) -> Result<Self, String> {
+    pub fn from(controller: ComPtr<IEditController>, context: *mut vst3::Steinberg::FUnknown) -> Result<Self, String> {
         unsafe {
-            if controller.initialize(std::ptr::null_mut()) != kResultOk {
+            if controller.initialize(context) != kResultOk {
                 return Err("the plugin's window would not start up".into());
             }
             let handler = ComWrapper::new(Quiet);
@@ -104,5 +104,69 @@ pub fn platform_kind() -> &'static [u8] {
         b"NSView\0"
     } else {
         b"X11EmbedWindowID\0"
+    }
+}
+
+impl Editor {
+    /// For a plugin that keeps its window in a separate controller: start the
+    /// controller, hand it the processor's settings, and connect the two, which is
+    /// what a plugin expects of a host before it will make its window.
+    pub fn from_pair(
+        controller: ComPtr<IEditController>,
+        component: &ComPtr<vst3::Steinberg::Vst::IComponent>,
+        context: *mut vst3::Steinberg::FUnknown,
+    ) -> Result<Self, String> {
+        use vst3::Steinberg::Vst::{IComponentTrait, IConnectionPoint, IConnectionPointTrait};
+        unsafe {
+            if controller.initialize(context) != kResultOk {
+                return Err("the plugin's window would not start up".into());
+            }
+            // What the processor currently holds, so the window opens showing it.
+            let kept = crate::stream::Bytes::empty();
+            if let Some(stream) = kept.as_com_ref::<vst3::Steinberg::IBStream>() {
+                if component.getState(stream.as_ptr()) == kResultOk {
+                    let back = crate::stream::Bytes::holding(kept.taken());
+                    if let Some(again) = back.as_com_ref::<vst3::Steinberg::IBStream>() {
+                        controller.setComponentState(again.as_ptr());
+                    }
+                }
+            }
+            let from: Option<ComPtr<IConnectionPoint>> = component.cast();
+            let to: Option<ComPtr<IConnectionPoint>> = controller.cast();
+            if let (Some(from), Some(to)) = (from, to) {
+                from.connect(to.as_ptr());
+                to.connect(from.as_ptr());
+            }
+            let handler = ComWrapper::new(Quiet);
+            if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
+                controller.setComponentHandler(reference.as_ptr());
+            }
+            let raw = controller.createView(b"editor\0".as_ptr() as *const i8);
+            let view = ComPtr::from_raw(raw).ok_or("this plugin keeps its window somewhere Loupe cannot reach it")?;
+            Ok(Self { view, _controller: controller, _handler: handler })
+        }
+    }
+}
+
+impl Editor {
+    /// For a plugin where one object is both the processor and the window: it was
+    /// started when the plugin was loaded, so it is only given a handler and asked
+    /// for its window.
+    pub fn already_started(controller: ComPtr<IEditController>, context: *mut vst3::Steinberg::FUnknown) -> Result<Self, String> {
+        unsafe {
+            let handler = ComWrapper::new(Quiet);
+            if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
+                controller.setComponentHandler(reference.as_ptr());
+            }
+            let mut raw = controller.createView(b"editor\0".as_ptr() as *const i8);
+            if raw.is_null() {
+                // Some plugins want starting again before they will part with a window,
+                // even though one object is doing both jobs.
+                controller.initialize(context);
+                raw = controller.createView(b"editor\0".as_ptr() as *const i8);
+            }
+            let view = ComPtr::from_raw(raw).ok_or("this plugin has no window")?;
+            Ok(Self { view, _controller: controller, _handler: handler })
+        }
     }
 }
