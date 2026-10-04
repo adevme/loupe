@@ -6,6 +6,7 @@ mod eq;
 mod history;
 mod limiter;
 mod reverb;
+mod saturation;
 mod scope;
 mod smooth;
 
@@ -18,6 +19,7 @@ pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use scope::Scope;
 pub use limiter::Limiter;
 pub use reverb::{decay_seconds, Reverb};
+pub use saturation::{curve_of as saturation_curve, Saturation, STYLES as SATURATION_STYLES};
 
 pub type Frame = [f32; 2];
 
@@ -135,7 +137,7 @@ pub trait Effect: Send {
     }
 }
 
-pub const NAMES: [&str; 6] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser"];
+pub const NAMES: [&str; 7] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation"];
 
 pub fn make(name: &str) -> Option<Box<dyn Effect>> {
     Some(match name {
@@ -145,6 +147,7 @@ pub fn make(name: &str) -> Option<Box<dyn Effect>> {
         "Loupe Delay" => Box::new(Delay::new()),
         "Loupe Reverb" => Box::new(Reverb::new()),
         "Loupe De-esser" => Box::new(Deesser::new()),
+        "Loupe Saturation" => Box::new(Saturation::new()),
         _ => return None,
     })
 }
