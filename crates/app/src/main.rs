@@ -653,6 +653,9 @@ impl App {
         app.find_scripts();
         app.keep_safe();
         app.listen_to_keyboards();
+        // The window is open before Loupe is told how big it is, and the timeline draws
+        // to that width, so ask for it rather than waiting for the first resize.
+        let measure = window::get_latest().and_then(window::get_size).map(Message::Resized);
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
         let look = if app.check_updates {
             app.quiet_check = true;
@@ -660,7 +663,7 @@ impl App {
         } else {
             Task::none()
         };
-        (app, Task::batch([task, hunt, look]))
+        (app, Task::batch([task, measure, hunt, look]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -949,7 +952,12 @@ impl App {
                 self.view = view;
                 self.cache.clear();
             }
-            Message::Resized(size) => self.window = size,
+            Message::Resized(size) => {
+                if size != self.window {
+                    self.window = size;
+                    self.cache.clear();
+                }
+            }
             Message::OpenSettings => {
                 self.input_names = loupe_engine::input_devices();
                 self.theme_names = theme::available();
