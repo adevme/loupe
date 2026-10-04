@@ -2323,6 +2323,7 @@ dependencies = [
  "sha2",
  "ureq",
  "winresource",
+ "x11-dl",
 ]
 
 [[package]]

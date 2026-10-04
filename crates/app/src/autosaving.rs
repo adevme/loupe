@@ -73,7 +73,8 @@ impl App {
         }
         self.recovering = Some(lost.place.project.clone());
         self.next_lost();
-        self.read_project(lost.backup, false)
+        let safely = self.wants_safe_open();
+        self.read_project(lost.backup, false, safely)
     }
 
     pub(crate) fn skip_recovery(&mut self) {

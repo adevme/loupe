@@ -134,7 +134,7 @@ impl App {
             .filter_map(|id| self.project.track(*id))
             .filter(|track| track.print_takes)
             .map(|track| (track.id, crate::printing::wanted(&track.fx)))
-            .filter(|(_, want)| !want.is_empty())
+            .filter(|(_, want)| !want.is_empty() && !self.plugins_are_off())
             .collect();
         let host = loupe_plugins::sandbox::host_beside_us();
         let keep_from = if recording.counted_in { recording.from as i64 } else { 0 };

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use loupe_engine::{Chains, ClipId, Project, TrackId};
@@ -24,6 +25,7 @@ pub enum Spot {
 }
 
 pub type Peeks = Arc<Mutex<HashMap<Spot, Peek>>>;
+pub type PluginsOff = Arc<AtomicBool>;
 
 pub struct Racks {
     host: PathBuf,
@@ -35,10 +37,11 @@ pub struct Racks {
     master: Option<Rack>,
     scratch: Vec<[f32; 2]>,
     peeks: Peeks,
+    off: PluginsOff,
 }
 
 impl Racks {
-    pub fn new(rate: u32, block: usize, peeks: Peeks) -> Self {
+    pub fn new(rate: u32, block: usize, peeks: Peeks, off: PluginsOff) -> Self {
         Self {
             host: host_beside_us(),
             rate,
@@ -48,10 +51,18 @@ impl Racks {
             master: None,
             scratch: Vec::new(),
             peeks,
+            off,
         }
     }
 
     fn settle(&mut self, project: &Project) -> Vec<String> {
+        if self.off.load(Ordering::Relaxed) {
+            self.chains.clear();
+            self.clips.clear();
+            self.master = None;
+            self.publish();
+            return Vec::new();
+        }
         let mut troubles = Vec::new();
         if project.master_fx.is_empty() {
             self.master = None;
@@ -326,5 +337,84 @@ impl Chains for Racks {
         rack.process(&mut self.scratch);
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use loupe_engine::{Command, Fx, Outcome, Source};
+
+    use super::*;
+
+    fn fx(path: &str, index: usize, state: &[u8]) -> Fx {
+        Fx { path: PathBuf::from(path), index, name: format!("{path} {index}"), bypassed: false, state: state.to_vec(), record: false }
+    }
+
+    fn song_with_plugins() -> (Project, TrackId, ClipId) {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 4_800]));
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
+        project.apply(Command::AddFx { track, fx: fx("/nowhere/Crasher.vst3", 0, &[1, 2, 3]) }).unwrap();
+        project.apply(Command::AddFx { track, fx: fx(loupe_plugins::BUILT_IN, 1, &[]) }).unwrap();
+        project.apply(Command::AddClipFx { clip, fx: fx("/nowhere/Clipper.clap", 0, &[4, 5]) }).unwrap();
+        project.apply(Command::AddMasterFx(fx("/nowhere/Glue.vst3", 0, &[6]))).unwrap();
+        (project, track, clip)
+    }
+
+    fn racks(off: bool) -> Racks {
+        Racks::new(48_000, 512, Peeks::default(), Arc::new(AtomicBool::new(off)))
+    }
+
+    #[test]
+    fn a_song_opened_with_plugins_off_loads_none_of_them() {
+        let (project, _, _) = song_with_plugins();
+        let mut racks = racks(true);
+        assert!(racks.follow(&project).is_empty());
+        assert!(racks.chains.is_empty() && racks.clips.is_empty() && racks.master.is_none());
+        assert!(!racks.still_opening());
+        assert!(racks.harvest().is_empty() && racks.harvest_clips().is_empty());
+        assert!(racks.show(project.tracks[0].id, 0).is_err());
+    }
+
+    #[test]
+    fn turning_plugins_back_on_loads_every_one_again() {
+        let (project, track, clip) = song_with_plugins();
+        let mut racks = racks(true);
+        racks.follow(&project);
+        racks.off.store(false, Ordering::Relaxed);
+        racks.follow(&project);
+        assert_eq!(racks.chains.get(&track).map(Rack::len), Some(2));
+        assert_eq!(racks.clips.get(&clip).map(Rack::len), Some(1));
+        assert_eq!(racks.master.as_ref().map(Rack::len), Some(1));
+        assert!(racks.chains[&track].slots()[1].built_in());
+    }
+
+    #[test]
+    fn saving_with_plugins_off_writes_the_same_song_as_saving_with_them_on() {
+        let (mut project, _, _) = song_with_plugins();
+        let saved = |song: &Project| loupe_engine::SavedProject::capture(song, |_| None).to_text();
+        let as_opened = saved(&project);
+        let mut racks = racks(true);
+        racks.follow(&project);
+        for (track, slot, state) in racks.harvest() {
+            project.apply(Command::SetFxState { track, slot, state }).unwrap();
+        }
+        for (clip, slot, state) in racks.harvest_clips() {
+            project.apply(Command::SetClipFxState { clip, slot, state }).unwrap();
+        }
+        assert_eq!(saved(&project), as_opened);
+        assert!(as_opened.contains("Crasher"));
+    }
+
+    #[test]
+    fn plugins_that_were_running_close_when_they_are_turned_off() {
+        let (project, track, _) = song_with_plugins();
+        let mut racks = racks(false);
+        racks.follow(&project);
+        assert!(racks.chains.contains_key(&track));
+        racks.off.store(true, Ordering::Relaxed);
+        racks.follow(&project);
+        assert!(racks.chains.is_empty() && racks.clips.is_empty() && racks.master.is_none());
     }
 }

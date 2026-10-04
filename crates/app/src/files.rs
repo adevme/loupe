@@ -172,7 +172,7 @@ impl App {
         )
     }
 
-    pub(crate) fn read_project(&mut self, path: PathBuf, as_template: bool) -> Task<Message> {
+    pub(crate) fn read_project(&mut self, path: PathBuf, as_template: bool, safely: bool) -> Task<Message> {
         let rate = self.project.rate;
         self.loading += 1;
         self.problem = None;
@@ -184,7 +184,7 @@ impl App {
         });
         Task::perform(
             async move { opened.await.unwrap_or_else(|_| Err("opening stopped unexpectedly".into())) },
-            move |result| Message::ProjectRead(path.clone(), as_template, result),
+            move |result| Message::ProjectRead(path.clone(), as_template, safely, result),
         )
     }
 
@@ -194,6 +194,7 @@ impl App {
     }
 
     pub(crate) fn go_home(&mut self) {
+        self.set_plugins_off(false);
         self.replace_project(Project::new(self.project.rate), HashMap::new());
         self.overlay = Overlay::None;
         self.screen = Screen::Home;

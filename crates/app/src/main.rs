@@ -17,6 +17,7 @@ mod piano_roll;
 mod pointer;
 mod pool;
 mod routing;
+mod safe_mode;
 mod plugins;
 mod racks;
 mod stretching;
@@ -32,6 +33,7 @@ mod scripting;
 mod scripts;
 mod settings;
 mod spinner;
+mod starting;
 mod theme;
 mod theming;
 mod timeline;
@@ -82,6 +84,7 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const SETTINGS_PAGE_HEIGHT: f32 = 330.0;
 
 fn main() -> iced::Result {
+    let shift_at_start = safe_mode::shift_held();
     crash::keep_a_record();
     let settings = Settings::load();
     let mut loaded = Palette::load(settings.theme.as_deref());
@@ -89,10 +92,10 @@ fn main() -> iced::Result {
     let ui_font = loaded.palette.ui;
     let opens_a_song = std::env::args_os().len() > 1;
     let first_size = if opens_a_song { START_SIZE } else { scaled(HOME_SIZE, settings.scale) };
-    let mut loupe = iced::application(App::title, App::update, App::view)
-        .subscription(App::subscription)
-        .theme(|app: &App| app.palette.iced())
-        .scale_factor(|app: &App| app.scale)
+    let mut loupe = iced::application(starting::Loupe::title, starting::Loupe::update, starting::Loupe::view)
+        .subscription(starting::Loupe::subscription)
+        .theme(starting::Loupe::theme)
+        .scale_factor(starting::Loupe::scale)
         .font(include_bytes!("../assets/Inter-Regular.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-Medium.ttf").as_slice())
         .font(include_bytes!("../assets/Inter-SemiBold.ttf").as_slice())
@@ -110,7 +113,7 @@ fn main() -> iced::Result {
     if let Some(font) = icon_font {
         loupe = loupe.font(font);
     }
-    let ran = loupe.run_with(move || App::new(loaded, settings));
+    let ran = loupe.run_with(move || starting::Loupe::starting(loaded, settings, shift_at_start));
     backup::mark_closed();
     usage::finish();
     ran
@@ -156,6 +159,7 @@ pub enum Message {
     ToggleSolo(TrackId),
     TrackPan(TrackId, f32),
     ModifiersChanged(keyboard::Modifiers),
+    FirstFrame,
     ToggleArm(TrackId),
     InputChosen(String),
     BpmTyped(String),
@@ -308,6 +312,8 @@ pub enum Message {
     TogglePool,
     PlaceSource(usize),
     OpenProject,
+    OpenWithPluginsOff,
+    PluginsBackOn,
     Discard,
     GoHome,
     NewBlank,
@@ -315,7 +321,7 @@ pub enum Message {
     OpenRecent(PathBuf),
     SaveAsTemplate,
     ProjectPicked(Option<PathBuf>),
-    ProjectRead(PathBuf, bool, Result<files::Opened, String>),
+    ProjectRead(PathBuf, bool, bool, Result<files::Opened, String>),
     Save,
     SaveAs,
     SavePicked(Option<PathBuf>),
@@ -546,10 +552,12 @@ struct App {
     audio: loupe_engine::Device,
     audio_lists: audio_settings::Lists,
     silent: bool,
+    plugins_off: racks::PluginsOff,
+    open_next_safely: bool,
 }
 
 impl App {
-    fn new(loaded: theme::Loaded, settings: Settings) -> (Self, Task<Message>) {
+    fn new(loaded: theme::Loaded, settings: Settings, shift_at_start: bool) -> (Self, Task<Message>) {
         let scale = settings.scale;
         let silent = std::env::var("LOUPE_AUDIO").as_deref() == Ok("silent");
         let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device(settings.audio.clone()) });
@@ -682,13 +690,18 @@ impl App {
             chain_name: String::new(),
             plugin_highlight: 0,
             plugin_uses: plugins::Uses::load(),
+            plugins_off: racks::PluginsOff::default(),
+            open_next_safely: false,
         };
         let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args_os()
             .skip(1)
             .map(PathBuf::from)
             .partition(|path| path.extension().is_some_and(|extension| extension == files::EXTENSION));
         let task = match projects.into_iter().next() {
-            Some(project) => app.read_project(project, false),
+            Some(project) => {
+                let safely = shift_at_start || app.wants_safe_open();
+                app.read_project(project, false, safely)
+            }
             None if audio.is_empty() => {
                 app.screen = Screen::Home;
                 app.window = Size::new(HOME_SIZE.width, HOME_SIZE.height);
@@ -783,6 +796,7 @@ impl App {
                 | Message::InputChosen(_)
                 | Message::GoHome
                 | Message::OpenProject
+                | Message::OpenWithPluginsOff
                 | Message::OpenRecent(_)
                 | Message::NewBlank
                 | Message::NewFromTemplate(_)
@@ -1005,6 +1019,7 @@ impl App {
                 self.listen_if_armed();
             }
             Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
+            Message::FirstFrame => {}
             Message::TrackPan(track, pan) => {
                 let pan = pan.clamp(-1.0, 1.0);
                 self.edit(Some(Run::Pan(track)), Command::SetTrackPan { track, pan });
@@ -1628,7 +1643,15 @@ impl App {
                     self.place(source);
                 }
             }
-            Message::OpenProject => return self.ask_to_open(),
+            Message::OpenProject => {
+                self.open_next_safely = self.wants_safe_open();
+                return self.ask_to_open();
+            }
+            Message::OpenWithPluginsOff => {
+                self.open_next_safely = true;
+                return self.ask_to_open();
+            }
+            Message::PluginsBackOn => self.plugins_back_on(),
             Message::Discard => match self.overlay {
                 Overlay::ConfirmDiscard(Pending::Open) => return self.pick_project(),
                 Overlay::ConfirmDiscard(Pending::Home) => self.go_home(),
@@ -1642,26 +1665,29 @@ impl App {
                 }
             }
             Message::NewBlank => {
+                self.set_plugins_off(false);
                 self.replace_project(Project::new(self.project.rate), HashMap::new());
                 self.screen = Screen::Song;
             }
-            Message::NewFromTemplate(template) => return self.read_project(template, true),
-            Message::OpenRecent(project) => return self.read_project(project, false),
+            Message::NewFromTemplate(template) => return self.read_project(template, true, self.wants_safe_open()),
+            Message::OpenRecent(project) => return self.read_project(project, false, self.wants_safe_open()),
             Message::SaveAsTemplate => {
                 self.overlay = Overlay::TemplateName;
                 self.entry = self.path.as_deref().map(home::stem).unwrap_or_default();
                 return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
             }
             Message::ProjectPicked(path) => {
+                let safely = std::mem::take(&mut self.open_next_safely) || self.wants_safe_open();
                 if let Some(path) = path {
-                    return self.read_project(path, false);
+                    return self.read_project(path, false, safely);
                 }
             }
-            Message::ProjectRead(path, as_template, result) => {
+            Message::ProjectRead(path, as_template, safely, result) => {
                 self.loading = self.loading.saturating_sub(1);
                 self.opening = None;
                 match result {
                     Ok(opened) => {
+                        self.set_plugins_off(safely);
                         self.adopt(path, opened, as_template);
                         if let Some(original) = self.recovering.take() {
                             self.path = original;
@@ -2040,7 +2066,7 @@ impl App {
 
     pub(crate) fn offline_racks(&self, project: &Project) -> Box<dyn Chains> {
         let mut racks: Box<dyn Chains> =
-            Box::new(racks::Racks::new(self.engine.rate(), 512, racks::Peeks::default()));
+            Box::new(racks::Racks::new(self.engine.rate(), 512, racks::Peeks::default(), self.plugins_off.clone()));
         racks.follow(project);
         racks
     }
@@ -2066,6 +2092,10 @@ impl App {
     }
 
     fn open_plugin_window(&mut self, track: TrackId, slot: usize) {
+        if self.plugins_are_off() {
+            self.problem = Some(safe_mode::PLUGINS_OFF_PROBLEM.into());
+            return;
+        }
         let Some(fx) = self.project.tracks.iter().find(|t| t.id == track).and_then(|t| t.fx.get(slot)).cloned() else {
             return;
         };
@@ -2104,6 +2134,10 @@ impl App {
     }
 
     pub(crate) fn open_clip_plugin_window(&mut self, clip: ClipId, slot: usize) {
+        if self.plugins_are_off() {
+            self.problem = Some(safe_mode::PLUGINS_OFF_PROBLEM.into());
+            return;
+        }
         let Some(fx) = self.project.clip(clip).and_then(|found| found.fx.get(slot)).cloned() else {
             return;
         };
@@ -2251,7 +2285,7 @@ impl App {
     fn follow_chains(&mut self) {
         let mut racks = match self.borrow_racks() {
             Some(racks) => racks,
-            None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone())) as Box<dyn Chains>,
+            None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone(), self.plugins_off.clone())) as Box<dyn Chains>,
         };
         let troubles = racks.follow(&self.project);
         self.plugins_opening = racks.still_opening();
@@ -2486,7 +2520,11 @@ impl App {
             (true, Side::Right) => row![timeline, upright_rule(palette), self.pool()],
             (true, Side::Left) => row![self.pool(), upright_rule(palette), timeline],
         };
-        let mut song = column![self.transport(), rule(palette), middle];
+        let mut song = column![self.transport(), rule(palette)];
+        if let Some(banner) = self.safe_banner() {
+            song = song.push(banner).push(rule(palette));
+        }
+        song = song.push(middle);
         if self.mixer_open {
             song = song.push(rule(palette)).push(self.mixer());
         }
@@ -2970,6 +3008,10 @@ fn hinted<'a>(piece: impl Into<Element<'a, Message>>, words: &'static str) -> El
 impl App {
     /// Opens the window of a plugin over the whole mix.
     fn open_master_window(&mut self, slot: usize) {
+        if self.plugins_are_off() {
+            self.problem = Some(safe_mode::PLUGINS_OFF_PROBLEM.into());
+            return;
+        }
         let Some(fx) = self.project.master_fx.get(slot).cloned() else {
             return;
         };
