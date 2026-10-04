@@ -41,6 +41,14 @@ impl Sandbox {
         if let Some(root) = crate::presets::root() {
             command.env(crate::presets::FOLDER_VARIABLE, root);
         }
+        // The host has no console of its own to show. Without this, Windows opens a
+        // black box beside Loupe every time a plugin is loaded.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(NO_WINDOW);
+        }
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
