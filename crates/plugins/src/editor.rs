@@ -4,6 +4,33 @@ use vst3::Steinberg::Vst::{
 use vst3::Steinberg::{kResultOk, IPlugView, IPlugViewTrait, IPluginBaseTrait, ViewRect};
 use vst3::{Class, ComPtr, ComWrapper};
 
+pub struct Frame {
+    wanted: std::sync::Mutex<Option<(i32, i32)>>,
+}
+
+impl Class for Frame {
+    type Interfaces = (vst3::Steinberg::IPlugFrame,);
+}
+
+impl vst3::Steinberg::IPlugFrameTrait for Frame {
+    unsafe fn resizeView(&self, view: *mut IPlugView, new_size: *mut ViewRect) -> i32 {
+        if new_size.is_null() {
+            return vst3::Steinberg::kInvalidArgument;
+        }
+        let asked = unsafe { *new_size };
+        let (width, height) = (asked.right - asked.left, asked.bottom - asked.top);
+        if let Ok(mut held) = self.wanted.lock() {
+            *held = Some((width.max(1), height.max(1)));
+        }
+        if let Some(view) = unsafe { ComPtr::from_raw(view) } {
+            unsafe { view.onSize(new_size) };
+            std::mem::forget(view);
+        }
+        kResultOk
+    }
+}
+
+
 pub struct Quiet;
 
 impl Class for Quiet {
@@ -33,6 +60,7 @@ pub struct Editor {
     _controller: ComPtr<IEditController>,
     _handler: ComWrapper<Quiet>,
     links: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
+    frame: ComWrapper<Frame>,
 }
 
 impl Editor {
@@ -81,7 +109,11 @@ impl Editor {
                 }
                 return Err("this plugin has no window".into());
             };
-            Ok(Self { view, _controller: controller, _handler: handler, links })
+            let frame = ComWrapper::new(Frame { wanted: std::sync::Mutex::new(None) });
+            if let Some(reference) = frame.as_com_ref::<vst3::Steinberg::IPlugFrame>() {
+                view.setFrame(reference.as_ptr());
+            }
+            Ok(Self { view, _controller: controller, _handler: handler, links, frame })
         }
     }
 
@@ -120,11 +152,16 @@ impl Editor {
         }
         Ok(())
     }
+
+    pub fn wanted_size(&self) -> Option<(i32, i32)> {
+        self.frame.wanted.lock().ok().and_then(|mut held| held.take())
+    }
 }
 
 impl Drop for Editor {
     fn drop(&mut self) {
         unsafe {
+            self.view.setFrame(std::ptr::null_mut());
             self.view.removed();
             if let Some((one, other)) = self.links.take() {
                 one.disconnect(other.as_ptr());
@@ -159,8 +196,12 @@ impl Editor {
                 controller.initialize(context);
                 raw = controller.createView(b"editor\0".as_ptr() as *const i8);
             }
-            let view = ComPtr::from_raw(raw).ok_or("this plugin has no window")?;
-            Ok(Self { view, _controller: controller, _handler: handler, links: None })
+            let view: ComPtr<IPlugView> = ComPtr::from_raw(raw).ok_or("this plugin has no window")?;
+            let frame = ComWrapper::new(Frame { wanted: std::sync::Mutex::new(None) });
+            if let Some(reference) = frame.as_com_ref::<vst3::Steinberg::IPlugFrame>() {
+                view.setFrame(reference.as_ptr());
+            }
+            Ok(Self { view, _controller: controller, _handler: handler, links: None, frame })
         }
     }
 }

@@ -13,6 +13,7 @@ pub mod clap;
 pub mod context;
 pub mod editor;
 pub mod lv2;
+pub mod message;
 pub mod rack;
 pub mod stream;
 pub mod wire;

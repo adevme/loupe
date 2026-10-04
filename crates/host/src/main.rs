@@ -13,6 +13,7 @@ mod com {
     extern "system" {
         fn CoInitializeEx(reserved: *mut core::ffi::c_void, model: u32) -> i32;
         fn CoUninitialize();
+        fn OleInitialize(reserved: *mut core::ffi::c_void) -> i32;
     }
 
     pub fn start() {
@@ -22,6 +23,7 @@ mod com {
         };
         unsafe {
             CoInitializeEx(std::ptr::null_mut(), model);
+            OleInitialize(std::ptr::null_mut());
         }
     }
 
@@ -218,6 +220,10 @@ fn main() {
         if let Some((made, pane)) = editor.as_ref() {
             for asked in pane.pump() {
                 use_preset(asked, open.as_mut(), pane, &loaded_name);
+            }
+            if let Some((width, height)) = made.wanted_size() {
+                pane.fit_around(width, height);
+                was_sized = (width, height);
             }
             let now = pane.inside();
             if now != was_sized && now.0 > 0 && now.1 > 0 {

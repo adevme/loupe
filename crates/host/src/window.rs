@@ -71,6 +71,8 @@ mod real {
         fn MoveWindow(window: Handle, x: i32, y: i32, width: i32, height: i32, repaint: i32) -> i32;
         fn SetWindowPos(window: Handle, after: Handle, x: i32, y: i32, width: i32, height: i32, how: u32) -> i32;
         fn SetForegroundWindow(window: Handle) -> i32;
+        fn GetWindowLongW(window: Handle, which: i32) -> isize;
+        fn GetWindowRect(window: Handle, rect: *mut [i32; 4]) -> i32;
         fn SendMessageW(window: Handle, what: u32, first: usize, second: isize) -> isize;
         fn GetWindowTextW(window: Handle, text: *mut u16, most: i32) -> i32;
         fn GetWindowTextLengthW(window: Handle) -> i32;
@@ -99,6 +101,7 @@ mod real {
     const DROP_DOWN_LIST: u32 = 0x0003;
     const SCROLLS_SIDEWAYS: u32 = 0x0080;
     const SHOW: i32 = 5;
+    const GWL_STYLE: i32 = -16;
     const TOP: Handle = std::ptr::null_mut();
     const KEEP_SIZE: u32 = 0x0001;
     const KEEP_PLACE: u32 = 0x0002;
@@ -293,6 +296,17 @@ mod real {
             }
         }
 
+        pub fn fit_around(&self, width: i32, height: i32) {
+            unsafe {
+                let mut rect = [0, 0, width, height + BAR];
+                let style = GetWindowLongW(self.handle, GWL_STYLE) as u32;
+                AdjustWindowRectEx(&mut rect, style, 0, 0);
+                let mut where_it_is = [0i32; 4];
+                GetWindowRect(self.handle, &mut where_it_is);
+                MoveWindow(self.handle, where_it_is[0], where_it_is[1], rect[2] - rect[0], rect[3] - rect[1], 1);
+            }
+        }
+
         pub fn inside(&self) -> (i32, i32) {
             unsafe {
                 let mut rect = [0i32; 4];
@@ -364,6 +378,8 @@ mod real {
         pub fn show(&self) {}
 
         pub fn hide(&self) {}
+
+        pub fn fit_around(&self, _width: i32, _height: i32) {}
 
         pub fn inside(&self) -> (i32, i32) {
             (0, 0)
