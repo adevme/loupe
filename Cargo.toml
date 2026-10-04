@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/engine", "crates/app", "crates/plugins", "crates/host", "crates/stock", "crates/stock-ui", "crates/launcher", "crates/stretch", "crates/lame"]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 
 [profile.release]
 lto = true
