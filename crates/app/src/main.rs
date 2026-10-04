@@ -6,6 +6,7 @@ mod autosaving;
 mod clip_window;
 mod clipboard;
 mod crash;
+mod crash_reports;
 mod exporting;
 mod files;
 mod home;
@@ -231,6 +232,12 @@ pub enum Message {
     KeptEntered,
     Recover,
     SkipRecovery,
+    CrashNoteTyped(String),
+    SendCrashReport,
+    CrashReportSent(Result<(), String>),
+    SkipCrashReport,
+    TurnFallenOff,
+    LeaveFallenOn,
     NewNotesClip(TrackId),
     UseInstrument(TrackId, Instrument),
     ToggleRecordsNotes(TrackId),
@@ -404,6 +411,8 @@ pub enum Overlay {
     Stock,
     Matrix,
     Recover,
+    CrashReport,
+    PluginFell,
     Roll(ClipId),
 }
 
@@ -459,6 +468,13 @@ struct App {
     chain_name: String,
     plugin_highlight: usize,
     plugin_uses: plugins::Uses,
+    falls: racks::Falls,
+    fell: Vec<racks::Fell>,
+    fell_named: HashSet<String>,
+    crash_reports: Vec<crash::Waiting>,
+    crash_note: String,
+    crash_sending: bool,
+    crash_sheet_due: bool,
     project: Project,
     undo: Vec<Project>,
     redo: Vec<Project>,
@@ -673,7 +689,16 @@ impl App {
             chain_name: String::new(),
             plugin_highlight: 0,
             plugin_uses: plugins::Uses::load(),
+            falls: racks::Falls::default(),
+            fell: Vec::new(),
+            fell_named: HashSet::new(),
+            crash_reports: crash::waiting(),
+            crash_note: String::new(),
+            crash_sending: false,
+            crash_sheet_due: false,
         };
+        app.crash_sheet_due = !app.crash_reports.is_empty();
+        app.note_audio_for_crashes();
         let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args_os()
             .skip(1)
             .map(PathBuf::from)
@@ -831,6 +856,7 @@ impl App {
                     }
                 }
                 self.keep_writing();
+                self.take_falls();
                 if let Some(window) = self.stock.as_mut() {
                     window.tick();
                 }
@@ -1028,6 +1054,7 @@ impl App {
                 self.pending_scale = self.scale;
                 self.scale_text = format_scale(self.scale);
             }
+            Message::CloseOverlay if self.overlay == Overlay::PluginFell => self.settle_fallen(false),
             Message::CloseOverlay => {
                 if matches!(self.overlay, Overlay::Roll(_)) {
                     self.engine.silence_notes();
@@ -1798,6 +1825,12 @@ impl App {
             Message::InstallUpdate => return self.install_update(),
             Message::UpdateLater => self.update_dismissed = true,
             Message::UsageToggled(on) => self.set_usage(on),
+            Message::CrashNoteTyped(note) => self.crash_note = note,
+            Message::SendCrashReport => return self.send_crash_report(),
+            Message::CrashReportSent(result) => self.crash_report_sent(result),
+            Message::SkipCrashReport => self.skip_crash_report(),
+            Message::TurnFallenOff => self.settle_fallen(true),
+            Message::LeaveFallenOn => self.settle_fallen(false),
             Message::CheckUpdatesOnStart(on) => {
                 self.check_updates = on;
                 if let Err(why) = settings::save("check_updates", if on { "on" } else { "off" }) {
@@ -1872,6 +1905,7 @@ impl App {
             || self.opening.is_some()
             || self.stock.is_some()
             || self.plugins_opening
+            || self.crash_sheet_due
             || self.master_level > 0.0005;
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
@@ -2008,7 +2042,7 @@ impl App {
 
     pub(crate) fn offline_racks(&self, project: &Project) -> Box<dyn Chains> {
         let mut racks: Box<dyn Chains> =
-            Box::new(racks::Racks::new(self.engine.rate(), 512, racks::Peeks::default()));
+            Box::new(racks::Racks::new(self.engine.rate(), 512, racks::Peeks::default(), racks::Falls::default()));
         racks.follow(project);
         racks
     }
@@ -2028,9 +2062,11 @@ impl App {
     }
 
     fn hand_racks_over(&mut self) {
-        if let Some(racks) = self.racks.take() {
+        if let Some(mut racks) = self.racks.take() {
+            racks.nudge();
             self.engine.use_chains(racks);
         }
+        self.take_falls();
     }
 
     fn open_plugin_window(&mut self, track: TrackId, slot: usize) {
@@ -2219,9 +2255,10 @@ impl App {
     fn follow_chains(&mut self) {
         let mut racks = match self.borrow_racks() {
             Some(racks) => racks,
-            None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone())) as Box<dyn Chains>,
+            None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone(), self.falls.clone())) as Box<dyn Chains>,
         };
         let troubles = racks.follow(&self.project);
+        self.note_plugins_for_crashes();
         self.plugins_opening = racks.still_opening();
         self.knob_names.clear();
         if let Ok(held) = self.peeks.lock() {
@@ -2241,6 +2278,7 @@ impl App {
             self.problem = Some(first.clone());
         }
         self.engine.use_chains(racks);
+        self.take_falls();
     }
 
     fn restored(&mut self) {

@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::sandbox::Sandbox;
 use crate::wire::{Ask, Reply};
 
+type Opened = Result<(Sandbox, usize), (String, bool)>;
+
 pub struct Slot {
     pub path: PathBuf,
     pub index: usize,
@@ -15,7 +17,7 @@ pub struct Slot {
     built: Option<Box<dyn loupe_stock::Effect>>,
     /// A plugin being opened on a thread of its own. Starting a host and loading a
     /// plugin takes seconds, and the song cannot stop while it happens.
-    coming: Option<std::sync::mpsc::Receiver<Result<(Sandbox, usize), (String, bool)>>>,
+    coming: Option<std::sync::mpsc::Receiver<Opened>>,
     /// The window was asked for before the plugin had finished opening, so it opens
     /// as soon as there is something to open.
     wanted_open: bool,
@@ -657,7 +659,7 @@ fn open_on_a_thread(
     rate: u32,
     block: usize,
     state: &[u8],
-) -> Result<(Sandbox, usize), (String, bool)> {
+) -> Opened {
     let mut sandbox = Sandbox::start(host).map_err(|why| (why, false))?;
     let ask = Ask::Load { path: path.to_string_lossy().to_string(), index, rate, block };
     let loaded = sandbox.ask(ask).and_then(|reply| match reply {
@@ -675,13 +677,23 @@ mod fallen_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    fn host(name: &str, script: &str) -> PathBuf {
+    struct Host(PathBuf);
+
+    impl Drop for Host {
+        fn drop(&mut self) {
+            if let Some(folder) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+
+    fn host(name: &str, script: &str) -> Host {
         let folder = std::env::temp_dir().join(format!("loupe-fallen-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let file = folder.join("loupe-host");
         std::fs::write(&file, format!("#!/bin/sh\n{script}")).unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-        file
+        Host(file)
     }
 
     fn wanted(name: &str) -> Wanted {
@@ -701,7 +713,8 @@ mod fallen_tests {
 
     #[test]
     fn a_host_that_dies_while_playing_is_named_once() {
-        let mut rack = Rack::new(host("playing", "read ask\nprintf 'loaded\\t2\\t2\\t0\\n'\nread ask\nexit 3\n"), 48_000, 64);
+        let script = host("playing", "read ask\nprintf 'loaded\\t2\\t2\\t0\\n'\nread ask\nexit 3\n");
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
         assert!(rack.reconcile(&[wanted("Crashy Synth")]).is_empty());
         play_until_settled(&mut rack);
         let mut audio = vec![[0.5; 2]; 64];
@@ -717,7 +730,8 @@ mod fallen_tests {
 
     #[test]
     fn a_host_that_dies_while_loading_is_named() {
-        let mut rack = Rack::new(host("loading", "read ask\nexit 3\n"), 48_000, 64);
+        let script = host("loading", "read ask\nexit 3\n");
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
         rack.reconcile(&[wanted("Crashy Reverb")]);
         play_until_settled(&mut rack);
         let fallen = rack.take_fallen();
@@ -726,7 +740,8 @@ mod fallen_tests {
 
     #[test]
     fn a_plugin_that_refuses_to_load_has_not_crashed() {
-        let mut rack = Rack::new(host("refusing", "read ask\nprintf 'trouble\\tno such plugin\\n'\nread ask\n"), 48_000, 64);
+        let script = host("refusing", "read ask\nprintf 'trouble\\tno such plugin\\n'\nread ask\n");
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
         rack.reconcile(&[wanted("Missing")]);
         play_until_settled(&mut rack);
         assert!(rack.slots()[0].trouble.is_some());

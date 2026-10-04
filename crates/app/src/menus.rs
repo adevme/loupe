@@ -44,6 +44,8 @@ impl App {
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
             Overlay::Recover => self.recover_layer(),
+            Overlay::CrashReport => self.crash_report_layer(),
+            Overlay::PluginFell => self.fallen_layer(),
             Overlay::Roll(clip) => self.centred(self.roll_sheet(*clip)),
         }
     }
