@@ -16,6 +16,7 @@ pub struct SavedProject {
     pub bpm: f64,
     pub master: f32,
     pub master_muted: bool,
+    pub master_fx: Vec<SavedFx>,
     pub sources: Vec<PathBuf>,
     pub tracks: Vec<SavedTrack>,
     pub envelopes: Vec<SavedEnvelope>,
@@ -86,6 +87,17 @@ impl SavedProject {
             bpm: project.bpm,
             master: project.master,
             master_muted: project.master_muted,
+            master_fx: project
+                .master_fx
+                .iter()
+                .map(|fx| SavedFx {
+                    path: fx.path.clone(),
+                    index: fx.index,
+                    name: fx.name.clone(),
+                    bypassed: fx.bypassed,
+                    state: fx.state.clone(),
+                })
+                .collect(),
             sources: project.sources.iter().map(|source| source.path.clone()).collect(),
             envelopes: {
                 let place = |want: TrackId| project.tracks.iter().position(|t| t.id == want).unwrap_or(usize::MAX);
@@ -183,6 +195,12 @@ impl SavedProject {
         for path in &self.sources {
             out.push_str(&format!("source {}\n", path.display()));
         }
+        // Before the tracks, so reading one does not land it on a track by mistake.
+        for fx in &self.master_fx {
+            let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
+            out.push_str(&format!("masterfxpath {}\n", fx.path.display()));
+            out.push_str(&format!("masterfx index={} bypass={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.name));
+        }
         for track in &self.tracks {
             let colour = track.colour.map_or("-".to_string(), |[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"));
             let height = track.height.map_or("-".to_string(), |h| h.to_string());
@@ -259,7 +277,7 @@ impl SavedProject {
             _ => return Err("this is not a Loupe project file".into()),
         }
         let mut saved =
-            Self { saved_by: None, skipped: Vec::new(), rate: 0, bpm: 120.0, master: 1.0, master_muted: false, sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
+            Self { saved_by: None, skipped: Vec::new(), rate: 0, bpm: 120.0, master: 1.0, master_muted: false, master_fx: Vec::new(), sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
         let mut held: Option<PathBuf> = None;
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -300,7 +318,8 @@ impl SavedProject {
                     track.sends.push((to, gain, fields.get("pre") == Some(&"1"), fields.get("side") == Some(&"1")));
                 }
                 "fxpath" | "clipfxpath" => held = Some(PathBuf::from(rest)),
-                "clipfx" | "fx" => {
+                "masterfxpath" => held = Some(PathBuf::from(rest)),
+                "clipfx" | "fx" | "masterfx" => {
                     let (fields, name) = rest.split_once("name=").ok_or_else(|| bad("the plugin has no name"))?;
                     let fields = fields_of(fields);
                     let path = held.take().ok_or_else(|| bad("the plugin has no file"))?;
@@ -315,6 +334,10 @@ impl SavedProject {
                         bypassed: fields.get("bypass") == Some(&"1"),
                         state,
                     };
+                    if kind == "masterfx" {
+                        saved.master_fx.push(fx);
+                        continue;
+                    }
                     let track = saved.tracks.last_mut().ok_or_else(|| bad("a plugin before any track"))?;
                     if kind == "clipfx" {
                         track.clips.last_mut().ok_or_else(|| bad("a clip plugin before any clip"))?.fx.push(fx);
@@ -412,6 +435,15 @@ impl SavedProject {
         }
         for source in sources {
             let _ = project.apply(Command::AddSource(source.clone()));
+        }
+        for fx in &self.master_fx {
+            let _ = project.apply(Command::AddMasterFx(crate::model::Fx {
+                path: fx.path.clone(),
+                index: fx.index,
+                name: fx.name.clone(),
+                bypassed: fx.bypassed,
+                state: fx.state.clone(),
+            }));
         }
         for saved in &self.tracks {
             let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: saved.name.clone() }) else {
@@ -718,6 +750,37 @@ mod routing_round_trip {
     use super::*;
     use crate::model::{Command, Outcome};
     use crate::source::Source;
+
+    #[test]
+    fn master_plugins_survive_a_save_and_open_and_stay_off_the_tracks() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let on_track = crate::model::Fx {
+            path: PathBuf::from("one.vst3"),
+            index: 0,
+            name: "On the track".into(),
+            bypassed: false,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddFx { track, fx: on_track }).unwrap();
+        let over_all = crate::model::Fx {
+            path: PathBuf::from("glue.vst3"),
+            index: 2,
+            name: "Over the mix".into(),
+            bypassed: true,
+            state: vec![9, 8, 7],
+        };
+        p.apply(Command::AddMasterFx(over_all.clone())).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert_eq!(back.master_fx.len(), 1);
+        assert_eq!(back.master_fx[0], over_all);
+        assert_eq!(back.tracks[0].fx.len(), 1, "the master plugin landed on a track");
+        assert_eq!(back.tracks[0].fx[0].name, "On the track");
+        assert!(p.apply(Command::RemoveMasterFx(7)).is_err());
+        p.apply(Command::RemoveMasterFx(0)).unwrap();
+        assert!(p.master_fx.is_empty());
+    }
 
     #[test]
     fn a_stretched_clip_survives_a_save_and_open() {

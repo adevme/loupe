@@ -28,6 +28,7 @@ pub enum Face {
 pub enum Spot {
     Track(TrackId),
     Clip(loupe_engine::ClipId),
+    Master,
 }
 
 pub struct Window {

@@ -37,6 +37,7 @@ impl App {
             Overlay::Routing(track) => self.centred(self.routing_sheet(*track)),
             Overlay::Sampler(track) => self.centred(self.sampler_sheet(*track)),
             Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
+            Overlay::MasterPlugins => self.centred(self.picker("Plugins for Master".to_string(), &Message::AddMasterPlugin)),
             Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
             Overlay::Automation(target) => self.centred(self.automation_sheet(*target)),

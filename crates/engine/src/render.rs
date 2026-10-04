@@ -11,6 +11,11 @@ pub trait Chains: Send {
         self.process(track, audio);
     }
 
+    /// The plugins over the whole mix, run after every track has been summed.
+    fn process_master(&mut self, audio: &mut [[f32; 2]]) {
+        let _ = audio;
+    }
+
     fn follow(&mut self, project: &Project) -> Vec<String> {
         let _ = project;
         Vec::new()
@@ -67,6 +72,11 @@ pub trait Chains: Send {
         let _ = (clip, slot);
         Err("plugin windows are not wired up".into())
     }
+
+    fn show_master(&mut self, slot: usize) -> Result<(), String> {
+        let _ = slot;
+        Err("plugin windows are not wired up".into())
+    }
 }
 
 pub fn render(project: &Project, pos: Frames, out: &mut [[f32; 2]]) {
@@ -85,7 +95,12 @@ pub fn render_through(
     scratch: &mut Mixdown,
     chains: Option<&mut (dyn Chains + '_)>,
 ) {
-    mix_tracks_metered(project, pos, out, None, None, scratch, chains);
+    // Master plugins hear the mix before the master fader, the way a mix bus works.
+    let mut after = chains;
+    mix_tracks_metered(project, pos, out, None, None, scratch, after.as_deref_mut());
+    if let Some(chains) = after.as_deref_mut() {
+        chains.process_master(out);
+    }
     let target = crate::envelope::Target::MasterGain;
     let opens = automated(project, target, pos, project.master);
     let closes = automated(project, target, pos + out.len() as Frames, project.master);

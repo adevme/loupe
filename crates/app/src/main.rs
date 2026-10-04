@@ -273,6 +273,11 @@ pub enum Message {
     Stretched { source: Arc<Source>, stretch: f64, made: Option<Arc<Source>> },
     ToggleSnap,
     MidiInputToggled(String),
+    OpenMasterPlugins,
+    AddMasterPlugin(usize),
+    RemoveMasterPlugin(usize),
+    BypassMasterPlugin(usize),
+    ShowMasterPlugin(usize),
     AudioDriverChosen(audio_settings::Driver),
     AudioOutputChosen(String),
     AudioRateChosen(audio_settings::Rate),
@@ -380,6 +385,7 @@ pub enum Overlay {
     ClipPlugins(ClipId),
     Knobs(stockwin::Spot, usize),
     Automation(loupe_engine::Target),
+    MasterPlugins,
     Stock,
     Matrix,
     Recover,
@@ -1210,6 +1216,35 @@ impl App {
             Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
+            Message::OpenMasterPlugins => {
+                self.plugin_filter.clear();
+                self.plugin_highlight = 0;
+                self.overlay = Overlay::MasterPlugins;
+                return text_input::focus(plugins::FILTER_ID);
+            }
+            Message::AddMasterPlugin(which) => {
+                if let Some(plugin) = self.found.get(which).cloned() {
+                    let fx = loupe_engine::Fx {
+                        path: plugin.path.clone(),
+                        index: plugin.index,
+                        name: plugin.name.clone(),
+                        bypassed: false,
+                        state: Vec::new(),
+                    };
+                    self.overlay = Overlay::None;
+                    self.plugin_uses.reached_for(&plugin.name);
+                    self.edit(None, Command::AddMasterFx(fx));
+                }
+            }
+            Message::RemoveMasterPlugin(slot) => {
+                self.edit(None, Command::RemoveMasterFx(slot));
+            }
+            Message::BypassMasterPlugin(slot) => {
+                if let Some(bypassed) = self.project.master_fx.get(slot).map(|fx| !fx.bypassed) {
+                    self.edit(None, Command::BypassMasterFx { slot, bypassed });
+                }
+            }
+            Message::ShowMasterPlugin(slot) => self.open_master_window(slot),
             Message::MidiInputToggled(port) => self.toggle_midi_input(port),
             Message::ToggleSnap => {
                 self.snap = !self.snap;
@@ -1993,11 +2028,14 @@ impl App {
                 .and_then(|found| found.fx.get(slot))
                 .map(|fx| fx.state.clone())
                 .unwrap_or_default(),
+            stockwin::Spot::Master => self.project.master_fx.get(slot).map(|fx| fx.state.clone()).unwrap_or_default(),
         };
         for (knob, value) in &changes {
             match spot {
                 stockwin::Spot::Track(track) => self.engine.tweak(track, slot, *knob, *value),
                 stockwin::Spot::Clip(clip) => self.engine.tweak_clip(clip, slot, *knob, *value),
+                // Master plugins take their new settings when the rack next settles.
+                stockwin::Spot::Master => {}
             }
             let at = knob * 4;
             if state.len() < at + 4 {
@@ -2008,6 +2046,7 @@ impl App {
         let _ = match spot {
             stockwin::Spot::Track(track) => self.project.apply(Command::SetFxState { track, slot, state }),
             stockwin::Spot::Clip(clip) => self.project.apply(Command::SetClipFxState { clip, slot, state }),
+            stockwin::Spot::Master => self.project.apply(Command::SetMasterFxState { slot, state }),
         };
         self.dirty = true;
         self.revision += 1;
@@ -2097,6 +2136,8 @@ impl App {
                 let (owner, slot, on_clip) = match spot {
                     racks::Spot::Track(track, slot) => (track.0, *slot, false),
                     racks::Spot::Clip(clip, slot) => (clip.0, *slot, true),
+                    // Master knobs are not automatable yet, so they are not named here.
+                    racks::Spot::Master(_) => continue,
                 };
                 for (knob, name) in peek.knobs.iter().enumerate() {
                     self.knob_names.insert((owner, slot, knob, on_clip), name.clone());
@@ -2773,4 +2814,30 @@ fn transpose_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<M
 /// Wraps one thing in the top bar so the hint panel can say what it is.
 fn hinted<'a>(piece: impl Into<Element<'a, Message>>, words: &'static str) -> Element<'a, Message> {
     iced::widget::mouse_area(piece.into()).on_enter(Message::Hint(Some(words))).on_exit(Message::Hint(None)).into()
+}
+
+impl App {
+    /// Opens the window of a plugin over the whole mix.
+    fn open_master_window(&mut self, slot: usize) {
+        let Some(fx) = self.project.master_fx.get(slot).cloned() else {
+            return;
+        };
+        if loupe_plugins::rack::is_built_in(&fx.path) {
+            let values: Vec<f32> = fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect();
+            let peek = self.peek_at(racks::Spot::Master(slot));
+            let rate = self.engine.rate() as f32;
+            let bpm = self.project.bpm as f32;
+            if let Some(window) = stockwin::Window::open(stockwin::Spot::Master, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
+                self.stock = Some(window);
+            }
+            return;
+        }
+        if let Some(mut racks) = self.borrow_racks() {
+            if let Err(why) = racks.show_master(slot) {
+                self.problem = Some(why);
+            }
+            self.racks = Some(racks);
+            self.hand_racks_over();
+        }
+    }
 }

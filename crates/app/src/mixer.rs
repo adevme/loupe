@@ -156,6 +156,7 @@ impl App {
                     ..Default::default()
                 }),
                 text("Master").size(12).font(palette.semibold),
+                self.master_fx_block(),
                 hrow![
                     mouse_area(
                         vertical_slider(0.0..=LOUDEST_MASTER_PERCENT, percent, Message::MasterPercent)

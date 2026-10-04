@@ -19,6 +19,7 @@ pub struct Peek {
 pub enum Spot {
     Track(TrackId, usize),
     Clip(ClipId, usize),
+    Master(usize),
 }
 
 pub type Peeks = Arc<Mutex<HashMap<Spot, Peek>>>;
@@ -29,17 +30,45 @@ pub struct Racks {
     block: usize,
     chains: HashMap<TrackId, Rack>,
     clips: HashMap<ClipId, Rack>,
+    /// The plugins over the whole mix.
+    master: Option<Rack>,
     scratch: Vec<[f32; 2]>,
     peeks: Peeks,
 }
 
 impl Racks {
     pub fn new(rate: u32, block: usize, peeks: Peeks) -> Self {
-        Self { host: host_beside_us(), rate, block, chains: HashMap::new(), clips: HashMap::new(), scratch: Vec::new(), peeks }
+        Self {
+            host: host_beside_us(),
+            rate,
+            block,
+            chains: HashMap::new(),
+            clips: HashMap::new(),
+            master: None,
+            scratch: Vec::new(),
+            peeks,
+        }
     }
 
     fn settle(&mut self, project: &Project) -> Vec<String> {
         let mut troubles = Vec::new();
+        if project.master_fx.is_empty() {
+            self.master = None;
+        } else {
+            let want: Vec<_> = project
+                .master_fx
+                .iter()
+                .map(|fx| Wanted {
+                    path: fx.path.clone(),
+                    index: fx.index,
+                    name: fx.name.clone(),
+                    bypassed: fx.bypassed,
+                    state: fx.state.clone(),
+                })
+                .collect();
+            let rack = self.master.get_or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
+            troubles.extend(rack.reconcile(&want));
+        }
         self.chains.retain(|id, _| project.tracks.iter().any(|track| track.id == *id));
         for track in &project.tracks {
             if track.fx.is_empty() {
@@ -115,6 +144,16 @@ impl Racks {
                 found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, knobs }));
             }
         }
+        if let Some(rack) = self.master.as_mut() {
+            for slot in 0..rack.len() {
+                let knobs = rack.knobs(slot);
+                let (scopes, history, meter) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter()),
+                    None => (None, None, None),
+                };
+                found.push((Spot::Master(slot), Peek { scopes, history, meter, knobs }));
+            }
+        }
         let Ok(mut held) = self.peeks.lock() else { return };
         held.clear();
         held.extend(found);
@@ -146,6 +185,13 @@ impl Chains for Racks {
         match self.chains.get_mut(&track) {
             Some(rack) => rack.show(slot),
             None => Err("that track has no plugins".into()),
+        }
+    }
+
+    fn show_master(&mut self, slot: usize) -> Result<(), String> {
+        match self.master.as_mut() {
+            Some(rack) => rack.show(slot),
+            None => Err("the master has no plugins".into()),
         }
     }
 
@@ -232,6 +278,18 @@ impl Chains for Racks {
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
         rack.process_with(&mut self.scratch, side);
+        let shared = self.scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+    }
+
+    fn process_master(&mut self, audio: &mut [[f32; 2]]) {
+        let Some(rack) = self.master.as_mut() else { return };
+        if rack.is_empty() {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.extend_from_slice(audio);
+        rack.process(&mut self.scratch);
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }

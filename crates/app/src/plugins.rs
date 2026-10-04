@@ -10,6 +10,7 @@ use crate::{App, Message};
 pub const FILTER_ID: &str = "plugin-filter";
 const NAME_LENGTH: usize = 20;
 const DOT: f32 = 9.0;
+const MASTER_SLOT_HINT: &str = "Click to open it, right click to remove. These run over the whole mix.";
 const SLOT_HINT: &str = "Click to open it, drag to reorder, right click to remove, middle click for its knobs";
 
 pub fn find_plugins() -> Vec<Found> {
@@ -253,6 +254,14 @@ impl App {
 impl App {
     pub(crate) fn knob_sheet(&self, spot: crate::stockwin::Spot, slot: usize) -> Element<'_, Message> {
         let palette = self.palette;
+        if spot == crate::stockwin::Spot::Master {
+            // Master plugins run, but their knobs have no envelope target yet.
+            return self.window(
+                "Automate".to_string(),
+                text("Automating master plugins is not built yet.").size(12.5).color(palette.text_dim).into(),
+                360.0,
+            );
+        }
         let (name, where_) = match spot {
             crate::stockwin::Spot::Track(track) => (
                 self.project
@@ -272,6 +281,7 @@ impl App {
                     .unwrap_or_default(),
                 crate::racks::Spot::Clip(clip, slot),
             ),
+            crate::stockwin::Spot::Master => (String::new(), crate::racks::Spot::Master(slot)),
         };
         let knobs = self.peek_at(where_).knobs;
         let heading = text(format!("Automate on {name}")).size(14).font(palette.semibold);
@@ -286,6 +296,7 @@ impl App {
             let target = match spot {
                 crate::stockwin::Spot::Track(track) => loupe_engine::Target::TrackFx { track, slot, knob },
                 crate::stockwin::Spot::Clip(clip) => loupe_engine::Target::ClipFx { clip, slot, knob },
+                crate::stockwin::Spot::Master => continue,
             };
             let on = self.project.envelope(target).is_some();
             list = list.push(
@@ -368,4 +379,45 @@ fn newest_shells(found: Vec<Found>) -> Vec<Found> {
         .into_iter()
         .filter(|plugin| !is_shell(&plugin.name) || best.get(&family(&plugin.name)) == Some(&plugin.name))
         .collect()
+}
+
+impl App {
+    /// The same slot rows as a track, for the plugins over the whole mix.
+    pub(crate) fn master_fx_block(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let mut rows = column![].spacing(2);
+        for (slot, fx) in self.project.master_fx.iter().enumerate() {
+            let on = !fx.bypassed;
+            let dot = button(Space::new(DOT, DOT))
+                .padding(0)
+                .style(move |_, status| palette.toggled(!on, status))
+                .on_press(Message::BypassMasterPlugin(slot));
+            let name = container(text(shorten(&fx.name)).size(10.5).wrapping(iced::widget::text::Wrapping::None))
+                .padding(iced::Padding { top: 1.0, right: 3.0, bottom: 1.0, left: 3.0 })
+                .width(Length::Fill)
+                .style(move |_| crate::plugins::slot_look(palette, on, false, false));
+            rows = rows.push(
+                row![
+                    dot,
+                    mouse_area(name)
+                        .on_press(Message::ShowMasterPlugin(slot))
+                        .on_right_press(Message::RemoveMasterPlugin(slot))
+                        .on_enter(Message::Hint(Some(MASTER_SLOT_HINT)))
+                        .on_exit(Message::Hint(None))
+                        .interaction(iced::mouse::Interaction::Pointer),
+                ]
+                .spacing(3)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        let add = button(text("+ FX").size(10.5))
+            .padding([1, 4])
+            .width(Length::Fill)
+            .style(move |_, status| palette.ghost(status))
+            .on_press(Message::OpenMasterPlugins);
+        column![scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4))), add]
+            .spacing(3)
+            .width(Length::Fill)
+            .into()
+    }
 }
