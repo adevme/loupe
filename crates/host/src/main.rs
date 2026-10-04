@@ -178,9 +178,18 @@ fn main() {
     let mut out = channel::take_stdout();
     let mut open: Option<Open> = None;
     let mut editor: Option<(loupe_plugins::editor::Editor, window::Window)> = None;
+    let mut loaded_name = String::new();
+    let mut was_sized = (0, 0);
     'living: loop {
-        if let Some((_, pane)) = editor.as_ref() {
+        if let Some((made, pane)) = editor.as_ref() {
             pane.pump();
+            // The plugin is not told when the frame is dragged, so watch the size and
+            // hand it on. Without this it keeps drawing at its old size in a bigger hole.
+            let now = pane.inside();
+            if now != was_sized && now.0 > 0 && now.1 > 0 {
+                was_sized = now;
+                made.resized(now.0, now.1);
+            }
         }
         let next = if editor.is_some() {
             match came.recv_timeout(std::time::Duration::from_millis(8)) {
@@ -227,7 +236,7 @@ fn main() {
                 continue;
             }
             Ask::Quit => break,
-            Ask::Show => match show(open.as_ref(), &mut editor) {
+            Ask::Show => match show(open.as_ref(), &mut editor, &loaded_name) {
                 Ok(()) => Reply::Fine,
                 Err(why) => Reply::Trouble(why),
             },
@@ -243,6 +252,8 @@ fn main() {
             },
             Ask::Load { path, index, rate, block } => {
                 editor = None;
+                // Kept for the window title, so a plugin window says which plugin it is.
+                loaded_name = names_in(&PathBuf::from(&path)).ok().and_then(|names| names.get(index).cloned()).unwrap_or_default();
                 match open_one(&PathBuf::from(&path), index, rate as f64, block) {
                     Ok(effect) => {
                         let latency = effect.latency();
@@ -288,6 +299,7 @@ fn main() {
 fn show(
     open: Option<&Open>,
     editor: &mut Option<(loupe_plugins::editor::Editor, window::Window)>,
+    name: &str,
 ) -> Result<(), String> {
     if let Some((_, pane)) = editor.as_ref() {
         pane.show();
@@ -302,7 +314,10 @@ fn show(
         return Err("this plugin has no window for this computer".into());
     }
     let (width, height) = made.size();
-    let pane = window::Window::open("Plugin", width, height)?;
+    let title = if name.is_empty() { "Plugin" } else { name };
+    // A fresh window starts at the plugin's own size, so forget the last one's.
+
+    let pane = window::Window::open(title, width, height, made.can_resize())?;
     made.attach(pane.inner(), kind)?;
     pane.show();
     *editor = Some((made, pane));

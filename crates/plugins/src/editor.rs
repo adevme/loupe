@@ -60,6 +60,25 @@ impl Editor {
         ((rect.right - rect.left).max(80), (rect.bottom - rect.top).max(60))
     }
 
+    /// Whether the plugin will redraw itself at another size. A plugin that says no
+    /// gets a window that cannot be dragged, so there is never a gap beside it.
+    pub fn can_resize(&self) -> bool {
+        unsafe { self.view.canResize() == kResultOk }
+    }
+
+    /// Tell the plugin the window is a new size, and let it answer with the size it
+    /// would rather be.
+    pub fn resized(&self, width: i32, height: i32) -> (i32, i32) {
+        let mut rect = ViewRect { left: 0, top: 0, right: width, bottom: height };
+        unsafe {
+            if self.view.checkSizeConstraint(&mut rect) != kResultOk {
+                rect = ViewRect { left: 0, top: 0, right: width, bottom: height };
+            }
+            self.view.onSize(&mut rect);
+        }
+        ((rect.right - rect.left).max(80), (rect.bottom - rect.top).max(60))
+    }
+
     pub fn attach(&self, window: *mut std::ffi::c_void, kind: &[u8]) -> Result<(), String> {
         unsafe {
             if self.view.attached(window, kind.as_ptr() as *const i8) != kResultOk {

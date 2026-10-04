@@ -246,24 +246,23 @@ impl App {
         }
     }
 
-    pub(crate) fn versions_sheet(&self) -> Element<'_, Message> {
+    /// The updates half of the About window: what is installed, what is available,
+    /// and the button that goes looking. It has no window of its own because on its
+    /// own it would say nothing About does not already say.
+    pub(crate) fn updates_block(&self) -> Element<'_, Message> {
         let palette = self.palette;
-        let mut body = column![text(format!("This is Loupe {THIS}.")).size(14)].spacing(12);
-        match install_home() {
-            Some(home) => {
-                let list = installed(&home);
-                body = body.push(text("Installed versions. Your songs and settings stay the same whichever you use.").size(12).color(palette.text_dim));
-                for version in list {
-                    let using = version == THIS;
-                    let choose = button(text(if using { "In use" } else { "Use this version" }).size(12.5).font(palette.medium))
-                        .padding([5, 12])
-                        .style(move |_, status| palette.outlined(status))
-                        .on_press_maybe((!using).then(|| Message::UseVersion(version.clone())));
-                    body = body.push(row![text(format!("Loupe {version}")).size(13).width(Length::Fill), choose].align_y(Alignment::Center));
-                }
-            }
-            None => {
-                body = body.push(text("Switching versions works once Loupe is installed with its installer.").size(12).color(palette.text_dim));
+        let mut body = column![].spacing(12);
+        // Only worth listing when there is more than one to pick between.
+        let list = install_home().map(|home| installed(&home)).unwrap_or_default();
+        if list.len() > 1 {
+            body = body.push(text("Installed versions. Your songs and settings stay the same whichever you use.").size(12).color(palette.text_dim));
+            for version in list {
+                let using = version == THIS;
+                let choose = button(text(if using { "In use" } else { "Use this version" }).size(12.5).font(palette.medium))
+                    .padding([5, 12])
+                    .style(move |_, status| palette.outlined(status))
+                    .on_press_maybe((!using).then(|| Message::UseVersion(version.clone())));
+                body = body.push(row![text(format!("Loupe {version}")).size(13).width(Length::Fill), choose].align_y(Alignment::Center));
             }
         }
         let status: Element<'_, Message> = match &self.update_state {
@@ -289,8 +288,7 @@ impl App {
             .padding([6, 14])
             .style(move |_, status| palette.outlined(status))
             .on_press_maybe((!matches!(self.update_state, UpdateState::Checking | UpdateState::Downloading)).then_some(Message::CheckForUpdates));
-        body = body.push(row![check, Space::with_width(Length::Fill)].align_y(Alignment::Center)).push(status);
-        self.window("Versions".to_string(), body.into(), 520.0)
+        body.push(row![check, Space::with_width(Length::Fill)].align_y(Alignment::Center)).push(status).into()
     }
 }
 

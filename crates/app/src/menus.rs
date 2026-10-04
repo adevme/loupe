@@ -31,7 +31,6 @@ impl App {
             ])),
             Overlay::ScriptsMenu => self.floating(self.under_the_bar(SCRIPTS_MENU_LEFT), self.scripts_menu()),
             Overlay::About => self.centred(self.about_sheet()),
-            Overlay::Versions => self.centred(self.versions_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
@@ -225,13 +224,10 @@ impl App {
             credit("Built with Rust, Iced, cpal and Symphonia."),
             credit("Typefaces: Inter and JetBrains Mono. Icons: Lucide."),
             rule(palette),
-            button(text("Versions and updates").size(13).font(palette.medium))
-                .padding([6, 14])
-                .style(move |_, status| palette.ghost(status))
-                .on_press(Message::OpenVersions),
+            self.updates_block(),
         ]
         .spacing(10);
-        self.window("About".to_string(), body.into(), 420.0)
+        self.window("About".to_string(), body.into(), 460.0)
     }
 
     fn save_sheet(&self) -> Element<'_, Message> {

@@ -56,6 +56,7 @@ mod real {
         fn TranslateMessage(message: *const Message) -> i32;
         fn DispatchMessageW(message: *const Message) -> isize;
         fn AdjustWindowRectEx(rect: *mut [i32; 4], style: u32, menu: i32, extra: u32) -> i32;
+        fn GetClientRect(window: *mut c_void, rect: *mut [i32; 4]) -> i32;
         fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
     }
 
@@ -65,6 +66,9 @@ mod real {
     }
 
     const OVERLAPPED_WINDOW: u32 = 0x00CF_0000;
+    /// The same window without the drag edges or the maximise button, for a plugin
+    /// that only draws at one size.
+    const FIXED_WINDOW: u32 = 0x00CA_0000;
     const SHOW: i32 = 5;
     const REMOVE: u32 = 1;
     const CLOSE: u32 = 0x0010;
@@ -87,7 +91,8 @@ mod real {
     }
 
     impl Window {
-        pub fn open(title: &str, width: i32, height: i32) -> Result<Self, String> {
+        pub fn open(title: &str, width: i32, height: i32, resizable: bool) -> Result<Self, String> {
+            let frame = if resizable { OVERLAPPED_WINDOW } else { FIXED_WINDOW };
             let name = wide("LoupePluginWindow");
             unsafe {
                 let instance = GetModuleHandleW(std::ptr::null());
@@ -107,13 +112,13 @@ mod real {
                 };
                 RegisterClassExW(&class);
                 let mut rect = [0, 0, width, height];
-                AdjustWindowRectEx(&mut rect, OVERLAPPED_WINDOW, 0, 0);
+                AdjustWindowRectEx(&mut rect, frame, 0, 0);
                 let title = wide(title);
                 let handle = CreateWindowExW(
                     0,
                     name.as_ptr(),
                     title.as_ptr(),
-                    OVERLAPPED_WINDOW,
+                    frame,
                     i32::MIN,
                     i32::MIN,
                     rect[2] - rect[0],
@@ -146,6 +151,18 @@ mod real {
             }
         }
 
+        /// The size of the area the plugin draws in, which changes as the user drags
+        /// the frame.
+        pub fn inside(&self) -> (i32, i32) {
+            unsafe {
+                let mut rect = [0i32; 4];
+                if GetClientRect(self.handle, &mut rect) == 0 {
+                    return (0, 0);
+                }
+                (rect[2] - rect[0], rect[3] - rect[1])
+            }
+        }
+
         pub fn pump(&self) {
             unsafe {
                 let mut message: Message = std::mem::zeroed();
@@ -173,7 +190,7 @@ mod real {
     pub struct Window;
 
     impl Window {
-        pub fn open(_title: &str, _width: i32, _height: i32) -> Result<Self, String> {
+        pub fn open(_title: &str, _width: i32, _height: i32, _resizable: bool) -> Result<Self, String> {
             Err("plugin windows only open on Windows so far".into())
         }
 
@@ -184,6 +201,10 @@ mod real {
         pub fn show(&self) {}
 
         pub fn hide(&self) {}
+
+        pub fn inside(&self) -> (i32, i32) {
+            (0, 0)
+        }
 
         pub fn pump(&self) {}
     }

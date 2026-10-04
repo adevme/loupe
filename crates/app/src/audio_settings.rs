@@ -132,7 +132,7 @@ impl App {
         self.engine.set_metronome(self.metronome);
         self.engine.seek(self.playhead);
         if self.midi_keys.is_some() {
-            self.midi_keys = loupe_engine::MidiKeys::open(self.engine.key_sender()).ok();
+            self.midi_keys = loupe_engine::MidiKeys::open(self.engine.key_sender(), &self.midi_chosen).ok();
         }
         self.input = None;
         self.input_names = loupe_engine::input_devices();

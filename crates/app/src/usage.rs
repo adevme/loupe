@@ -21,8 +21,6 @@ pub fn finish() {
         usage.finish();
     }
 }
-pub const NOTICE: &str = "Loupe sends anonymous usage info (version and system) to help improve it. Turn it off in Settings > Privacy.";
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Installed,
@@ -94,11 +92,14 @@ pub struct Usage {
 
 impl Usage {
     pub fn begin(stored: &settings::Settings) -> (Self, bool) {
-        let first_time_asked = stored.usage.is_none();
-        let on = stored.usage.unwrap_or(true);
-        if first_time_asked {
-            let _ = settings::save("usage", "on");
+        // Off until the user turns it on, so Loupe never sends anything it has not
+        // been told it may send, and nothing has to be announced on the first run.
+        let first_run = stored.usage.is_none();
+        let on = stored.usage.unwrap_or(false);
+        if first_run {
+            let _ = settings::save("usage", "off");
         }
+        let first_time_asked = first_run;
         let left_open = session_file().and_then(|file| std::fs::read_to_string(file).ok()).map(|text| text.trim().to_string());
         if let Some(file) = session_file() {
             let _ = std::fs::write(file, THIS);
@@ -194,7 +195,7 @@ mod tests {
 
     #[test]
     fn the_first_run_says_nothing_until_the_notice_has_been_seen() {
-        let fresh = settings::Settings {
+        let fresh = settings::Settings { midi_inputs: None,
             theme: None,
             scale: 1.0,
             mixer_height: None,

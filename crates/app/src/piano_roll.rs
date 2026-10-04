@@ -778,8 +778,14 @@ impl App {
 impl App {
     pub(crate) fn listen_to_keyboards(&mut self) {
         if self.midi_keys.is_none() {
-            self.midi_keys = loupe_engine::MidiKeys::open(self.engine.key_sender()).ok();
+            self.midi_keys = loupe_engine::MidiKeys::open(self.engine.key_sender(), &self.midi_chosen).ok();
         }
+    }
+
+    /// Start again on the ports the user has ticked.
+    pub(crate) fn relisten_to_keyboards(&mut self) {
+        self.midi_keys = None;
+        self.midi_keys = loupe_engine::MidiKeys::open(self.engine.key_sender(), &self.midi_chosen).ok();
     }
 
     pub(crate) fn keyboards_found(&self) -> String {
@@ -901,5 +907,45 @@ impl App {
         if self.edit(None, loupe_engine::Command::SetNotes { clip, notes: changed }).is_some() {
             self.roll_chosen = made;
         }
+    }
+}
+
+impl App {
+    /// One line per MIDI input, so a keyboard that shows up twice does not get
+    /// listened to twice. Nothing ticked means every one of them, which is what
+    /// Loupe did before there was anything to tick.
+    pub(crate) fn midi_picker(&self) -> Element<'_, crate::Message> {
+        let all = self.midi_around.len();
+        let mut rows = iced::widget::column![].spacing(4);
+        for name in &self.midi_around {
+            let on = self.midi_chosen.is_empty() || self.midi_chosen.iter().any(|chosen| chosen == name);
+            let port = name.clone();
+            rows = rows.push(
+                iced::widget::checkbox(name.clone(), on)
+                    .on_toggle(move |_| crate::Message::MidiInputToggled(port.clone()))
+                    .text_size(12.5),
+            );
+        }
+        if all == 0 {
+            return iced::widget::Space::new(0, 0).into();
+        }
+        rows.into()
+    }
+
+    pub(crate) fn toggle_midi_input(&mut self, port: String) {
+        // An empty list stands for "all of them", so spell it out before removing one.
+        if self.midi_chosen.is_empty() {
+            self.midi_chosen = self.midi_around.clone();
+        }
+        match self.midi_chosen.iter().position(|chosen| *chosen == port) {
+            Some(at) => {
+                self.midi_chosen.remove(at);
+            }
+            None => self.midi_chosen.push(port),
+        }
+        if let Err(why) = crate::settings::save("midi_inputs", &self.midi_chosen.join("\t")) {
+            self.problem = Some(format!("Could not save settings: {why}"));
+        }
+        self.relisten_to_keyboards();
     }
 }
