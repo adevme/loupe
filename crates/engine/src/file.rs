@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::instrument::{Instrument, Note, Synth, Wave};
+use crate::instrument::{Instrument, Note, Sampler, Synth, Wave};
 use crate::model::{Clip, ClipId, Command, Edge, Fade, Frames, Outcome, Project, TrackId};
 use crate::source::Source;
 
@@ -47,6 +47,7 @@ pub struct SavedTrack {
     pub sends: Vec<(usize, f32, bool, bool)>,
     pub fx: Vec<SavedFx>,
     pub instrument: Instrument,
+    pub sample: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -126,6 +127,7 @@ impl SavedProject {
                     parent: track.parent.and_then(|id| project.tracks.iter().position(|t| t.id == id)),
                     collapsed: track.collapsed,
                     instrument: track.instrument,
+                    sample: track.sample.as_ref().and_then(|sample| project.sources.iter().position(|kept| Arc::ptr_eq(kept, sample))),
                     sends: track
                         .sends
                         .iter()
@@ -185,8 +187,9 @@ impl SavedProject {
             let colour = track.colour.map_or("-".to_string(), |[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"));
             let height = track.height.map_or("-".to_string(), |h| h.to_string());
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
+            let sample = track.sample.map_or("-".to_string(), |s| s.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} name={}\n",
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} sample={sample} name={}\n",
                 track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, instrument_text(&track.instrument), track.name
             ));
             for (to, gain, pre, side) in &track.sends {
@@ -286,6 +289,7 @@ impl SavedProject {
                         sends: Vec::new(),
                         fx: Vec::new(),
                         instrument: fields.get("instrument").and_then(|text| instrument_from(text)).unwrap_or_default(),
+                        sample: fields.get("sample").and_then(|text| text.parse::<usize>().ok()),
                     });
                 }
                 "send" => {
@@ -420,6 +424,9 @@ impl SavedProject {
             let _ = project.apply(Command::SetRecordsNotes { track, on: saved.records_notes });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
             let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
+            if let Some(sample) = saved.sample.and_then(|index| sources.get(index)) {
+                let _ = project.apply(Command::SetSample { track, sample: Some(sample.clone()) });
+            }
             if let Some(height) = saved.height {
                 heights.push((track, height));
             }
@@ -530,6 +537,10 @@ impl SavedProject {
 fn instrument_text(instrument: &Instrument) -> String {
     match instrument {
         Instrument::Drums => "drums".to_string(),
+        Instrument::Sampler(sampler) => format!(
+            "sampler:{}:{}:{}:{}:{}:{}",
+            sampler.root, sampler.tune, sampler.attack, sampler.release, sampler.one_shot as u8, sampler.keytrack as u8
+        ),
         Instrument::Synth(synth) => format!(
             "synth:{}:{}:{}:{}:{}:{}",
             synth.wave.name(),
@@ -545,6 +556,21 @@ fn instrument_text(instrument: &Instrument) -> String {
 fn instrument_from(text: &str) -> Option<Instrument> {
     if text == "drums" {
         return Some(Instrument::Drums);
+    }
+    if let Some(rest) = text.strip_prefix("sampler:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        let [root, tune, attack, release, one_shot, keytrack] = parts.as_slice() else {
+            return None;
+        };
+        let positive = |text: &str| text.parse::<f32>().ok().filter(|n| n.is_finite() && *n >= 0.0);
+        return Some(Instrument::Sampler(Sampler {
+            root: root.parse::<u8>().ok().filter(|key| *key <= crate::instrument::HIGHEST_KEY)?,
+            tune: tune.parse::<f32>().ok().filter(|n| n.is_finite())?.clamp(-48.0, 48.0),
+            attack: positive(attack)?,
+            release: positive(release)?,
+            one_shot: *one_shot == "1",
+            keytrack: *keytrack == "1",
+        }));
     }
     let mut parts = text.strip_prefix("synth:")?.split(':');
     let wave = Wave::named(parts.next()?)?;
@@ -708,6 +734,23 @@ mod routing_round_trip {
         assert_eq!((clip.stretch, clip.offset, clip.len), (1.5, 300, 900));
         assert!(clip.waiting_for_stretch());
         assert!(SavedProject::parse(&text.replace("stretch=1.5", "stretch=fast")).is_err());
+    }
+
+    #[test]
+    fn a_sampler_and_its_sound_survive_a_save_and_open() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "808".into() }) else { panic!() };
+        let sample = Arc::new(Source::from_frames("808", vec![[0.2, 0.2]; 1_000]));
+        let sampler = Sampler { root: 48, tune: -1.5, attack: 0.01, release: 0.2, one_shot: true, keytrack: false };
+        p.apply(Command::SetInstrument { track, instrument: Instrument::Sampler(sampler) }).unwrap();
+        p.apply(Command::SetSample { track, sample: Some(sample.clone()) }).unwrap();
+        let saved = SavedProject::capture(&p, |_| None);
+        assert_eq!(saved.tracks[0].sample, Some(0));
+        let text = saved.to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[sample.clone()], 48_000);
+        assert_eq!(back.tracks[0].instrument, Instrument::Sampler(sampler));
+        assert!(Arc::ptr_eq(back.tracks[0].sample.as_ref().unwrap(), &sample));
+        assert!(SavedProject::parse(&text.replace("sampler:48", "sampler:400")).unwrap().tracks[0].instrument != Instrument::Sampler(sampler));
     }
 
     #[test]

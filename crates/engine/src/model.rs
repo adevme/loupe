@@ -134,6 +134,7 @@ pub struct Track {
     pub sends: Vec<Send>,
     pub fx: Vec<Fx>,
     pub instrument: Instrument,
+    pub sample: Option<Arc<Source>>,
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +204,7 @@ pub enum Command {
     AddNotesClip { track: TrackId, name: String, start: Frames, len: Frames, notes: Vec<Note> },
     SetNotes { clip: ClipId, notes: Vec<Note> },
     SetInstrument { track: TrackId, instrument: Instrument },
+    SetSample { track: TrackId, sample: Option<Arc<Source>> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,7 +306,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -444,6 +446,14 @@ impl Project {
             Command::SetInstrument { track, instrument } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].instrument = instrument;
+                Ok(Outcome::Done)
+            }
+            Command::SetSample { track, sample } => {
+                let t = self.track_index(track)?;
+                if let Some(source) = &sample {
+                    self.keep(source);
+                }
+                self.tracks[t].sample = sample;
                 Ok(Outcome::Done)
             }
             Command::MoveClip { clip, track, start } => {

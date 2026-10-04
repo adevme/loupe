@@ -19,7 +19,7 @@ pub use export::{export, export_through, next_version_folder, render_to_wav, ren
 pub use file::{SavedClip, SavedFx, SavedProject, SavedTrack};
 pub use input::{input_devices, Input, InputChoice, Take};
 pub use midi_in::{KeyEvent, KeySender, MidiKeys};
-pub use instrument::{drum_name, hertz, key_name, Instrument, Note, Synth, Wave, HIGHEST_KEY, LOWEST_KEY};
+pub use instrument::{drum_name, hertz, key_name, Instrument, Note, Sampler, Synth, Wave, HIGHEST_KEY, LOWEST_KEY};
 pub use model::{
     Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Fx, Outcome, Project, Send, Track, TrackId,
 };
