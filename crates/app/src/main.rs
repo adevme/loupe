@@ -192,6 +192,10 @@ pub enum Message {
     AddEnvelope(loupe_engine::Target),
     RemoveEnvelope(loupe_engine::Target),
     ArmEnvelope(loupe_engine::Target, Option<loupe_engine::Mode>),
+    OpenAutomation(loupe_engine::Target),
+    PluginHighlight(i32),
+    PluginChosen,
+    Hint(Option<&'static str>),
     FxGrab(TrackId, usize),
     FxOver(usize),
     FxDrop,
@@ -355,6 +359,7 @@ pub enum Overlay {
     Plugins(TrackId),
     ClipPlugins(ClipId),
     Knobs(stockwin::Spot, usize),
+    Automation(loupe_engine::Target),
     Stock,
     Matrix,
     Recover,
@@ -403,9 +408,12 @@ struct App {
     fx_drag: Option<(TrackId, usize, usize)>,
     writing: Option<loupe_engine::Writer>,
     knob_names: HashMap<(u64, usize, usize, bool), String>,
+    hint: Option<&'static str>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
     plugin_filter: String,
+    plugin_highlight: usize,
+    plugin_uses: plugins::Uses,
     project: Project,
     undo: Vec<Project>,
     redo: Vec<Project>,
@@ -594,7 +602,10 @@ impl App {
             knob_names: HashMap::new(),
             found: Vec::new(),
             scanning: true,
+            hint: None,
             plugin_filter: String::new(),
+            plugin_highlight: 0,
+            plugin_uses: plugins::Uses::load(),
         };
         let (projects, audio): (Vec<PathBuf>, Vec<PathBuf>) = std::env::args_os()
             .skip(1)
@@ -1199,10 +1210,14 @@ impl App {
             Message::OpenRouting(track) => self.overlay = Overlay::Routing(track),
             Message::OpenPlugins(track) => {
                 self.plugin_filter.clear();
+                self.plugin_highlight = 0;
                 self.overlay = Overlay::Plugins(track);
                 return text_input::focus(plugins::FILTER_ID);
             }
-            Message::PluginFilter(typed) => self.plugin_filter = typed,
+            Message::PluginFilter(typed) => {
+                self.plugin_filter = typed;
+                self.plugin_highlight = 0;
+            }
             Message::PluginsFound(found) => {
                 self.found = found;
                 self.scanning = false;
@@ -1217,6 +1232,7 @@ impl App {
                         state: Vec::new(),
                     };
                     self.overlay = Overlay::None;
+                    self.plugin_uses.reached_for(&plugin.name);
                     self.edit(None, Command::AddFx { track, fx });
                 }
             }
@@ -1226,6 +1242,7 @@ impl App {
             Message::ShowPlugin(track, slot) => self.open_plugin_window(track, slot),
             Message::OpenClipPlugins(clip) => {
                 self.plugin_filter.clear();
+                self.plugin_highlight = 0;
                 self.overlay = Overlay::ClipPlugins(clip);
                 return text_input::focus(plugins::FILTER_ID);
             }
@@ -1239,6 +1256,7 @@ impl App {
                         state: Vec::new(),
                     };
                     self.overlay = Overlay::Clip(clip);
+                    self.plugin_uses.reached_for(&plugin.name);
                     self.edit(None, Command::AddClipFx { clip, fx });
                 }
             }
@@ -1279,6 +1297,28 @@ impl App {
             }
             Message::DropPoint { target, which } => {
                 self.edit(None, Command::DropPoint { target, which });
+            }
+            Message::PluginHighlight(step) => {
+                let count = self.in_the_picker().len();
+                if count > 0 {
+                    let last = count - 1;
+                    self.plugin_highlight = (self.plugin_highlight as i32 + step).clamp(0, last as i32) as usize;
+                }
+            }
+            Message::Hint(words) => self.hint = words,
+            Message::PluginChosen => {
+                let picked = self.in_the_picker().get(self.plugin_highlight).copied();
+                let next = match (picked, &self.overlay) {
+                    (Some(which), Overlay::Plugins(track)) => Some(Message::AddPlugin(*track, which)),
+                    (Some(which), Overlay::ClipPlugins(clip)) => Some(Message::AddClipPlugin(*clip, which)),
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    return self.update(next);
+                }
+            }
+            Message::OpenAutomation(target) => {
+                self.overlay = Overlay::Automation(target);
             }
             Message::AddEnvelope(target) => {
                 self.edit(None, Command::AddEnvelope { target });
@@ -1617,6 +1657,16 @@ impl App {
         } else {
             Subscription::none()
         };
+        let picking = if matches!(self.overlay, Overlay::Plugins(_) | Overlay::ClipPlugins(_)) {
+            keyboard::on_key_press(|key, _modifiers| match key {
+                keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some(Message::PluginHighlight(1)),
+                keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some(Message::PluginHighlight(-1)),
+                keyboard::Key::Named(keyboard::key::Named::Enter) => Some(Message::PluginChosen),
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
         let autosave = match self.autosave_minutes {
             0 => Subscription::none(),
             minutes => iced::time::every(Duration::from_secs(minutes as u64 * 60)).map(|_| Message::Autosave),
@@ -1634,7 +1684,7 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, ticks, mixer_drag, typing, autosave])
+        Subscription::batch([shortcuts, window, ticks, mixer_drag, typing, autosave, picking])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -2291,6 +2341,13 @@ impl App {
                 BarItem::Space => Some(Space::with_width(10).into()),
                 _ => pieces.iter().position(|(kind, _)| *kind == item).map(|at| pieces.swap_remove(at).1),
             };
+            let piece = piece.map(|piece| match hint_for(item) {
+                Some(words) => iced::widget::mouse_area(piece)
+                    .on_enter(Message::Hint(Some(words)))
+                    .on_exit(Message::Hint(None))
+                    .into(),
+                None => piece,
+            });
             bar = bar.push_maybe(piece);
         }
         container(bar)
@@ -2382,7 +2439,7 @@ impl App {
             SettingsTab::File => column![folder, rule(palette), self.autosave_settings()].spacing(16),
             SettingsTab::Recording => recording,
             SettingsTab::Audio => column![self.audio_settings()],
-            SettingsTab::Privacy => column![self.privacy_settings()],
+            SettingsTab::Privacy => column![self.privacy_settings(), rule(palette), self.update_settings()].spacing(16),
         };
         let body = column![tabs, rule(palette), container(page).height(SETTINGS_PAGE_HEIGHT)].spacing(14);
         self.window("Settings".to_string(), body.into(), 560.0)
@@ -2418,7 +2475,7 @@ impl App {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
             text(format!("Loading {what}…")).size(12).color(palette.text_dim).into()
         } else {
-            return None;
+            text(self.hint.unwrap_or_default()).size(12).color(palette.text_dim).into()
         };
         Some(
             container(line)
@@ -2543,4 +2600,23 @@ fn upright_rule(palette: Palette) -> Element<'static, Message> {
 
 fn rule(palette: Palette) -> Element<'static, Message> {
     container(Space::new(Length::Fill, 1)).style(move |_| palette.rule()).into()
+}
+
+/// What the hint panel says about each thing in the top bar. One line, plain words,
+/// the way FL Studio's hint bar and Ableton's info view explain what is under the mouse.
+fn hint_for(item: BarItem) -> Option<&'static str> {
+    Some(match item {
+        BarItem::ToStart => "Jump back to the start of the song",
+        BarItem::Play => "Play or pause the song. Space does the same.",
+        BarItem::Record => "Record onto every armed track. Ctrl+R does the same.",
+        BarItem::Position => "Where the playhead is, as bar and beat",
+        BarItem::Clock => "Where the playhead is, as minutes and seconds",
+        BarItem::Tempo => "The tempo of the song in beats per minute",
+        BarItem::Master => "The level everything leaves Loupe at. Right click to automate it.",
+        BarItem::History => "Undo and redo your last edits",
+        BarItem::Mixer => "Show or hide the mixer",
+        BarItem::Settings => "Settings: themes, folders, recording, audio and privacy",
+        BarItem::Import => "Bring audio files into the song",
+        BarItem::Gap | BarItem::Space | BarItem::End => return None,
+    })
 }

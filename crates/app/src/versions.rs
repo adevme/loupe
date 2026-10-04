@@ -289,8 +289,7 @@ impl App {
             .padding([6, 14])
             .style(move |_, status| palette.outlined(status))
             .on_press_maybe((!matches!(self.update_state, UpdateState::Checking | UpdateState::Downloading)).then_some(Message::CheckForUpdates));
-        let on_start = iced::widget::checkbox("Check for updates when Loupe starts", self.check_updates).on_toggle(Message::CheckUpdatesOnStart).text_size(12.5);
-        body = body.push(row![check, Space::with_width(Length::Fill), on_start].align_y(Alignment::Center)).push(status);
+        body = body.push(row![check, Space::with_width(Length::Fill)].align_y(Alignment::Center)).push(status);
         self.window("Versions".to_string(), body.into(), 520.0)
     }
 }
@@ -343,5 +342,24 @@ mod tests {
     #[test]
     fn only_a_copy_inside_a_versions_folder_counts_as_installed() {
         assert!(install_home().is_none());
+    }
+}
+
+impl App {
+    /// Looking for a new version is a trip to the Loupe server, so the choice sits
+    /// beside the other settings about what Loupe sends and fetches.
+    pub(crate) fn update_settings(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        column![
+            text("Updates").size(13).font(palette.medium),
+            text("Loupe asks the Loupe server whether a newer version is out. It never downloads one without you pressing Update.")
+                .size(12)
+                .color(palette.text_dim),
+            iced::widget::checkbox("Check for updates when Loupe starts", self.check_updates)
+                .on_toggle(Message::CheckUpdatesOnStart)
+                .text_size(13),
+        ]
+        .spacing(8)
+        .into()
     }
 }

@@ -98,7 +98,7 @@ impl App {
     pub(crate) fn pan_knob(&self, track: TrackId, pan: f32) -> Element<'_, Message> {
         let palette = self.palette;
         hrow![
-            canvas(crate::knob::Knob {
+            mouse_area(canvas(crate::knob::Knob {
                 palette: &self.palette,
                 value: pan * 100.0,
                 lowest: -100.0,
@@ -109,7 +109,10 @@ impl App {
                 on_turn: Box::new(move |percent| Message::TrackPan(track, percent / 100.0)),
             })
             .width(20)
-            .height(20),
+            .height(20))
+            .on_right_press(Message::OpenAutomation(loupe_engine::Target::TrackPan(track)))
+            .on_enter(Message::Hint(Some("Track pan. Drag up and down, right click to automate it.")))
+            .on_exit(Message::Hint(None)),
         ]
         .push_maybe((self.editing_level.is_none()).then(|| text(pan_text(pan)).size(10.5).font(palette.mono).color(palette.text_dim).width(26)))
         .spacing(3)
@@ -229,7 +232,10 @@ impl App {
                                 .height(Length::Fill)
                                 .style(move |_, status| palette.slider(status))
                         )
-                        .on_scroll(move |delta| Message::WheelOverFader(Level::Track(id), delta)),
+                        .on_scroll(move |delta| Message::WheelOverFader(Level::Track(id), delta))
+                        .on_right_press(Message::OpenAutomation(loupe_engine::Target::TrackGain(id)))
+                        .on_enter(Message::Hint(Some("Track volume. Scroll to nudge it, right click to automate it.")))
+                        .on_exit(Message::Hint(None)),
                         meter(palette, level),
                     ]
                     .spacing(10)

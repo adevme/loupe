@@ -696,6 +696,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     return (Ignored, None);
                 };
                 let message = match self.hit(p) {
+                    Hit::Pan(track) => Some(Message::OpenAutomation(loupe_engine::Target::TrackPan(track.id))),
                     Hit::Envelope(target, Some(which), ..) => Some(Message::DropPoint { target, which }),
                     Hit::Envelope(..) => None,
                     Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Edge(clip, _) => Some(Message::DeleteClip(clip.id)),
@@ -1922,6 +1923,16 @@ impl Timeline<'_> {
                 }
                 let along = |distance: f32| Point::new(centre.x + angle.cos() * distance, centre.y + angle.sin() * distance);
                 frame.stroke(&Path::line(along(radius * 0.25), along(radius - 4.0)), Stroke::default().with_color(p.text).with_width(2.0));
+                frame.fill_text(Text {
+                    content: crate::mixer::pan_text(track.pan),
+                    position: Point::new(centre.x, centre.y + radius + 7.0),
+                    color: p.text_dim,
+                    size: 9.5.into(),
+                    font: p.mono,
+                    horizontal_alignment: alignment::Horizontal::Center,
+                    vertical_alignment: alignment::Vertical::Center,
+                    ..Text::default()
+                });
             }
 
             let arm = self.arm_button(i);

@@ -11,7 +11,7 @@ pub const FILTER_ID: &str = "plugin-filter";
 const NAME_LENGTH: usize = 9;
 
 pub fn find_plugins() -> Vec<Found> {
-    let mut found = loupe_plugins::everything();
+    let mut found = newest_shells(loupe_plugins::everything());
     found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     found
 }
@@ -74,49 +74,72 @@ impl App {
         return self.picker(heading, &move |which| Message::AddPlugin(track, which));
     }
 
+    /// The plugins on offer, the ones reached for most often first, with the keyboard
+    /// able to walk the list and pick without touching the mouse.
+    pub(crate) fn in_the_picker(&self) -> Vec<usize> {
+        let needle = self.plugin_filter.trim().to_lowercase();
+        let mut order: Vec<usize> = self
+            .found
+            .iter()
+            .enumerate()
+            .filter(|(_, plugin)| {
+                needle.is_empty()
+                    || format!("{} {}", plugin.name, plugin.vendor.clone().unwrap_or_default()).to_lowercase().contains(&needle)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        order.sort_by(|a, b| {
+            let (one, two) = (&self.found[*a], &self.found[*b]);
+            self.plugin_uses
+                .count(&two.name)
+                .cmp(&self.plugin_uses.count(&one.name))
+                .then_with(|| one.name.to_lowercase().cmp(&two.name.to_lowercase()))
+        });
+        order
+    }
+
     pub(crate) fn picker(&self, heading: String, chose: &dyn Fn(usize) -> Message) -> Element<'_, Message> {
         let palette = self.palette;
-        let heading = text(heading).size(14).font(palette.semibold);
         let search = text_input("Search", &self.plugin_filter)
             .id(FILTER_ID)
             .on_input(Message::PluginFilter)
+            .on_submit(Message::PluginChosen)
             .size(13)
-            .padding([5, 10]);
-        let needle = self.plugin_filter.trim().to_lowercase();
-        let mut list = column![].spacing(4);
-        let mut shown = 0;
-        for (index, plugin) in self.found.iter().enumerate() {
-            let hay = format!("{} {}", plugin.name, plugin.vendor.clone().unwrap_or_default()).to_lowercase();
-            if !needle.is_empty() && !hay.contains(&needle) {
-                continue;
-            }
-            shown += 1;
+            .padding([5, 10])
+            .style(move |_, status| palette.field(status));
+        let order = self.in_the_picker();
+        let mut list = column![].spacing(2);
+        for (place, index) in order.iter().enumerate() {
+            let plugin = &self.found[*index];
             let label = match &plugin.vendor {
                 Some(vendor) => format!("{}  ·  {vendor}  ·  {}", plugin.name, plugin.format.label()),
                 None => format!("{}  ·  {}", plugin.name, plugin.format.label()),
             };
+            let under_the_keys = place == self.plugin_highlight;
             list = list.push(
                 button(text(label).size(12.5))
-                    .padding([5, 10])
+                    .padding([6, 10])
                     .width(Length::Fill)
-                    .style(move |_, status| palette.ghost(status))
-                    .on_press(chose(index)),
+                    .style(move |_, status| palette.menu_item(if under_the_keys { button::Status::Hovered } else { status }))
+                    .on_press(chose(*index)),
             );
         }
         let body: Element<'_, Message> = if self.scanning {
             text("Looking for plugins…").size(12.5).color(palette.text_dim).into()
         } else if self.found.is_empty() {
             text("No plugins found in the usual folders.").size(12.5).color(palette.text_dim).into()
-        } else if shown == 0 {
+        } else if order.is_empty() {
             text("Nothing matches that.").size(12.5).color(palette.text_dim).into()
         } else {
-            scrollable(list).height(Length::Fixed(280.0)).into()
+            container(scrollable(list).height(Length::Fixed(280.0)))
+                .padding(4)
+                .style(move |_| palette.menu())
+                .into()
         };
-        container(column![heading, search, body].spacing(10).align_x(Alignment::Start))
-            .width(Length::Fixed(440.0))
-            .into()
+        self.window(heading, column![search, body].spacing(10).into(), 460.0)
     }
 }
+
 
 fn shorten(name: &str) -> String {
     if name.chars().count() <= NAME_LENGTH {
@@ -287,4 +310,60 @@ impl App {
             .width(Length::Fixed(440.0))
             .into()
     }
+}
+
+const USES_FILE: &str = "plugin-uses";
+
+/// How often each plugin has been reached for, so the ones actually used come first.
+#[derive(Default)]
+pub struct Uses(std::collections::HashMap<String, u32>);
+
+impl Uses {
+    pub fn load() -> Self {
+        let Some(path) = crate::settings::config_dir().map(|dir| dir.join(USES_FILE)) else {
+            return Self::default();
+        };
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        Self(
+            text.lines()
+                .filter_map(|line| line.split_once('\t'))
+                .filter_map(|(count, name)| count.trim().parse().ok().map(|count| (name.to_string(), count)))
+                .collect(),
+        )
+    }
+
+    pub fn count(&self, name: &str) -> u32 {
+        self.0.get(name).copied().unwrap_or(0)
+    }
+
+    pub fn reached_for(&mut self, name: &str) {
+        *self.0.entry(name.to_string()).or_insert(0) += 1;
+        let Some(path) = crate::settings::config_dir().map(|dir| dir.join(USES_FILE)) else {
+            return;
+        };
+        let mut lines: Vec<String> = self.0.iter().map(|(name, count)| format!("{count}\t{name}")).collect();
+        lines.sort();
+        let _ = std::fs::write(path, lines.join("\n"));
+    }
+}
+
+/// A Waves shell holds every Waves plugin, and one is installed per version. Showing
+/// each of them is showing the same plugins over and over, so keep the newest shell.
+fn newest_shells(found: Vec<Found>) -> Vec<Found> {
+    let family = |name: &str| name.split_whitespace().next().unwrap_or(name).to_string();
+    let is_shell = |name: &str| name.to_lowercase().starts_with("waveshell");
+    let mut best: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for plugin in found.iter().filter(|plugin| is_shell(&plugin.name)) {
+        let family = family(&plugin.name);
+        match best.get(&family) {
+            Some(kept) if kept.as_str() >= plugin.name.as_str() => {}
+            _ => {
+                best.insert(family, plugin.name.clone());
+            }
+        }
+    }
+    found
+        .into_iter()
+        .filter(|plugin| !is_shell(&plugin.name) || best.get(&family(&plugin.name)) == Some(&plugin.name))
+        .collect()
 }

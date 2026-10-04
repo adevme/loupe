@@ -26,8 +26,7 @@ impl App {
             Overlay::Clip(clip) => self.centred(self.clip_sheet(*clip)),
             Overlay::FileMenu => self.floating(self.under_the_bar(FILE_MENU_LEFT), self.file_menu()),
             Overlay::HelpMenu => self.floating(self.under_the_bar(HELP_MENU_LEFT), self.menu(vec![
-                self.item("Versions and updates", "", Some(Message::OpenVersions)),
-                self.item("About", "", Some(Message::OpenAbout)),
+                self.item("About Loupe", "", Some(Message::OpenAbout)),
             ])),
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::Versions => self.centred(self.versions_sheet()),
@@ -38,6 +37,7 @@ impl App {
             Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
             Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
+            Overlay::Automation(target) => self.centred(self.automation_sheet(*target)),
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
             Overlay::Recover => self.recover_layer(),
@@ -138,40 +138,11 @@ impl App {
             .position(|t| t.id == track)
             .filter(|i| *i > 0)
             .map(|i| self.project.tracks[i - 1].id);
-        let volume = loupe_engine::Target::TrackGain(track);
-        let has_volume = self.project.envelope(volume).is_some();
         let mut items = vec![
             self.item("Rename", "", Some(Message::StartRename(track))),
             self.item("Change colour", "", Some(Message::StartColour(track))),
             self.item("Duplicate", "", Some(Message::DuplicateTrack(track))),
-            self.item(
-                if has_volume { "Remove the volume envelope" } else { "Automate volume" },
-                "",
-                Some(if has_volume { Message::RemoveEnvelope(volume) } else { Message::AddEnvelope(volume) }),
-            ),
         ];
-        let panning = loupe_engine::Target::TrackPan(track);
-        let has_pan = self.project.envelope(panning).is_some();
-        items.push(self.item(
-            if has_pan { "Remove the pan envelope" } else { "Automate pan" },
-            "",
-            Some(if has_pan { Message::RemoveEnvelope(panning) } else { Message::AddEnvelope(panning) }),
-        ));
-        if has_volume {
-            let armed = self.project.envelope(volume).and_then(|shape| shape.armed);
-            let touch = armed == Some(loupe_engine::Mode::Touch);
-            let latch = armed == Some(loupe_engine::Mode::Latch);
-            items.push(self.item(
-                if touch { "Stop writing on touch" } else { "Write on touch" },
-                "",
-                Some(Message::ArmEnvelope(volume, (!touch).then_some(loupe_engine::Mode::Touch))),
-            ));
-            items.push(self.item(
-                if latch { "Stop writing on latch" } else { "Write on latch" },
-                "",
-                Some(Message::ArmEnvelope(volume, (!latch).then_some(loupe_engine::Mode::Latch))),
-            ));
-        }
         items.push(self.item(
             "Put inside the track above",
             "",
@@ -181,11 +152,13 @@ impl App {
             items.push(self.item("Take out of its folder", "", Some(Message::SetTrackParent { track, parent: None })));
         }
         items.push(self.item("Routing…", "", Some(Message::OpenRouting(track))));
+        items.push(rule(self.palette));
         items.push(self.item("New note clip", "", Some(Message::NewNotesClip(track))));
         let playing = self.project.track(track).map(|t| t.instrument);
         let synth = matches!(playing, Some(loupe_engine::Instrument::Synth(_)));
-        items.push(self.item(if synth { "Instrument: Loupe Synth ✓" } else { "Instrument: Loupe Synth" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::default()))));
-        items.push(self.item(if synth { "Instrument: Loupe Drums" } else { "Instrument: Loupe Drums ✓" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::Drums))));
+        items.push(container(text("Plays notes with").size(11.5).color(self.palette.text_dim)).padding([6, 10]).into());
+        items.push(self.item(if synth { "Loupe Synth ✓" } else { "Loupe Synth" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::default()))));
+        items.push(self.item(if synth { "Loupe Drums" } else { "Loupe Drums ✓" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::Drums))));
         self.menu(items)
     }
 
@@ -243,6 +216,11 @@ impl App {
             credit("Made by ash."),
             credit("Built with Rust, Iced, cpal and Symphonia."),
             credit("Typefaces: Inter and JetBrains Mono. Icons: Lucide."),
+            rule(palette),
+            button(text("Versions and updates").size(13).font(palette.medium))
+                .padding([6, 14])
+                .style(move |_, status| palette.ghost(status))
+                .on_press(Message::OpenVersions),
         ]
         .spacing(10);
         self.window("About".to_string(), body.into(), 420.0)
@@ -355,4 +333,53 @@ pub fn colour_from_hex(typed: &str) -> Option<[u8; 3]> {
     }
     let channel = |at: usize| u8::from_str_radix(digits.get(at..at + 2)?, 16).ok();
     Some([channel(0)?, channel(2)?, channel(4)?])
+}
+
+impl App {
+    /// Automation for one knob or fader, opened by right clicking the control itself
+    /// rather than by giving every automatable thing its own line in a menu.
+    pub(crate) fn automation_sheet(&self, target: loupe_engine::Target) -> Element<'_, Message> {
+        let palette = self.palette;
+        let shape = self.project.envelope(target);
+        let armed = shape.and_then(|shape| shape.armed);
+        let touch = armed == Some(loupe_engine::Mode::Touch);
+        let latch = armed == Some(loupe_engine::Mode::Latch);
+        let line = |words: String, message: Message| -> Element<'_, Message> {
+            button(text(words).size(13))
+                .width(Length::Fill)
+                .padding([7, 10])
+                .style(move |_, status| palette.menu_item(status))
+                .on_press(message)
+                .into()
+        };
+        let mut body = column![line(
+            if shape.is_some() { "Remove the envelope".to_string() } else { "Automate".to_string() },
+            if shape.is_some() { Message::RemoveEnvelope(target) } else { Message::AddEnvelope(target) },
+        )]
+        .spacing(2);
+        if shape.is_some() {
+            body = body
+                .push(line(
+                    if touch { "Stop writing on touch".to_string() } else { "Write on touch".to_string() },
+                    Message::ArmEnvelope(target, (!touch).then_some(loupe_engine::Mode::Touch)),
+                ))
+                .push(line(
+                    if latch { "Stop writing on latch".to_string() } else { "Write on latch".to_string() },
+                    Message::ArmEnvelope(target, (!latch).then_some(loupe_engine::Mode::Latch)),
+                ));
+        }
+        self.window(self.target_name(target), body.into(), 300.0)
+    }
+
+    fn target_name(&self, target: loupe_engine::Target) -> String {
+        let named = |track: loupe_engine::TrackId| {
+            self.project.track(track).map(|t| t.name.clone()).unwrap_or_else(|| "Track".to_string())
+        };
+        match target {
+            loupe_engine::Target::TrackGain(track) => format!("{} volume", named(track)),
+            loupe_engine::Target::TrackPan(track) => format!("{} pan", named(track)),
+            loupe_engine::Target::MasterGain => "Master volume".to_string(),
+            _ => "Automation".to_string(),
+        }
+    }
 }

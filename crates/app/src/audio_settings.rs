@@ -193,11 +193,6 @@ impl App {
         let dim = |words: String| text(words).size(12).color(palette.text_dim);
         column![
             label("Driver"),
-            dim(if cfg!(windows) {
-                "ASIO gives the shortest delay when your audio interface has an ASIO driver.".to_string()
-            } else {
-                "How Loupe talks to the sound system.".to_string()
-            }),
             pick_list(lists.drivers.clone(), Some(driver), Message::AudioDriverChosen).text_size(13).padding([5, 10]).width(Length::Fill),
             label("Output"),
             pick_list(lists.outputs.clone(), Some(output), Message::AudioOutputChosen).text_size(13).padding([5, 10]).width(Length::Fill),
@@ -214,7 +209,6 @@ impl App {
                 .spacing(8),
             ]
             .spacing(12),
-            dim("A smaller buffer means less delay but more work for the computer. Raise it if you hear crackles.".to_string()),
             dim(running_text(&self.engine)),
         ]
         .spacing(8)
