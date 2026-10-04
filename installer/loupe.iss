@@ -35,9 +35,9 @@ VersionInfoVersion={#AppVersion}
 Name: "desktopicon"; Description: "Put a Loupe shortcut on the desktop"; Flags: unchecked
 
 [Files]
-Source: "build\Loupe.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\loupe.exe"; DestDir: "{app}\versions\{#AppVersion}"; Flags: ignoreversion
-Source: "build\loupe-host.exe"; DestDir: "{app}\versions\{#AppVersion}"; Flags: ignoreversion
+Source: "build\launcher\Loupe.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\app\loupe.exe"; DestDir: "{app}\versions\{#AppVersion}"; Flags: ignoreversion
+Source: "build\app\loupe-host.exe"; DestDir: "{app}\versions\{#AppVersion}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Loupe"; Filename: "{app}\Loupe.exe"

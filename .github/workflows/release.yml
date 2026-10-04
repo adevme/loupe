@@ -19,10 +19,18 @@ jobs:
       - name: Gather
         shell: bash
         run: |
-          mkdir -p installer/build
-          cp target/release/loupe.exe installer/build/loupe.exe
-          cp target/release/loupe-host.exe installer/build/loupe-host.exe
-          cp target/release/loupe-launcher.exe installer/build/Loupe.exe
+          # Windows cannot tell Loupe.exe from loupe.exe, so the launcher and the app
+          # are staged in folders of their own instead of overwriting each other.
+          mkdir -p installer/build/app installer/build/launcher
+          cp target/release/loupe.exe installer/build/app/loupe.exe
+          cp target/release/loupe-host.exe installer/build/app/loupe-host.exe
+          cp target/release/loupe-launcher.exe installer/build/launcher/Loupe.exe
+          # Loupe is tens of megabytes and the launcher is under a megabyte. If those
+          # ever come out alike, one has overwritten the other and the installer is junk.
+          app=$(stat -c%s installer/build/app/loupe.exe)
+          launcher=$(stat -c%s installer/build/launcher/Loupe.exe)
+          echo "loupe.exe $app bytes, Loupe.exe $launcher bytes"
+          test "$app" -gt 5000000 && test "$launcher" -lt 5000000
       - name: Work out the version
         id: version
         shell: bash
