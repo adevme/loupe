@@ -33,20 +33,6 @@ pub struct Editor {
 }
 
 impl Editor {
-    pub fn from(controller: ComPtr<IEditController>, context: *mut vst3::Steinberg::FUnknown) -> Result<Self, String> {
-        unsafe {
-            if controller.initialize(context) != kResultOk {
-                return Err("the plugin's window would not start up".into());
-            }
-            let handler = ComWrapper::new(Quiet);
-            if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
-                controller.setComponentHandler(reference.as_ptr());
-            }
-            let raw = controller.createView(b"editor\0".as_ptr() as *const i8);
-            let view = ComPtr::from_raw(raw).ok_or("this plugin has no window")?;
-            Ok(Self { view, _controller: controller, _handler: handler })
-        }
-    }
 
     pub fn fits(&self, kind: &[u8]) -> bool {
         unsafe { self.view.isPlatformTypeSupported(kind.as_ptr() as *const i8) == kResultOk }

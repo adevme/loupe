@@ -217,13 +217,25 @@ impl Effect {
                 .map(|found| found.as_ptr())
                 .unwrap_or(std::ptr::null_mut());
             let mut cid = [0i8; 16];
-            if self.component.getControllerClassId(&mut cid) == kResultOk {
-                let id = cid.map(|c| c as u8);
-                if let Ok(controller) = self._library.make::<IEditController>(&id) {
-                    // A plugin whose window lives in a controller of its own often will
-                    // not make that window until the two halves have been introduced.
-                    return crate::editor::Editor::from_pair(controller, &self.component, context);
+            let named = (self.component.getControllerClassId(&mut cid) == kResultOk).then(|| cid.map(|c| c as u8));
+            // Some plugins do not say where their controller is, but the file lists it.
+            let listed = self
+                ._library
+                .classes()
+                .into_iter()
+                .find(|class| class.category == "Component Controller Class")
+                .map(|class| class.id);
+            let mut refused = String::new();
+            for id in [named, listed].into_iter().flatten() {
+                match self._library.make::<IEditController>(&id) {
+                    // A plugin whose window lives in a controller of its own will not make
+                    // that window until the two halves have been introduced.
+                    Ok(controller) => return crate::editor::Editor::from_pair(controller, &self.component, context),
+                    Err(why) => refused = why,
                 }
+            }
+            if !refused.is_empty() {
+                return Err(format!("the window lives in another part of the plugin, and {refused}"));
             }
             // One object doing both jobs: it was started when the plugin was loaded, and
             // starting it again is not allowed.
@@ -367,6 +379,16 @@ impl Drop for Effect {
             self.processor.setProcessing(0);
             self.component.setActive(0);
             self.component.terminate();
+        }
+    }
+}
+
+impl Effect {
+    /// Whether the plugin keeps its window in a controller of its own.
+    pub fn has_separate_controller(&self) -> bool {
+        unsafe {
+            let mut cid = [0i8; 16];
+            self.component.getControllerClassId(&mut cid) == kResultOk
         }
     }
 }
