@@ -3,7 +3,7 @@ use iced::Element;
 use loupe_engine::TrackId;
 use loupe_stock_ui::{
     Change, ChorusEditor, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, GateEditor, LimiterEditor,
-    Look, MeterEditor, ReverbEditor, SaturationEditor, TransientEditor,
+    Look, MeterEditor, MultibandEditor, ReverbEditor, SaturationEditor, TransientEditor,
 };
 
 use crate::racks::Peek;
@@ -21,6 +21,7 @@ pub enum Face {
     Transient(Box<TransientEditor>),
     Gate(Box<GateEditor>),
     Meter(Box<MeterEditor>),
+    Multiband(Box<MultibandEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +52,7 @@ impl Window {
             8 => Face::Transient(Box::new(TransientEditor::new(peek.history.clone(), look))),
             9 => Face::Gate(Box::new(GateEditor::new(peek.history.clone(), look))),
             10 => Face::Meter(Box::new(MeterEditor::new(peek.meter.clone(), look))),
+            11 => Face::Multiband(Box::new(MultibandEditor::new(peek.history.clone(), look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -66,6 +68,7 @@ impl Window {
                 Face::Transient(editor) => editor.load(values),
                 Face::Gate(editor) => editor.load(values),
                 Face::Meter(editor) => editor.load(values),
+                Face::Multiband(editor) => editor.load(values),
             }
         }
         Some(Self { spot, slot, name: name.to_string(), face })
@@ -80,6 +83,7 @@ impl Window {
             Face::Transient(editor) => editor.tick(),
             Face::Gate(editor) => editor.tick(),
             Face::Meter(editor) => editor.tick(),
+            Face::Multiband(editor) => editor.tick(),
             _ => {}
         }
     }
@@ -97,6 +101,7 @@ impl Window {
             Face::Transient(editor) => editor.update(change),
             Face::Gate(editor) => editor.update(change),
             Face::Meter(editor) => editor.update(change),
+            Face::Multiband(editor) => editor.update(change),
         }
     }
 
@@ -120,6 +125,7 @@ impl Window {
             Face::Transient(editor) => editor.view().map(Message::StockTurned),
             Face::Gate(editor) => editor.view().map(Message::StockTurned),
             Face::Meter(editor) => editor.view().map(Message::StockTurned),
+            Face::Multiband(editor) => editor.view().map(Message::StockTurned),
         }
     }
 }
