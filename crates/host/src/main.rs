@@ -323,7 +323,8 @@ fn show(
     if let Some(folder) = preset_folder(name) {
         pane.presets(&loupe_plugins::presets::list(&folder), None);
     }
-    made.attach(pane.inner(), kind)?;
+    // The window is this process's own and is kept alongside the editor below.
+    unsafe { made.attach(pane.inner(), kind) }?;
     pane.show();
     *editor = Some((made, pane));
     Ok(())

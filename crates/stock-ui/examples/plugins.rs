@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length, Subscription, Task, Theme};
-use loupe_stock::{Tune, Chorus, Gate, Meter, Multiband, Transient, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
-use loupe_stock_ui::{TuneEditor, Change, ChorusEditor, GateEditor, MeterEditor, MultibandEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock::{KeyListener, Tune, Chorus, Gate, Meter, Multiband, Transient, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
+use loupe_stock_ui::{KeyEditor, KeyMessage, TuneEditor, Change, ChorusEditor, GateEditor, MeterEditor, MultibandEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 const RATE: f32 = 48_000.0;
 const BPM: f32 = 120.0;
 const FRAMES_PER_TICK: usize = 768;
-const TABS: [&str; 13] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband", "Loupe Tune"];
+const TABS: [&str; 14] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband", "Loupe Tune", "Loupe Key"];
 
 struct Beat {
     clock: u64,
@@ -77,6 +77,7 @@ struct Preview {
     meter: Meter,
     multiband: Multiband,
     tune: Tune,
+    key: KeyListener,
     eq_editor: EqEditor,
     compressor_editor: CompressorEditor,
     limiter_editor: LimiterEditor,
@@ -90,6 +91,7 @@ struct Preview {
     meter_editor: MeterEditor,
     multiband_editor: MultibandEditor,
     tune_editor: TuneEditor,
+    key_editor: KeyEditor,
     look: Look,
 }
 
@@ -98,6 +100,7 @@ enum Message {
     Tab(usize),
     Eq(EqMessage),
     Knob(Change),
+    Key(KeyMessage),
     Tick,
 }
 
@@ -117,7 +120,8 @@ impl Preview {
         let mut meter = Meter::new();
         let mut multiband = Multiband::new();
         let mut tune = Tune::new();
-        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser, &mut saturation, &mut chorus, &mut transient, &mut gate, &mut meter, &mut multiband, &mut tune] {
+        let mut key = KeyListener::new();
+        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser, &mut saturation, &mut chorus, &mut transient, &mut gate, &mut meter, &mut multiband, &mut tune, &mut key] {
             effect.prepare(RATE);
             effect.set_tempo(BPM);
         }
@@ -138,6 +142,7 @@ impl Preview {
             meter_editor: MeterEditor::new(Some(meter.readings()), look),
             multiband_editor: MultibandEditor::new(Some(multiband.history()), look),
             tune_editor: TuneEditor::new(Some(tune.history()), look),
+            key_editor: KeyEditor::new(Some(key.findings()), look),
             eq,
             compressor,
             limiter,
@@ -151,6 +156,7 @@ impl Preview {
             meter,
             multiband,
             tune,
+            key,
             look,
         };
         (preview, Task::none())
@@ -170,13 +176,18 @@ impl Preview {
             9 => &mut self.gate,
             10 => &mut self.meter,
             11 => &mut self.multiband,
-            _ => &mut self.tune,
+            12 => &mut self.tune,
+            _ => &mut self.key,
         }
     }
 
     fn update(&mut self, message: Message) {
         match message {
             Message::Tab(tab) => self.tab = tab,
+            // Loupe Key only reports what it hears; the song is what acts on it.
+            Message::Key(message) => {
+                self.key_editor.update(message);
+            }
             Message::Eq(message) => {
                 for (index, value) in self.eq_editor.update(message) {
                     self.eq.set(index, value);
@@ -215,6 +226,7 @@ impl Preview {
                     10 => self.meter_editor.tick(),
                     11 => self.multiband_editor.tick(),
                     12 => self.tune_editor.tick(),
+                    13 => self.key_editor.tick(),
                     _ => {}
                 }
             }
@@ -257,7 +269,8 @@ impl Preview {
             9 => self.gate_editor.view().map(Message::Knob),
             10 => self.meter_editor.view().map(Message::Knob),
             11 => self.multiband_editor.view().map(Message::Knob),
-            _ => self.tune_editor.view().map(Message::Knob),
+            12 => self.tune_editor.view().map(Message::Knob),
+            _ => self.key_editor.view().map(Message::Key),
         };
         column![bar, body].into()
     }

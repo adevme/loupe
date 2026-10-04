@@ -65,7 +65,10 @@ impl Editor {
         ((rect.right - rect.left).max(80), (rect.bottom - rect.top).max(60))
     }
 
-    pub fn attach(&self, window: *mut std::ffi::c_void, kind: &[u8]) -> Result<(), String> {
+    /// # Safety
+    /// `window` must be a live window of the kind `kind` names, and must outlive this
+    /// editor: the plugin draws into it until the editor is dropped.
+    pub unsafe fn attach(&self, window: *mut std::ffi::c_void, kind: &[u8]) -> Result<(), String> {
         unsafe {
             if self.view.attached(window, kind.as_ptr() as *const i8) != kResultOk {
                 return Err("the plugin would not draw in our window".into());
@@ -97,7 +100,9 @@ impl Editor {
     /// For a plugin that keeps its window in a separate controller: start the
     /// controller, hand it the processor's settings, and connect the two, which is
     /// what a plugin expects of a host before it will make its window.
-    pub fn from_pair(
+    /// # Safety
+    /// `context` must be a live host context, or null.
+    pub unsafe fn from_pair(
         controller: ComPtr<IEditController>,
         component: &ComPtr<vst3::Steinberg::Vst::IComponent>,
         context: *mut vst3::Steinberg::FUnknown,
@@ -138,7 +143,12 @@ impl Editor {
     /// For a plugin where one object is both the processor and the window: it was
     /// started when the plugin was loaded, so it is only given a handler and asked
     /// for its window.
-    pub fn already_started(controller: ComPtr<IEditController>, context: *mut vst3::Steinberg::FUnknown) -> Result<Self, String> {
+    /// # Safety
+    /// `context` must be a live host context, or null.
+    pub unsafe fn already_started(
+        controller: ComPtr<IEditController>,
+        context: *mut vst3::Steinberg::FUnknown,
+    ) -> Result<Self, String> {
         unsafe {
             let handler = ComWrapper::new(Quiet);
             if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {

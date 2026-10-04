@@ -187,9 +187,9 @@ fn number_after(text: &str, key: &str) -> Option<f32> {
 
 fn ports_in(region: &str) -> Vec<Port> {
     let mut ports = Vec::new();
-    let mut rest = region;
-    while let Some(start) = rest.find("lv2:port") {
-        rest = &rest[start + "lv2:port".len()..];
+    // A plugin lists its ports once, so the first list is the whole of it.
+    if let Some(start) = region.find("lv2:port") {
+        let rest = &region[start + "lv2:port".len()..];
         let stop = rest.find("\n\t.").or_else(|| rest.find("\n.")).unwrap_or(rest.len());
         let region = &rest[..stop];
         for chunk in region.split('[').skip(1) {
@@ -204,7 +204,6 @@ fn ports_in(region: &str) -> Vec<Port> {
                 sidechain: chunk.contains("isSideChain") || chunk.contains("sidechain"),
             });
         }
-        break;
     }
     ports.sort_by_key(|port| port.index);
     ports
