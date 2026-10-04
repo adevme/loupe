@@ -759,10 +759,12 @@ impl App {
     }
 
     pub(crate) fn sound(&mut self, key: u8, on: bool) {
-        let crate::Overlay::Roll(clip) = self.overlay else {
-            return;
+        let track = match self.overlay {
+            crate::Overlay::Roll(clip) => self.project.track_of(clip).map(|track| track.id),
+            _ if self.typing_keys => self.keys_aimed_at,
+            _ => None,
         };
-        let Some(track) = self.project.track_of(clip).map(|track| track.id) else {
+        let Some(track) = track else {
             return;
         };
         if on {

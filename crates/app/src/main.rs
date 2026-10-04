@@ -225,6 +225,7 @@ pub enum Message {
     RollDone { remember_beats: Option<f64> },
     RollView(piano_roll::RollView),
     TypedKey { key: u8, down: bool },
+    ToggleTypingKeys,
     Both(Box<Message>, Box<Message>),
     OpenVersions,
     UseVersion(String),
@@ -465,6 +466,7 @@ struct App {
     roll_view: piano_roll::RollView,
     roll_beats: f64,
     roll_chosen: Vec<Note>,
+    typing_keys: bool,
     roll_copied: Vec<Note>,
     typing: HashSet<u8>,
     midi_keys: Option<loupe_engine::MidiKeys>,
@@ -574,6 +576,7 @@ impl App {
             roll_view: piano_roll::RollView::default(),
             roll_beats: 1.0,
             roll_chosen: Vec::new(),
+            typing_keys: false,
             roll_copied: Vec::new(),
             typing: HashSet::new(),
             midi_keys: None,
@@ -986,6 +989,15 @@ impl App {
                 }
             }
             Message::RollView(view) => self.roll_view = view,
+            Message::ToggleTypingKeys => {
+                self.typing_keys = !self.typing_keys;
+                if !self.typing_keys {
+                    for key in std::mem::take(&mut self.typing) {
+                        self.sound(key, false);
+                    }
+                }
+                self.notice = self.typing_keys.then(|| "Your letter keys now play notes on the armed note track. Ctrl+T turns this off, Ctrl+R records.".into());
+            }
             Message::TypedKey { key, down } => {
                 let fresh = if down { self.typing.insert(key) } else { self.typing.remove(&key) };
                 if fresh {
@@ -1630,7 +1642,7 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let shortcuts = keyboard::on_key_press(shortcut);
+        let shortcuts = if self.typing_keys { keyboard::on_key_press(shortcut_while_typing) } else { keyboard::on_key_press(shortcut) };
         let window = iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
@@ -1656,9 +1668,11 @@ impl App {
             0 => Subscription::none(),
             minutes => iced::time::every(Duration::from_secs(minutes as u64 * 60)).map(|_| Message::Autosave),
         };
-        let typing = if matches!(self.overlay, Overlay::Roll(_)) {
-            iced::event::listen_with(|event, _status, _window| match event {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), modifiers, .. }) if !modifiers.command() => {
+        let typing = if matches!(self.overlay, Overlay::Roll(_)) || self.typing_keys {
+            iced::event::listen_with(|event, status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), modifiers, .. })
+                    if !modifiers.command() && status == iced::event::Status::Ignored =>
+                {
                     piano_roll::typed_key(c.as_str()).map(|key| Message::TypedKey { key, down: true })
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyReleased { key: keyboard::Key::Character(c), .. }) => {
@@ -2237,7 +2251,12 @@ impl App {
             .padding(0)
             .style(move |_, status| palette.toggled(metronome_on, status))
             .on_press(Message::ToggleMetronome);
-        let record = row![record, metronome].spacing(8).align_y(Alignment::Center);
+        let typing_on = self.typing_keys;
+        let typing_keys = button(container(icon("keyboard-music", 15.0)).center(30))
+            .padding(0)
+            .style(move |_, status| palette.toggled(typing_on, status))
+            .on_press(Message::ToggleTypingKeys);
+        let record = row![record, metronome, typing_keys].spacing(8).align_y(Alignment::Center);
 
         let tempo = text_input("", &self.bpm)
             .on_input(Message::BpmTyped)
@@ -2468,6 +2487,13 @@ impl App {
     }
 }
 
+fn shortcut_while_typing(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    match &key {
+        keyboard::Key::Character(_) if !modifiers.command() => None,
+        _ => shortcut(key, modifiers),
+    }
+}
+
 fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
     use keyboard::key::Named;
     match key {
@@ -2489,6 +2515,8 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
                 ("m", true, _) => Some(Message::ToggleMetronome),
+                ("t", true, _) => Some(Message::ToggleTypingKeys),
+                ("r", true, _) => Some(Message::ToggleRecord),
                 ("q", true, _) => Some(Message::RollAction(piano_roll::RollAction::Quantize)),
                 ("c", true, _) => Some(Message::CopyClips),
                 ("x", true, _) => Some(Message::CutClips),
