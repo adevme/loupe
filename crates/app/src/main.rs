@@ -123,7 +123,7 @@ const HOME_SIZE: Size = Size::new(940.0, 600.0);
 pub enum Message {
     TogglePlay,
     ToggleRecord,
-    TakeReady { start: i64, keep_from: i64, passes: Option<recording::Passes>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
+    TakeReady { start: i64, keep_from: i64, passes: Option<recording::Passes>, punch: Option<(Frames, Frames)>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
     ToStart,
     Seek(Frames),
     Tick,
@@ -273,6 +273,8 @@ pub enum Message {
     PasteClips,
     DuplicateClips,
     CountInChosen(CountIn),
+    PrerollChosen(CountIn),
+    TogglePunch,
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
     TogglePreview(ClipId),
@@ -530,6 +532,8 @@ struct App {
     usage: usage::Usage,
     metronome: bool,
     count_in_bars: u32,
+    preroll_bars: u32,
+    punch: bool,
     hear_input: bool,
     rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
@@ -646,6 +650,8 @@ impl App {
             usage: usage_now,
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
+            preroll_bars: settings.preroll_bars,
+            punch: settings.punch,
             hear_input: settings.hear_input,
             rec_shown: HashSet::new(),
             copied_clips: None,
@@ -788,9 +794,9 @@ impl App {
         }
         match message {
             Message::ToggleRecord => return self.toggle_recording(),
-            Message::TakeReady { start, keep_from, passes, warning, result } => {
+            Message::TakeReady { start, keep_from, passes, punch, warning, result } => {
                 let printing = result.as_ref().ok().and_then(|(_, trouble)| trouble.clone());
-                self.place_take(start, keep_from, passes, result.map(|(sources, _)| sources));
+                self.place_take(start, keep_from, passes, punch, result.map(|(sources, _)| sources));
                 if let Some(why) = printing {
                     self.problem = Some(format!("The take is kept dry, the Rec plugins could not be printed: {why}"));
                 }
@@ -818,6 +824,10 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                let punched_out = self.recording.as_ref().and_then(|recording| recording.punch).is_some_and(|(_, to)| self.engine.position() >= to);
+                if punched_out {
+                    return self.finish_recording();
+                }
                 // Taking the racks back from the sound thread is not free, so look in
                 // every so often rather than on every tick.
                 if self.plugins_opening {
@@ -1848,6 +1858,20 @@ impl App {
                     self.problem = Some(format!("Could not save settings: {why}"));
                 }
             }
+            Message::PrerollChosen(CountIn(bars)) => {
+                self.preroll_bars = bars;
+                if let Err(why) = settings::save("preroll", &bars.to_string()) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
+            Message::TogglePunch => {
+                self.punch = !self.punch;
+                if let Err(why) = settings::save("punch", if self.punch { "on" } else { "off" }) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+                self.notice = self.punch.then(|| "Punch is on: mark the part to redo on the ruler, then record.".to_string());
+                self.cache.clear();
+            }
             Message::CountInChosen(CountIn(bars)) => {
                 self.count_in_bars = bars;
                 if let Err(why) = settings::save("count_in", &bars.to_string()) {
@@ -2443,6 +2467,7 @@ impl App {
             selection: &self.selection,
             playhead: self.playhead,
             loop_range: self.loop_range,
+            punch: self.punch,
             tool: self.tool,
             snap: self.snap,
             armed: &self.armed,
@@ -2516,6 +2541,11 @@ impl App {
             .padding(0)
             .style(move |_, status| palette.toggled(metronome_on, status))
             .on_press(Message::ToggleMetronome);
+        let punch_on = self.punch;
+        let punch = button(container(text("Punch").size(11.5).font(palette.medium)).center_y(30).padding([0, 8]))
+            .padding(0)
+            .style(move |_, status| palette.toggled(punch_on, status))
+            .on_press(Message::TogglePunch);
         let typing_on = self.typing_keys;
         let typing_keys = button(container(icon("keyboard-music", 15.0)).center(30))
             .padding(0)
@@ -2523,6 +2553,7 @@ impl App {
             .on_press(Message::ToggleTypingKeys);
         let record = row![
             hinted(record, "Record onto every armed track. Ctrl+R does the same."),
+            hinted(punch, "Punch: record only inside the part marked on the ruler, replacing what was there."),
             hinted(metronome, "The click you record to. Ctrl+M turns it on and off."),
             hinted(typing_keys, "Play notes with your letter keys, A to L like a keyboard. Ctrl+T turns it on and off."),
         ]
@@ -2706,6 +2737,9 @@ impl App {
             text("Count in").size(13).font(palette.medium),
             text("Bars of clicks before recording starts, when Loupe is stopped. The take begins where the playhead was.").size(12).color(palette.text_dim),
             pick_list(COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).text_size(13).padding([5, 10]).width(160),
+            text("Pre-roll").size(13).font(palette.medium),
+            text("With Punch on, how many bars play before the marked part, so you can catch the beat.").size(12).color(palette.text_dim),
+            pick_list(COUNT_INS, Some(CountIn(self.preroll_bars)), Message::PrerollChosen).text_size(13).padding([5, 10]).width(160),
         ]
         .spacing(8);
 
