@@ -1,3 +1,4 @@
+mod chorus_view;
 mod compressor_view;
 mod deesser_view;
 mod delay_view;
@@ -10,6 +11,7 @@ mod reverb_view;
 mod saturation_view;
 mod spectrum;
 
+pub use chorus_view::ChorusEditor;
 pub use compressor_view::CompressorEditor;
 pub use deesser_view::DeesserEditor;
 pub use delay_view::DelayEditor;

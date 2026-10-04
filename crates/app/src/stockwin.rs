@@ -1,7 +1,7 @@
 use iced::Element;
 
 use loupe_engine::TrackId;
-use loupe_stock_ui::{Change, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock_ui::{Change, ChorusEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 use crate::racks::Peek;
 use crate::{App, Message};
@@ -14,6 +14,7 @@ pub enum Face {
     Reverb(Box<ReverbEditor>),
     Deesser(Box<DeesserEditor>),
     Saturation(Box<SaturationEditor>),
+    Chorus(Box<ChorusEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,7 @@ impl Window {
             4 => Face::Reverb(Box::new(ReverbEditor::new(look))),
             5 => Face::Deesser(Box::new(DeesserEditor::new(peek.history.clone(), look))),
             6 => Face::Saturation(Box::new(SaturationEditor::new(look))),
+            7 => Face::Chorus(Box::new(ChorusEditor::new(look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -51,6 +53,7 @@ impl Window {
                 Face::Reverb(editor) => editor.load(values),
                 Face::Deesser(editor) => editor.load(values),
                 Face::Saturation(editor) => editor.load(values),
+                Face::Chorus(editor) => editor.load(values),
             }
         }
         Some(Self { spot, slot, name: name.to_string(), face })
@@ -75,6 +78,7 @@ impl Window {
             Face::Reverb(editor) => editor.update(change),
             Face::Deesser(editor) => editor.update(change),
             Face::Saturation(editor) => editor.update(change),
+            Face::Chorus(editor) => editor.update(change),
         }
     }
 
@@ -94,6 +98,7 @@ impl Window {
             Face::Reverb(editor) => editor.view().map(Message::StockTurned),
             Face::Deesser(editor) => editor.view().map(Message::StockTurned),
             Face::Saturation(editor) => editor.view().map(Message::StockTurned),
+            Face::Chorus(editor) => editor.view().map(Message::StockTurned),
         }
     }
 }

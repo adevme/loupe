@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length, Subscription, Task, Theme};
-use loupe_stock::{Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
-use loupe_stock_ui::{Change, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock::{Chorus, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
+use loupe_stock_ui::{Change, ChorusEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 const RATE: f32 = 48_000.0;
 const BPM: f32 = 120.0;
 const FRAMES_PER_TICK: usize = 768;
-const TABS: [&str; 7] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation"];
+const TABS: [&str; 8] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus"];
 
 struct Beat {
     clock: u64,
@@ -57,6 +57,7 @@ struct Preview {
     reverb: Reverb,
     deesser: Deesser,
     saturation: Saturation,
+    chorus: Chorus,
     eq_editor: EqEditor,
     compressor_editor: CompressorEditor,
     limiter_editor: LimiterEditor,
@@ -64,6 +65,7 @@ struct Preview {
     reverb_editor: ReverbEditor,
     deesser_editor: DeesserEditor,
     saturation_editor: SaturationEditor,
+    chorus_editor: ChorusEditor,
     look: Look,
 }
 
@@ -85,7 +87,8 @@ impl Preview {
         let mut reverb = Reverb::new();
         let mut deesser = Deesser::new();
         let mut saturation = Saturation::new();
-        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser, &mut saturation] {
+        let mut chorus = Chorus::new();
+        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser, &mut saturation, &mut chorus] {
             effect.prepare(RATE);
             effect.set_tempo(BPM);
         }
@@ -100,6 +103,7 @@ impl Preview {
             reverb_editor: ReverbEditor::new(look),
             deesser_editor: DeesserEditor::new(Some(deesser.history()), look),
             saturation_editor: SaturationEditor::new(look),
+            chorus_editor: ChorusEditor::new(look),
             eq,
             compressor,
             limiter,
@@ -107,6 +111,7 @@ impl Preview {
             reverb,
             deesser,
             saturation,
+            chorus,
             look,
         };
         (preview, Task::none())
@@ -120,7 +125,8 @@ impl Preview {
             3 => &mut self.delay,
             4 => &mut self.reverb,
             5 => &mut self.deesser,
-            _ => &mut self.saturation,
+            6 => &mut self.saturation,
+            _ => &mut self.chorus,
         }
     }
 
@@ -139,7 +145,8 @@ impl Preview {
                     3 => self.delay_editor.update(change),
                     4 => self.reverb_editor.update(change),
                     5 => self.deesser_editor.update(change),
-                    _ => self.saturation_editor.update(change),
+                    6 => self.saturation_editor.update(change),
+                    _ => self.chorus_editor.update(change),
                 };
                 for (index, value) in changes {
                     self.effect().set(index, value);
@@ -189,7 +196,8 @@ impl Preview {
             3 => self.delay_editor.view().map(Message::Knob),
             4 => self.reverb_editor.view().map(Message::Knob),
             5 => self.deesser_editor.view().map(Message::Knob),
-            _ => self.saturation_editor.view().map(Message::Knob),
+            6 => self.saturation_editor.view().map(Message::Knob),
+            _ => self.chorus_editor.view().map(Message::Knob),
         };
         column![bar, body].into()
     }
