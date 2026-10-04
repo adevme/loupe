@@ -18,6 +18,40 @@ impl App {
     }
 }
 
+/// Cuts a clip at both edges of a range and hands back the piece in the middle,
+/// with short fades on every new edge. Comping and punching both need this, and the
+/// piece in the middle is what each of them then does something to.
+fn middle_of(
+    project: &mut Project,
+    clip: ClipId,
+    from: Frames,
+    to: Frames,
+    fade: Fade,
+    fade_the_middle: bool,
+) -> Result<ClipId, CommandError> {
+    let Some(found) = project.clip(clip) else { return Ok(clip) };
+    let (start, end) = (found.start, found.end());
+    let mut middle = clip;
+    if start < from {
+        if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip, at: from })? {
+            project.apply(Command::SetClipFade { clip, edge: Edge::Out, fade })?;
+            if fade_the_middle {
+                project.apply(Command::SetClipFade { clip: right, edge: Edge::In, fade })?;
+            }
+            middle = right;
+        }
+    }
+    if end > to {
+        if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip: middle, at: to })? {
+            if fade_the_middle {
+                project.apply(Command::SetClipFade { clip: middle, edge: Edge::Out, fade })?;
+            }
+            project.apply(Command::SetClipFade { clip: right, edge: Edge::In, fade })?;
+        }
+    }
+    Ok(middle)
+}
+
 pub fn comp(project: &mut Project, track: TrackId, take: usize, from: Frames, to: Frames, fade: Fade) -> Result<Vec<ClipId>, CommandError> {
     let touched: Vec<ClipId> = project
         .track(track)
@@ -32,22 +66,7 @@ pub fn comp(project: &mut Project, track: TrackId, take: usize, from: Frames, to
         .collect();
     let mut chosen = Vec::new();
     for clip in touched {
-        let Some(found) = project.clip(clip) else { continue };
-        let (start, end) = (found.start, found.end());
-        let mut middle = clip;
-        if start < from {
-            if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip, at: from })? {
-                project.apply(Command::SetClipFade { clip, edge: Edge::Out, fade })?;
-                project.apply(Command::SetClipFade { clip: right, edge: Edge::In, fade })?;
-                middle = right;
-            }
-        }
-        if end > to {
-            if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip: middle, at: to })? {
-                project.apply(Command::SetClipFade { clip: middle, edge: Edge::Out, fade })?;
-                project.apply(Command::SetClipFade { clip: right, edge: Edge::In, fade })?;
-            }
-        }
+        let middle = middle_of(project, clip, from, to, fade, true)?;
         if project.apply(Command::UseTake { clip: middle, take }).is_ok() {
             chosen.push(middle);
         }
@@ -65,24 +84,13 @@ pub fn clear_between(project: &mut Project, track: TrackId, from: Frames, to: Fr
         .map(|clip| clip.id)
         .collect();
     for clip in touched {
-        let Some(found) = project.clip(clip) else { continue };
-        let (start, end) = (found.start, found.end());
-        let mut middle = clip;
-        if start < from {
-            if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip, at: from })? {
-                project.apply(Command::SetClipFade { clip, edge: Edge::Out, fade })?;
-                middle = right;
-            }
-        }
-        if end > to {
-            if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip: middle, at: to })? {
-                project.apply(Command::SetClipFade { clip: right, edge: Edge::In, fade })?;
-            }
-        }
+        // The middle is going, so it needs no fades of its own.
+        let middle = middle_of(project, clip, from, to, fade, false)?;
         project.apply(Command::DeleteClip(middle))?;
     }
     Ok(())
 }
+
 
 pub fn short_fade(rate: u32) -> Fade {
     Fade { len: (COMP_FADE_SECONDS * rate as f64) as Frames, curve: 0.0 }
