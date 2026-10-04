@@ -564,18 +564,91 @@ impl Palette {
         }
     }
 
+    pub fn is_light(&self) -> bool {
+        lightness(self.background) > 0.5
+    }
+
+    pub fn shade(&self) -> f32 {
+        if self.is_light() { 0.09 } else { 0.3 }
+    }
+
+    pub fn glint(&self) -> f32 {
+        if self.is_light() { 0.5 } else { 0.055 }
+    }
+
+    pub fn sheen(&self, base: Color) -> Background {
+        let top = mix(base, Color::WHITE, self.glint());
+        let bottom = mix(base, Color::BLACK, self.shade() * 0.15);
+        iced::gradient::Linear::new(std::f32::consts::PI).add_stop(0.0, top).add_stop(1.0, bottom).into()
+    }
+
+    pub fn floor_colour(&self) -> Color {
+        mix(self.panel, Color::BLACK, if self.is_light() { 0.05 } else { 0.18 })
+    }
+
+    pub fn floor(&self) -> container::Style {
+        container::Style { background: Some(self.floor_colour().into()), ..Default::default() }
+    }
+
+    pub fn top_bar(&self) -> container::Style {
+        container::Style { background: Some(self.sheen(self.panel)), ..Default::default() }
+    }
+
+    pub fn shadow_below(&self, strength: f32) -> container::Style {
+        let dark = alpha(Color::BLACK, self.shade() * strength);
+        container::Style {
+            background: Some(iced::gradient::Linear::new(std::f32::consts::PI).add_stop(0.0, dark).add_stop(1.0, alpha(Color::BLACK, 0.0)).into()),
+            ..Default::default()
+        }
+    }
+
+    pub fn channel(&self) -> container::Style {
+        container::Style {
+            background: Some(self.sheen(self.background)),
+            border: Border { color: self.line, width: self.border_width, radius: self.corner.into() },
+            shadow: iced::Shadow {
+                color: alpha(Color::BLACK, self.shade() * 1.1),
+                offset: iced::Vector::new(0.0, 2.0),
+                blur_radius: 6.0,
+            },
+            ..Default::default()
+        }
+    }
+
+    pub fn readout(&self) -> container::Style {
+        let inset = if lightness(self.line) < lightness(self.background) { mix(self.background, self.line, 0.5) } else { self.background };
+        container::Style {
+            background: Some(inset.into()),
+            border: Border { color: self.line, width: 1.0, radius: self.inner_corner().into() },
+            ..Default::default()
+        }
+    }
+
+    fn pad(&self, background: Color, text_color: Color, lit: bool) -> button::Style {
+        button::Style {
+            background: Some(if lit { background.into() } else { self.sheen(background) }),
+            text_color,
+            border: Border { color: self.line, width: 1.0, radius: self.inner_corner().into() },
+            ..Default::default()
+        }
+    }
+
+    pub fn route(&self, wired: bool, status: button::Status) -> button::Style {
+        let (background, text_color) = match (wired, status) {
+            (true, _) => (self.hover, self.text),
+            (false, button::Status::Hovered | button::Status::Pressed) => (self.hover, self.text),
+            (false, _) => (self.raised, self.text_dim),
+        };
+        self.pad(background, text_color, false)
+    }
+
     pub fn solo(&self, soloed: bool, status: button::Status) -> button::Style {
         let (background, text_color) = match (soloed, status) {
             (true, _) => (self.accent, self.on_accent),
             (false, button::Status::Hovered | button::Status::Pressed) => (self.hover, self.text),
             (false, _) => (self.raised, self.text_dim),
         };
-        button::Style {
-            background: Some(background.into()),
-            text_color,
-            border: Border::default().rounded(self.inner_corner()),
-            ..Default::default()
-        }
+        self.pad(background, text_color, soloed)
     }
 
     pub fn mute(&self, muted: bool, status: button::Status) -> button::Style {
@@ -584,12 +657,7 @@ impl Palette {
             (false, button::Status::Hovered | button::Status::Pressed) => (self.hover, self.text),
             (false, _) => (self.raised, self.text_dim),
         };
-        button::Style {
-            background: Some(background.into()),
-            text_color,
-            border: Border::default().rounded(self.inner_corner()),
-            ..Default::default()
-        }
+        self.pad(background, text_color, muted)
     }
 
     pub fn strip(&self) -> container::Style {
@@ -659,7 +727,7 @@ impl Palette {
             button::Status::Disabled => (self.panel, self.text_faint),
         };
         button::Style {
-            background: Some(background.into()),
+            background: Some(self.sheen(background)),
             text_color,
             border: Border { color: self.line, width: self.border_width, radius: self.corner.into() },
             ..Default::default()
@@ -703,17 +771,21 @@ impl Palette {
         slider::Style {
             rail: slider::Rail {
                 backgrounds: (self.accent.into(), self.raised.into()),
-                width: 3.0,
-                border: Border::default().rounded(2),
+                width: 2.0,
+                border: Border::default().rounded(1),
             },
             handle: slider::Handle {
-                shape: slider::HandleShape::Circle { radius: 6.0 },
+                shape: slider::HandleShape::Rectangle { width: 10, border_radius: self.inner_corner().min(2.0).into() },
                 background: handle.into(),
-                border_width: 0.0,
-                border_color: Color::TRANSPARENT,
+                border_width: 1.0,
+                border_color: self.line,
             },
         }
     }
+}
+
+fn lightness(color: Color) -> f32 {
+    0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
 }
 
 pub fn alpha(color: Color, a: f32) -> Color {
