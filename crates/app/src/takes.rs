@@ -24,7 +24,10 @@ pub fn comp(project: &mut Project, track: TrackId, take: usize, from: Frames, to
         .ok_or(CommandError::NoSuchTrack)?
         .clips
         .iter()
-        .filter(|clip| clip.takes.len() > take && clip.start < to && clip.end() > from)
+        // take_offset, not just the count: a take that would read before the start of
+        // the recording cannot be used, and splitting for it would chop the song up
+        // for nothing.
+        .filter(|clip| clip.take_offset(take).is_some() && clip.start < to && clip.end() > from)
         .map(|clip| clip.id)
         .collect();
     let mut chosen = Vec::new();
@@ -84,4 +87,19 @@ mod tests {
         assert!(project.track(track).unwrap().clips.iter().all(|piece| piece.take == 1));
         assert!(comp(&mut project, track, 9, 0, 1_000, fade).unwrap().is_empty());
     }
+
+    #[test]
+    fn comping_a_take_that_is_not_there_leaves_the_song_whole() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 10_000]));
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
+        let fade = Fade { len: 100, curve: 0.0 };
+        let chosen = comp(&mut project, track, 1, 2_000, 4_000, fade).unwrap();
+        assert!(chosen.is_empty(), "it comped a take that is not there");
+        let clips = &project.track(track).unwrap().clips;
+        assert_eq!(clips.len(), 1, "the song was chopped up for nothing");
+        assert_eq!(clips[0].id, clip);
+    }
 }
+
