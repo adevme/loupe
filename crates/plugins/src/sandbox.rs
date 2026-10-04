@@ -41,6 +41,9 @@ impl Sandbox {
         if let Some(root) = crate::presets::root() {
             command.env(crate::presets::FOLDER_VARIABLE, root);
         }
+        if let Some(chrome) = crate::chrome::worn() {
+            command.env(crate::chrome::CHROME_VARIABLE, chrome.to_text());
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

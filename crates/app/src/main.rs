@@ -184,6 +184,8 @@ pub enum Message {
     StartRename(TrackId),
     StartColour(TrackId),
     EntryTyped(String),
+    ClipNameTyped(String),
+    ClipNameEntered(ClipId),
     EntryEntered,
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
@@ -528,6 +530,7 @@ struct App {
     overlay: Overlay,
     settings_tab: SettingsTab,
     entry: String,
+    clip_name: String,
     entry_problem: Option<String>,
     main_window: window::Id,
     mixer_window: Option<window::Id>,
@@ -600,6 +603,7 @@ impl App {
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
         loupe_plugins::presets::keep_in(settings::presets_folder(settings.folder.as_deref()));
+        loupe_plugins::chrome::wear(loaded.palette.chrome());
         let (usage_now, _) = usage::Usage::begin(&settings);
         let mut app = Self {
             palette: loaded.palette,
@@ -650,6 +654,7 @@ impl App {
             overlay: Overlay::None,
             settings_tab: SettingsTab::default(),
             entry: String::new(),
+            clip_name: String::new(),
             entry_problem: None,
             main_window: main,
             mixer_window: None,
@@ -1123,6 +1128,7 @@ impl App {
                 if self.project.clip(clip).is_some_and(|found| found.is_notes()) {
                     self.open_roll(clip);
                 } else {
+                    self.clip_name = self.project.clip(clip).map(|found| found.called().to_string()).unwrap_or_default();
                     self.overlay = Overlay::Clip(clip);
                 }
             }
@@ -1274,6 +1280,15 @@ impl App {
                 if let Overlay::TrackMenu { at, .. } = &self.overlay {
                     self.entry = String::new();
                     self.overlay = Overlay::Colour { track, at: *at };
+                }
+            }
+            Message::ClipNameTyped(typed) => self.clip_name = typed,
+            Message::ClipNameEntered(clip) => {
+                let same = self.project.clip(clip).is_some_and(|found| found.called() == self.clip_name.trim());
+                if !same {
+                    let name = Some(self.clip_name.clone());
+                    self.edit(None, Command::RenameClip { clip, name });
+                    self.cache.clear();
                 }
             }
             Message::EntryTyped(typed) => {
@@ -1592,6 +1607,7 @@ impl App {
                         state: Vec::new(),
                         record: false,
                     };
+                    self.clip_name = self.project.clip(clip).map(|found| found.called().to_string()).unwrap_or_default();
                     self.overlay = Overlay::Clip(clip);
                     self.plugin_uses.reached_for(&plugin.name);
                     self.edit(None, Command::AddClipFx { clip, fx });
@@ -2464,6 +2480,7 @@ impl App {
         self.folder = chosen;
         let made = settings::make_folders(self.folder.as_deref());
         loupe_plugins::presets::keep_in(settings::presets_folder(self.folder.as_deref()));
+        loupe_plugins::chrome::wear(self.palette.chrome());
         self.problem = saved.and(made).err().map(|why| format!("Could not set the Loupe folder: {why}"));
     }
 

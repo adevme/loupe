@@ -211,7 +211,7 @@ fn main() {
 
     let mut out = channel::take_stdout();
     let mut open: Option<Open> = None;
-    let mut editor: Option<(loupe_plugins::editor::Editor, window::Window)> = None;
+    let mut editor: Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window)> = None;
     let mut loaded_name = String::new();
     let mut was_sized = (0, 0);
     let mut region: Option<Region> = None;
@@ -227,8 +227,11 @@ fn main() {
             }
             let now = pane.inside();
             if now != was_sized && now.0 > 0 && now.1 > 0 {
-                was_sized = now;
-                made.resized(now.0, now.1);
+                let settled = made.resized(now.0, now.1);
+                was_sized = settled;
+                if settled != now {
+                    pane.fit_around(settled.0, settled.1);
+                }
             }
         }
         if idled.elapsed() >= std::time::Duration::from_millis(30) {
@@ -359,7 +362,7 @@ fn main() {
 
 fn show(
     open: Option<&mut Open>,
-    editor: &mut Option<(loupe_plugins::editor::Editor, window::Window)>,
+    editor: &mut Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window)>,
     name: &str,
 ) -> Result<(), String> {
     if let Some((_, pane)) = editor.as_ref() {
@@ -369,7 +372,7 @@ fn show(
     let Some(Open::Vst3(effect)) = open else {
         return Err("only VST3 plugins have a window so far".into());
     };
-    let made = effect.editor()?;
+    let made = std::rc::Rc::new(effect.editor()?);
     let kind = loupe_plugins::editor::platform_kind();
     if !made.fits(kind) {
         return Err("this plugin has no window for this computer".into());
@@ -382,6 +385,10 @@ fn show(
         pane.presets(&loupe_plugins::presets::list(&folder), None);
     }
     unsafe { made.attach(pane.inner(), kind) }?;
+    let following = std::rc::Rc::clone(&made);
+    pane.follow(Box::new(move |width, height| {
+        following.resized(width, height);
+    }));
     pane.show();
     *editor = Some((made, pane));
     Ok(())
@@ -399,6 +406,11 @@ fn use_preset(asked: window::Asked, open: Option<&mut Open>, pane: &window::Wind
         window::Asked::Load(name) => {
             if let Ok(state) = loupe_plugins::presets::load(&folder, &name) {
                 let _ = effect.restore(&state);
+            }
+        }
+        window::Asked::Delete(name) => {
+            if loupe_plugins::presets::remove(&folder, &name).is_ok() {
+                pane.presets(&loupe_plugins::presets::list(&folder), None);
             }
         }
         window::Asked::Save(name) => {

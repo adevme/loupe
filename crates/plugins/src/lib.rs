@@ -9,6 +9,7 @@ pub mod sandbox;
 pub mod presets;
 pub mod au;
 pub mod changes;
+pub mod chrome;
 pub mod clap;
 pub mod context;
 pub mod editor;

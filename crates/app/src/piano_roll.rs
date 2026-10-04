@@ -696,7 +696,7 @@ impl App {
         let tall = (self.window.height - 120.0).max(300.0);
         let wide = (self.window.width - 80.0).max(500.0);
         let sheet = container(body).width(Length::Fill).height(tall);
-        self.window(format!("Piano roll: {}", found.source.name), sheet.into(), wide)
+        self.window(format!("Piano roll: {}", found.called()), sheet.into(), wide)
     }
 }
 

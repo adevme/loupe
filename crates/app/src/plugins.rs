@@ -259,7 +259,7 @@ impl App {
         let Some(found) = self.project.clip(clip) else {
             return text("This clip is gone.").size(13).into();
         };
-        let name = found.source.name.clone();
+        let name = found.called().to_string();
         self.picker(format!("Plugins for {name}"), &move |which| Message::AddClipPlugin(clip, which))
     }
 }

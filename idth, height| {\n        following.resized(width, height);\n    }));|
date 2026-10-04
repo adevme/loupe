@@ -1,0 +1,3 @@
+    unsafe { made.attach(pane.inner(), kind) }?;
+    let following = std::rc::Rc::clone(&made);
+    pane.follow(Box::new(move 

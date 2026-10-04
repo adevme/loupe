@@ -293,7 +293,7 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Resu
             h.clip(clip)?;
             Ok(h.project.track_of(ClipId(clip)).map(|track| track.id.0))
         });
-        def!("clip_name", |_, clip: u64| Ok(host.borrow().clip(clip)?.source.name.clone()));
+        def!("clip_name", |_, clip: u64| Ok(host.borrow().clip(clip)?.called().to_string()));
         def!("clip_start", |_, clip: u64| {
             let h = host.borrow();
             Ok(h.seconds(h.clip(clip)?.start))

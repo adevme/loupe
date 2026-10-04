@@ -128,7 +128,7 @@ impl App {
         let from = chosen.iter().map(|clip| clip.start).min().unwrap_or(0);
         let to = chosen.iter().map(|clip| clip.end()).max().unwrap_or(0);
         let track_id = track.id;
-        let first_name = chosen.iter().min_by_key(|clip| clip.start).map(|clip| clip.source.name.clone()).unwrap_or_default();
+        let first_name = chosen.iter().min_by_key(|clip| clip.start).map(|clip| clip.called().to_string()).unwrap_or_default();
         let name = crate::files::file_safe(first_name.split(CONSOLIDATED_MARK).next().unwrap_or(&first_name).trim_end());
 
         let mut alone = self.project.clone();

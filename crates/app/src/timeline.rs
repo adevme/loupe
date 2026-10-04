@@ -1625,9 +1625,9 @@ impl Timeline<'_> {
             frame.with_clip(visible, |name_region| {
                 name_region.fill_text(Text {
                     content: match (clip.is_stretched(), clip.waiting_for_stretch()) {
-                        (false, _) => clip.source.name.clone(),
-                        (true, false) => format!("{}  {:.0}%", clip.source.name, clip.stretch * 100.0),
-                        (true, true) => format!("{}  {:.0}%  stretching…", clip.source.name, clip.stretch * 100.0),
+                        (false, _) => clip.called().to_string(),
+                        (true, false) => format!("{}  {:.0}%", clip.called(), clip.stretch * 100.0),
+                        (true, true) => format!("{}  {:.0}%  stretching…", clip.called(), clip.stretch * 100.0),
                     } + &if clip.has_takes() { format!("  ·  take {} of {}", clip.take + 1, clip.takes.len()) } else { String::new() },
                     position: Point::new(
                         self.lanes_left() + left.max(0.0) + 8.0 - visible.x,

@@ -66,6 +66,15 @@ pub fn load(folder: &Path, name: &str) -> Result<Vec<u8>, String> {
     fs::read(&file).map_err(|why| format!("{}: {why}", file.display()))
 }
 
+pub fn remove(folder: &Path, name: &str) -> Result<(), String> {
+    let named = safe(name);
+    if named.is_empty() {
+        return Err("that is not a preset".into());
+    }
+    let file = folder.join(format!("{named}.{EXTENSION}"));
+    fs::remove_file(&file).map_err(|why| format!("{}: {why}", file.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

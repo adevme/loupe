@@ -78,6 +78,7 @@ pub struct SavedClip {
     pub stretch: f64,
     pub takes: Vec<i64>,
     pub take: usize,
+    pub called: Option<String>,
 }
 
 impl SavedProject {
@@ -183,6 +184,7 @@ impl SavedProject {
                             stretch: clip.stretch,
                             takes: clip.takes.clone(),
                             take: clip.take,
+                            called: clip.name.clone(),
                             fx: clip
                                 .fx
                                 .iter()
@@ -252,6 +254,9 @@ impl SavedProject {
                     if clip.takes.len() > 1 { format!(" takes={} take={}", clip.takes.iter().map(i64::to_string).collect::<Vec<_>>().join(","), clip.take) } else { String::new() },
                     clip.notes.as_ref().map_or(String::new(), |(name, _)| format!(" name={name}"))
                 ));
+                if let Some(called) = &clip.called {
+                    out.push_str(&format!("clipname {called}\n"));
+                }
                 for note in clip.notes.iter().flat_map(|(_, notes)| notes) {
                     out.push_str(&format!("note key={} start={} len={} velocity={}\n", note.key, note.start, note.len, note.velocity));
                 }
@@ -385,6 +390,14 @@ impl SavedProject {
                     let holder = saved.envelopes.last_mut().ok_or_else(|| bad("a point before any envelope"))?;
                     holder.points.push(crate::envelope::Point { at, value, shape });
                 }
+                "clipname" => {
+                    let clip = saved
+                        .tracks
+                        .last_mut()
+                        .and_then(|track| track.clips.last_mut())
+                        .ok_or_else(|| bad("a clip name comes before any clip"))?;
+                    clip.called = (!rest.trim().is_empty()).then(|| rest.trim().to_string());
+                }
                 "note" => {
                     let fields = fields_of(rest);
                     let whole = |key: &str| fields.get(key).and_then(|v| v.parse::<u64>().ok()).ok_or_else(|| bad(&format!("the note has no {key}")));
@@ -422,6 +435,7 @@ impl SavedProject {
                         },
                         takes: fields.get("takes").map(|text| text.split(',').filter_map(|shift| shift.parse().ok()).collect()).unwrap_or_default(),
                         take: fields.get("take").and_then(|text| text.parse().ok()).unwrap_or(0),
+                        called: None,
                     };
                     if clip.notes.is_none() && clip.source >= saved.sources.len() {
                         return Err(bad("the clip points at audio the file does not list"));
@@ -504,6 +518,9 @@ impl SavedProject {
                 let _ = project.apply(trimmed);
                 let _ = project.apply(Command::SetClipGain { clip: id, gain: clip.gain });
                 let _ = project.apply(Command::SetClipMuted { clip: id, muted: clip.muted });
+                if clip.called.is_some() {
+                    let _ = project.apply(Command::RenameClip { clip: id, name: clip.called.clone() });
+                }
                 if clip.takes.len() > 1 {
                     let offset = rescale(clip.offset) as i64;
                     let offsets = clip.takes.iter().map(|shift| offset + shift.signum() * rescale(shift.unsigned_abs()) as i64).collect();
@@ -1179,5 +1196,43 @@ fn where_text(target: &SavedTarget) -> String {
         SavedTarget::MasterFx(slot, knob) => format!("masterfx:{slot}:{knob}"),
         SavedTarget::Clip(track, at) => format!("clip:{track}:{at}"),
         SavedTarget::ClipFx(track, at, slot, knob) => format!("clipfx:{track}:{at}:{slot}:{knob}"),
+    }
+}
+
+#[cfg(test)]
+mod naming {
+    use super::*;
+
+    #[test]
+    fn a_renamed_clip_comes_back_named_and_the_others_keep_the_file_name() {
+        let mut project = Project::new(48_000);
+        let source = Arc::new(Source::from_frames("Trippie Redd x Acoustic", vec![[0.1, 0.1]; 4_000]));
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        let Ok(Outcome::Clip(first)) = project.apply(Command::AddClip { track, source: source.clone(), start: 0 }) else { panic!("no clip") };
+        let Ok(Outcome::Clip(second)) = project.apply(Command::AddClip { track, source: source.clone(), start: 8_000 }) else { panic!("no clip") };
+        project.apply(Command::RenameClip { clip: first, name: Some("  Hook  ".into()) }).unwrap();
+        assert_eq!(project.clip(first).unwrap().called(), "Hook");
+        assert_eq!(project.clip(second).unwrap().called(), "Trippie Redd x Acoustic");
+
+        let text = SavedProject::capture(&project, |_| None).to_text();
+        let sources = vec![source.clone()];
+        let (back, _) = SavedProject::parse(&text).expect("it reads back").build(&sources, 48_000);
+        let clips = &back.tracks[0].clips;
+        assert_eq!(clips[0].called(), "Hook");
+        assert_eq!(clips[1].called(), "Trippie Redd x Acoustic");
+    }
+
+    #[test]
+    fn a_name_of_nothing_but_spaces_goes_back_to_the_file_name() {
+        let mut project = Project::new(48_000);
+        let source = Arc::new(Source::from_frames("beat", vec![[0.1, 0.1]; 400]));
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!("no clip") };
+        project.apply(Command::RenameClip { clip, name: Some("Hook".into()) }).unwrap();
+        project.apply(Command::RenameClip { clip, name: Some("   ".into()) }).unwrap();
+        assert_eq!(project.clip(clip).unwrap().called(), "beat");
+        project.apply(Command::RenameClip { clip, name: Some("Hook".into()) }).unwrap();
+        project.apply(Command::RenameClip { clip, name: None }).unwrap();
+        assert_eq!(project.clip(clip).unwrap().called(), "beat");
     }
 }

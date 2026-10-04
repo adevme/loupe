@@ -988,3 +988,20 @@ mod tests {
         assert!(theme.set("wobble", "1").unwrap_err().contains("not a theme key"));
     }
 }
+
+impl Palette {
+    pub fn chrome(&self) -> loupe_plugins::chrome::Chrome {
+        let packed = |colour: iced::Color| {
+            let eight = |part: f32| (part.clamp(0.0, 1.0) * 255.0).round() as u32;
+            eight(colour.r) << 16 | eight(colour.g) << 8 | eight(colour.b)
+        };
+        loupe_plugins::chrome::Chrome {
+            background: packed(self.background),
+            panel: packed(self.panel),
+            line: packed(self.line),
+            text: packed(self.text),
+            text_dim: packed(self.text_dim),
+            accent: packed(self.accent),
+        }
+    }
+}

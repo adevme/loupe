@@ -1,6 +1,6 @@
 use std::fmt;
 
-use iced::widget::{button, column, row, text};
+use iced::widget::{button, column, row, text, text_input};
 use iced::{Alignment, Element};
 use loupe_engine::{ClipId, Frames, TrackId};
 
@@ -59,6 +59,16 @@ impl App {
         .on_press(Message::TogglePreview(id));
 
         let fields = column![
+            row![
+                label("Name"),
+                text_input("", &self.clip_name)
+                    .on_input(Message::ClipNameTyped)
+                    .on_submit(Message::ClipNameEntered(id))
+                    .size(13)
+                    .padding([6, 10])
+                    .style(move |_, status| palette.field(status)),
+            ]
+            .align_y(Alignment::Center),
             row![
                 label("Track"),
                 theme::picker(palette, choices, Some(current), move |choice: TrackChoice| Message::ClipToTrack(id, choice.id)),
@@ -124,7 +134,7 @@ impl App {
         ]
         .spacing(8);
         let body = column![fields, rule(palette), chain, rule(palette), preview].spacing(16);
-        self.window(clip.source.name.clone(), body.into(), 520.0)
+        self.window(format!("Track Properties - {}", clip.called()), body.into(), 520.0)
     }
 
     pub(crate) fn toggle_preview(&mut self, id: ClipId) {

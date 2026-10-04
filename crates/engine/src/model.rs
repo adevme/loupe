@@ -48,6 +48,7 @@ pub struct Clip {
     pub stretched: Option<Arc<Source>>,
     pub takes: Vec<i64>,
     pub take: usize,
+    pub name: Option<String>,
 }
 
 impl Clip {
@@ -97,6 +98,10 @@ impl Clip {
 
     pub fn is_notes(&self) -> bool {
         self.notes.is_some()
+    }
+
+    pub fn called(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.source.name)
     }
 
     pub fn fade_level(&self, frames_into_clip: Frames) -> f32 {
@@ -270,6 +275,7 @@ pub enum Command {
     DeleteClip(ClipId),
     TrimClip { clip: ClipId, offset: Frames, len: Frames },
     SetClipGain { clip: ClipId, gain: f32 },
+    RenameClip { clip: ClipId, name: Option<String> },
     SetClipMuted { clip: ClipId, muted: bool },
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetStretch { clip: ClipId, stretch: f64 },
@@ -512,6 +518,7 @@ impl Project {
                 self.tracks[t].clips.push(Clip {
                     id,
                     source,
+                    name: None,
                     start,
                     offset: 0,
                     len,
@@ -548,6 +555,7 @@ impl Project {
                 self.tracks[t].clips.push(Clip {
                     id,
                     source: Arc::new(Source::from_frames(name, Vec::new())),
+                    name: None,
                     start,
                     offset: 0,
                     len,
@@ -696,6 +704,12 @@ impl Project {
                         clip.stretched = Some(stretched.clone());
                     }
                 }
+                Ok(Outcome::Done)
+            }
+            Command::RenameClip { clip, name } => {
+                let (t, i) = self.locate(clip)?;
+                let kept = name.as_deref().map(str::trim).filter(|given| !given.is_empty()).map(str::to_string);
+                self.tracks[t].clips[i].name = kept;
                 Ok(Outcome::Done)
             }
             Command::SetClipGain { clip, gain } => {
