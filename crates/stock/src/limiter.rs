@@ -11,9 +11,9 @@ const PARAMS: [Param; 4] = [
     Param::new("true_peak", "True peak", 0.0, 1.0, 1.0, Unit::Switch),
 ];
 const LOOKAHEAD_SECONDS: f32 = 0.0015;
-const PHASES: usize = 4;
-const HALF_TAPS: usize = 8;
-const TAPS: usize = HALF_TAPS * 2;
+pub(crate) const PHASES: usize = 4;
+pub(crate) const HALF_TAPS: usize = 8;
+pub(crate) const TAPS: usize = HALF_TAPS * 2;
 const KAISER_BETA: f32 = 6.0;
 
 fn bessel_i0(x: f32) -> f32 {
@@ -26,7 +26,7 @@ fn bessel_i0(x: f32) -> f32 {
     sum
 }
 
-fn interpolation_taps() -> [[f32; TAPS]; PHASES - 1] {
+pub(crate) fn interpolation_taps() -> [[f32; TAPS]; PHASES - 1] {
     let mut taps = [[0.0; TAPS]; PHASES - 1];
     for (phase, row) in taps.iter_mut().enumerate() {
         let offset = (phase + 1) as f32 / PHASES as f32;

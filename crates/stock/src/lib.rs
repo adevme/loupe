@@ -4,8 +4,10 @@ mod compressor;
 mod deesser;
 mod delay;
 mod eq;
+mod gate;
 mod history;
 mod limiter;
+mod loudness;
 mod reverb;
 mod saturation;
 mod scope;
@@ -18,12 +20,14 @@ pub use compressor::{Compressor, Curve, STYLES};
 pub use deesser::Deesser;
 pub use delay::{echo_seconds, Delay, NOTES};
 pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
+pub use gate::Gate;
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use limiter::Limiter;
-pub use transient::Transient;
+pub use loudness::{Meter, Readings, SILENT as SILENT_LUFS};
 pub use reverb::{decay_seconds, Reverb};
 pub use saturation::{curve_of as saturation_curve, Saturation, STYLES as SATURATION_STYLES};
 pub use scope::Scope;
+pub use transient::Transient;
 
 pub type Frame = [f32; 2];
 
@@ -128,6 +132,10 @@ pub trait Effect: Send {
         None
     }
 
+    fn meter(&self) -> Option<std::sync::Arc<Readings>> {
+        None
+    }
+
     fn set_tempo(&mut self, _bpm: f32) {}
 
     fn set_by_id(&mut self, id: &str, value: f32) -> bool {
@@ -141,7 +149,7 @@ pub trait Effect: Send {
     }
 }
 
-pub const NAMES: [&str; 9] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient"];
+pub const NAMES: [&str; 11] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter"];
 
 pub fn make(name: &str) -> Option<Box<dyn Effect>> {
     Some(match name {
@@ -154,6 +162,8 @@ pub fn make(name: &str) -> Option<Box<dyn Effect>> {
         "Loupe Saturation" => Box::new(Saturation::new()),
         "Loupe Chorus" => Box::new(Chorus::new()),
         "Loupe Transient" => Box::new(Transient::new()),
+        "Loupe Gate" => Box::new(Gate::new()),
+        "Loupe Meter" => Box::new(Meter::new()),
         _ => return None,
     })
 }
