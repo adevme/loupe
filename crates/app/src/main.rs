@@ -219,13 +219,17 @@ pub enum Message {
     SkipRecovery,
     NewNotesClip(TrackId),
     UseInstrument(TrackId, Instrument),
-    RollPlaced { clip: ClipId, notes: Vec<Note>, key: u8 },
-    RollEdit { clip: ClipId, notes: Vec<Note> },
+    ToggleRecordsNotes(TrackId),
+    RollPlaced { clip: ClipId, notes: Vec<Note>, key: u8, chosen: Vec<Note> },
+    RollEdit { clip: ClipId, notes: Vec<Note>, chosen: Option<Vec<Note>> },
+    RollChoose(Vec<Note>),
+    RollAction(piano_roll::RollAction),
     RollSound { key: u8, on: bool },
     RollSlide { from: Option<u8>, to: u8 },
     RollDone { remember_beats: Option<f64> },
     RollView(piano_roll::RollView),
     TypedKey { key: u8, down: bool },
+    ToggleTypingKeys,
     Both(Box<Message>, Box<Message>),
     OpenVersions,
     UseVersion(String),
@@ -469,6 +473,9 @@ struct App {
     marked: Option<backup::Place>,
     roll_view: piano_roll::RollView,
     roll_beats: f64,
+    roll_chosen: Vec<Note>,
+    typing_keys: bool,
+    roll_copied: Vec<Note>,
     typing: HashSet<u8>,
     midi_keys: Option<loupe_engine::MidiKeys>,
     keys_aimed_at: Option<TrackId>,
@@ -576,6 +583,9 @@ impl App {
             marked: None,
             roll_view: piano_roll::RollView::default(),
             roll_beats: 1.0,
+            roll_chosen: Vec::new(),
+            typing_keys: false,
+            roll_copied: Vec::new(),
             typing: HashSet::new(),
             midi_keys: None,
             keys_aimed_at: None,
@@ -669,6 +679,18 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        let message = match (&self.overlay, message) {
+            (Overlay::Roll(_), Message::Delete) => Message::RollAction(piano_roll::RollAction::Delete),
+            (Overlay::Roll(_), Message::CopyClips) => Message::RollAction(piano_roll::RollAction::Copy),
+            (Overlay::Roll(_), Message::CutClips) => Message::RollAction(piano_roll::RollAction::Cut),
+            (Overlay::Roll(_), Message::PasteClips) => Message::RollAction(piano_roll::RollAction::Paste),
+            (Overlay::Roll(_), Message::DuplicateClips) => Message::RollAction(piano_roll::RollAction::Duplicate),
+            (Overlay::Roll(_), Message::SelectAll) => Message::RollAction(piano_roll::RollAction::SelectAll),
+            (Overlay::Roll(_), Message::CloseOverlay) if !self.roll_chosen.is_empty() => Message::RollAction(piano_roll::RollAction::Clear),
+            (_, message) => message,
+        };
+        let roll_open = matches!(self.overlay, Overlay::Roll(_));
+        let fine_in_the_roll = roll_open && matches!(message, Message::TogglePlay | Message::ToStart | Message::Undo | Message::Redo);
         let belongs_to_the_song = matches!(
             message,
             Message::TogglePlay
@@ -684,7 +706,7 @@ impl App {
                 | Message::Redo
                 | Message::Import
         );
-        if (self.overlay != Overlay::None || self.screen == Screen::Home) && belongs_to_the_song {
+        if (self.overlay != Overlay::None || self.screen == Screen::Home) && belongs_to_the_song && !fine_in_the_roll {
             return Task::none();
         }
         let would_break_the_take = matches!(
@@ -731,6 +753,9 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                if let Some(recording) = self.recording.as_mut() {
+                    recording.taped.extend(self.engine.taped_keys());
+                }
                 self.keep_writing();
                 if let Some(window) = self.stock.as_mut() {
                     window.tick();
@@ -937,17 +962,30 @@ impl App {
                 }
             }
             Message::NewNotesClip(track) => self.new_notes_clip(track),
+            Message::ToggleRecordsNotes(track) => {
+                self.overlay = Overlay::None;
+                if let Some(on) = self.project.track(track).map(|t| !t.records_notes) {
+                    self.edit(None, Command::SetRecordsNotes { track, on });
+                    self.listen_if_armed();
+                }
+            }
             Message::UseInstrument(track, instrument) => {
                 self.overlay = Overlay::None;
                 self.edit(None, Command::SetInstrument { track, instrument });
             }
-            Message::RollPlaced { clip, notes, key } => {
+            Message::RollPlaced { clip, notes, key, chosen } => {
                 self.edit(Some(Run::Notes(clip)), Command::SetNotes { clip, notes });
+                self.roll_chosen = chosen;
                 self.sound(key, true);
             }
-            Message::RollEdit { clip, notes } => {
+            Message::RollEdit { clip, notes, chosen } => {
                 self.edit(Some(Run::Notes(clip)), Command::SetNotes { clip, notes });
+                if let Some(chosen) = chosen {
+                    self.roll_chosen = chosen;
+                }
             }
+            Message::RollChoose(chosen) => self.roll_chosen = chosen,
+            Message::RollAction(action) => self.roll_action(action),
             Message::RollSound { key, on } => self.sound(key, on),
             Message::RollSlide { from, to } => {
                 if let Some(from) = from {
@@ -962,6 +1000,15 @@ impl App {
                 }
             }
             Message::RollView(view) => self.roll_view = view,
+            Message::ToggleTypingKeys => {
+                self.typing_keys = !self.typing_keys;
+                if !self.typing_keys {
+                    for key in std::mem::take(&mut self.typing) {
+                        self.sound(key, false);
+                    }
+                }
+                self.notice = self.typing_keys.then(|| "Your letter keys now play notes on the armed note track. Ctrl+T turns this off, Ctrl+R records.".into());
+            }
             Message::TypedKey { key, down } => {
                 let fresh = if down { self.typing.insert(key) } else { self.typing.remove(&key) };
                 if fresh {
@@ -1635,7 +1682,7 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let shortcuts = keyboard::on_key_press(shortcut);
+        let shortcuts = if self.typing_keys { keyboard::on_key_press(shortcut_while_typing) } else { keyboard::on_key_press(shortcut) };
         let window = iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
@@ -1671,9 +1718,11 @@ impl App {
             0 => Subscription::none(),
             minutes => iced::time::every(Duration::from_secs(minutes as u64 * 60)).map(|_| Message::Autosave),
         };
-        let typing = if matches!(self.overlay, Overlay::Roll(_)) {
-            iced::event::listen_with(|event, _status, _window| match event {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), modifiers, .. }) if !modifiers.command() => {
+        let typing = if matches!(self.overlay, Overlay::Roll(_)) || self.typing_keys {
+            iced::event::listen_with(|event, status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Character(c), modifiers, .. })
+                    if !modifiers.command() && status == iced::event::Status::Ignored =>
+                {
                     piano_roll::typed_key(c.as_str()).map(|key| Message::TypedKey { key, down: true })
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyReleased { key: keyboard::Key::Character(c), .. }) => {
@@ -2007,7 +2056,8 @@ impl App {
     }
 
     pub(crate) fn listen_if_armed(&mut self) {
-        if self.armed.is_empty() {
+        let wants_audio = self.project.tracks.iter().any(|track| self.armed.contains(&track.id) && !track.records_notes);
+        if !wants_audio {
             self.input = None;
             self.input_level = 0.0;
             return;
@@ -2251,7 +2301,12 @@ impl App {
             .padding(0)
             .style(move |_, status| palette.toggled(metronome_on, status))
             .on_press(Message::ToggleMetronome);
-        let record = row![record, metronome].spacing(8).align_y(Alignment::Center);
+        let typing_on = self.typing_keys;
+        let typing_keys = button(container(icon("keyboard-music", 15.0)).center(30))
+            .padding(0)
+            .style(move |_, status| palette.toggled(typing_on, status))
+            .on_press(Message::ToggleTypingKeys);
+        let record = row![record, metronome, typing_keys].spacing(8).align_y(Alignment::Center);
 
         let tempo = text_input("", &self.bpm)
             .on_input(Message::BpmTyped)
@@ -2489,6 +2544,13 @@ impl App {
     }
 }
 
+fn shortcut_while_typing(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    match &key {
+        keyboard::Key::Character(_) if !modifiers.command() => None,
+        _ => shortcut(key, modifiers),
+    }
+}
+
 fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
     use keyboard::key::Named;
     match key {
@@ -2498,6 +2560,8 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::F6) => Some(Message::ToggleMixer),
         keyboard::Key::Named(Named::F7) => Some(Message::OpenMatrix),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
+        keyboard::Key::Named(Named::ArrowUp) => Some(Message::RollAction(piano_roll::RollAction::Transpose(if modifiers.shift() { 12 } else { 1 }))),
+        keyboard::Key::Named(Named::ArrowDown) => Some(Message::RollAction(piano_roll::RollAction::Transpose(if modifiers.shift() { -12 } else { -1 }))),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
@@ -2508,6 +2572,9 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
                 ("m", true, _) => Some(Message::ToggleMetronome),
+                ("t", true, _) => Some(Message::ToggleTypingKeys),
+                ("r", true, _) => Some(Message::ToggleRecord),
+                ("q", true, _) => Some(Message::RollAction(piano_roll::RollAction::Quantize)),
                 ("c", true, _) => Some(Message::CopyClips),
                 ("x", true, _) => Some(Message::CutClips),
                 ("v", true, _) => Some(Message::PasteClips),

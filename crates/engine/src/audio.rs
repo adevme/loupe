@@ -19,6 +19,15 @@ const FADE_SECONDS: f32 = 0.005;
 const QUEUE: usize = 256;
 const SILENT_RATE: u32 = 48_000;
 pub const METERS: usize = 64;
+const TAPE: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TapedKey {
+    pub track: TrackId,
+    pub key: u8,
+    pub velocity: f32,
+    pub at: Frames,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
@@ -41,6 +50,7 @@ enum Msg {
     NoteOn { track: TrackId, key: u8, velocity: f32 },
     NoteOff { track: TrackId, key: u8 },
     Silence,
+    Tape(bool),
     KeysGoTo(Option<TrackId>),
     Metronome(bool),
     CountIn(Frames),
@@ -92,6 +102,8 @@ struct Rt {
     live: Vec<Live>,
     keys: Consumer<KeyEvent>,
     keys_go_to: Option<TrackId>,
+    taping: bool,
+    tape: Producer<TapedKey>,
     metronome: bool,
     count_in: Frames,
     count_in_len: Frames,
@@ -112,6 +124,7 @@ struct Remote {
     outbox: Producer<Msg>,
     retired: Consumer<Arc<Project>>,
     handed_back: Consumer<Box<dyn Chains>>,
+    tape: Consumer<TapedKey>,
     shared: Arc<Shared>,
 }
 
@@ -120,11 +133,14 @@ fn pair(rate: u32) -> (Rt, Remote) {
     let (outbox, inbox) = RingBuffer::new(QUEUE);
     let (retired_tx, retired_rx) = RingBuffer::new(QUEUE);
     let (back_tx, back_rx) = RingBuffer::new(QUEUE);
+    let (tape_in, tape_out) = RingBuffer::new(TAPE);
     let shared = Arc::new(Shared::default());
     let rt = Rt {
         live: Vec::with_capacity(MOST_LIVE_NOTES),
         keys: keys_out,
         keys_go_to: None,
+        taping: false,
+        tape: tape_in,
         metronome: false,
         count_in: 0,
         count_in_len: 0,
@@ -147,7 +163,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
     };
-    (rt, Remote { keys: Arc::new(std::sync::Mutex::new(keys_in)), outbox, retired: retired_rx, handed_back: back_rx, shared })
+    (rt, Remote { keys: Arc::new(std::sync::Mutex::new(keys_in)), outbox, retired: retired_rx, handed_back: back_rx, tape: tape_out, shared })
 }
 
 impl Rt {
@@ -188,17 +204,20 @@ impl Rt {
                 Msg::Audition(clip) => self.audition = clip,
                 Msg::Endless(endless) => self.endless = endless,
                 Msg::NoteOn { track, key, velocity } => {
+                    self.taped(track, key, velocity);
                     if self.live.len() == MOST_LIVE_NOTES {
                         self.live.remove(0);
                     }
                     self.live.push(Live { track, note: Note { key, start: 0, len: HELD, velocity }, played: 0 });
                 }
                 Msg::NoteOff { track, key } => {
+                    self.taped(track, key, 0.0);
                     for voice in self.live.iter_mut().filter(|v| v.track == track && v.note.key == key && v.note.len == HELD) {
                         voice.note.len = voice.played.max(1);
                     }
                 }
                 Msg::Silence => self.live.clear(),
+                Msg::Tape(on) => self.taping = on,
                 Msg::KeysGoTo(track) => {
                     if track != self.keys_go_to {
                         self.live.retain(|voice| Some(voice.track) != self.keys_go_to || voice.note.len != HELD);
@@ -210,6 +229,7 @@ impl Rt {
 
         while let Ok(event) = self.keys.pop() {
             let Some(track) = self.keys_go_to else { continue };
+            self.taped(track, event.key, event.velocity);
             if event.velocity > 0.0 {
                 if self.live.len() == MOST_LIVE_NOTES {
                     self.live.remove(0);
@@ -301,6 +321,12 @@ impl Rt {
         self.play_live(frames);
         self.shared.pos.store(self.pos, Ordering::Relaxed);
         &self.block[..frames]
+    }
+
+    fn taped(&mut self, track: TrackId, key: u8, velocity: f32) {
+        if self.taping && self.playing {
+            let _ = self.tape.push(TapedKey { track, key, velocity, at: self.pos });
+        }
     }
 
     fn play_live(&mut self, frames: usize) {
@@ -448,6 +474,14 @@ impl Engine {
 
     pub fn count_in(&mut self, len: Frames) {
         self.send(Msg::CountIn(len));
+    }
+
+    pub fn tape_keys(&mut self, on: bool) {
+        self.send(Msg::Tape(on));
+    }
+
+    pub fn taped_keys(&mut self) -> Vec<TapedKey> {
+        std::iter::from_fn(|| self.remote.tape.pop().ok()).collect()
     }
 
     pub fn set_endless(&mut self, endless: bool) {
@@ -966,6 +1000,33 @@ mod tests {
         remote.outbox.push(Msg::Stop).ok().unwrap();
         rt.process(100);
         assert_eq!(rt.count_in, 0);
+    }
+
+    #[test]
+    fn keys_are_taped_with_the_song_position_only_while_taping_and_playing() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Keys".into() }) else { panic!() };
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::KeysGoTo(Some(track))).ok().unwrap();
+        remote.outbox.push(Msg::Tape(true)).ok().unwrap();
+        remote.keys.lock().unwrap().push(KeyEvent { key: 60, velocity: 1.0 }).unwrap();
+        rt.process(480);
+        assert!(remote.tape.pop().is_err(), "nothing is taped while stopped");
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rt.process(1_000);
+        remote.keys.lock().unwrap().push(KeyEvent { key: 62, velocity: 0.5 }).unwrap();
+        rt.process(480);
+        remote.outbox.push(Msg::NoteOff { track, key: 62 }).ok().unwrap();
+        rt.process(480);
+        let first = remote.tape.pop().unwrap();
+        assert_eq!((first.track, first.key, first.velocity, first.at), (track, 62, 0.5, 1_000));
+        let second = remote.tape.pop().unwrap();
+        assert_eq!((second.key, second.velocity, second.at), (62, 0.0, 1_480));
+        remote.outbox.push(Msg::Tape(false)).ok().unwrap();
+        remote.keys.lock().unwrap().push(KeyEvent { key: 64, velocity: 1.0 }).unwrap();
+        rt.process(480);
+        assert!(remote.tape.pop().is_err());
     }
 
     #[test]
