@@ -78,7 +78,7 @@ impl App {
         };
         let rec_label = if taking > 0 { format!("Rec {taking}") } else { "Rec".to_string() };
         let add = row![tab("Mix".to_string(), false, MIX_HINT), tab(rec_label, true, REC_HINT), adder].spacing(2);
-        column![scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4))), add]
+        column![container(scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(3).scroller_width(3)))).padding(1).width(Length::Fill).style(move |_| palette.readout()), add]
             .spacing(3)
             .width(Length::Fill)
             .into()
@@ -414,12 +414,12 @@ impl App {
                 .align_y(iced::Alignment::Center),
             );
         }
-        let add = button(text("+ FX").size(10.5))
+        let add = button(text("+ FX").size(10.5).width(Length::Fill).center())
             .padding([1, 4])
             .width(Length::Fill)
             .style(move |_, status| palette.ghost(status))
             .on_press(Message::OpenMasterPlugins);
-        column![scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4))), add]
+        column![container(scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(3).scroller_width(3)))).padding(1).width(Length::Fill).style(move |_| palette.readout()), add]
             .spacing(3)
             .width(Length::Fill)
             .into()

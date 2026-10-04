@@ -2643,7 +2643,8 @@ impl App {
         if let Some(banner) = self.safe_banner() {
             song = song.push(banner).push(rule(palette));
         }
-        song = song.push(middle);
+        let lid = container(Space::new(Length::Fill, 8)).style(move |_| palette.shadow_below(0.8));
+        song = song.push(stack![middle.height(Length::Fill), lid]);
         if self.mixer_open && self.mixer_window.is_none() {
             song = song.push(rule(palette)).push(self.mixer());
         }
@@ -2830,7 +2831,7 @@ impl App {
         .padding([0, 16])
         .height(palette.top_bar_height)
         .align_y(Alignment::Center)
-        .style(move |_| palette.bar())
+        .style(move |_| palette.top_bar())
         .into()
     }
 

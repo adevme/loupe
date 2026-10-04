@@ -1,5 +1,5 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, canvas, column, container, mouse_area, row as hrow, scrollable, text, text_input, vertical_slider, Space};
+use iced::widget::{button, canvas, column, container, mouse_area, row as hrow, scrollable, stack, text, text_input, vertical_slider, Space};
 use iced::{mouse, Alignment, Color, Element, Length};
 
 use loupe_engine::{ClipId, Command, TrackId};
@@ -11,9 +11,9 @@ pub const SHORTEST_MIXER: f32 = 150.0;
 const MIXER_WINDOW: iced::Size = iced::Size::new(1000.0, 360.0);
 const SHORTEST_MIXER_WINDOW: f32 = 420.0;
 const GRAB_BAR: f32 = 6.0;
-const STRIP_MARGIN: f32 = 32.0;
-const STRIP_WIDTH: f32 = 112.0;
-const NAME_LENGTH: usize = 9;
+const STRIP_MARGIN: f32 = 24.0;
+const STRIP_WIDTH: f32 = 120.0;
+const NAME_LENGTH: usize = 11;
 const PAN_PER_PX: f32 = 1.0;
 pub const SILENT_DB: f32 = -60.0;
 pub const LOUDEST_DB: f32 = 6.0;
@@ -115,9 +115,12 @@ impl App {
             .on_right_press(Message::OpenAutomation(loupe_engine::Target::TrackPan(track)))
             .on_enter(Message::Hint(Some("Track pan. Drag up and down, right click to automate it.")))
             .on_exit(Message::Hint(None)),
+            container(text(pan_text(pan)).size(11).font(palette.mono).color(palette.text_dim))
+                .center_x(Length::Fill)
+                .center_y(21)
+                .style(move |_| palette.readout()),
         ]
-        .push_maybe((self.editing_level.is_none()).then(|| text(pan_text(pan)).size(10.5).font(palette.mono).color(palette.text_dim).width(26)))
-        .spacing(3)
+        .spacing(4)
         .align_y(Alignment::Center)
         .into()
     }
@@ -137,7 +140,7 @@ impl App {
                 .into();
         }
         let shown = if level == Level::Master { percent_text(gain) } else { level_text(gain) };
-        mouse_area(text(shown).size(11.5).font(palette.mono).color(palette.text_dim))
+        mouse_area(text(shown).size(11.5).font(palette.mono).color(palette.text))
             .on_press(Message::LevelPressed(level))
             .into()
     }
@@ -150,6 +153,16 @@ impl App {
             .style(move |_, status| palette.outlined(status))
             .on_press(if alone { Message::MixerBackUnderTheSong } else { Message::MixerToItsOwnWindow })
             .into()
+    }
+
+    fn readouts(&self, level: Level, gain: f32, peak: f32) -> Element<'_, Message> {
+        let palette = self.palette;
+        hrow![
+            container(self.level_readout(level, gain)).center_x(Length::Fill).center_y(21).style(move |_| palette.readout()),
+            container(peak_text(palette, peak)).center_x(Length::Fill).center_y(21).style(move |_| palette.readout()),
+        ]
+        .spacing(4)
+        .into()
     }
 
     fn master_strip(&self) -> Element<'_, Message> {
@@ -167,7 +180,8 @@ impl App {
                     background: Some(palette.accent.into()),
                     ..Default::default()
                 }),
-                hrow![text("Master").size(12).font(palette.semibold).width(Length::Fill), self.mixer_window_button()]
+                hrow![strip_title(palette, "", "Master".to_string()), self.mixer_window_button()]
+                    .spacing(5)
                     .align_y(Alignment::Center),
                 self.master_fx_block(),
                 hrow![
@@ -176,28 +190,30 @@ impl App {
                             .step(1.0)
                             .default(100.0)
                             .on_release(Message::DragEnd)
+                            .width(FADER_W)
                             .height(Length::Fill)
                             .style(move |_, status| palette.slider(status))
                     )
                     .on_scroll(|delta| Message::WheelOverFader(Level::Master, delta)),
                     meter(palette, self.master_level),
                 ]
-                .spacing(10)
+                .spacing(6)
                 .height(Length::Fill)
                 .align_y(Alignment::Center),
-                self.level_readout(Level::Master, heard),
-                button(text("M").size(11.5).font(palette.semibold))
-                    .padding([3, 9])
+                self.readouts(Level::Master, heard, self.master_level),
+                button(text("M").size(11.5).font(palette.semibold).width(Length::Fill).center())
+                    .padding([3, 0])
+                    .width(Length::Fill)
                     .style(move |_, status| palette.mute(muted, status))
                     .on_press(Message::ToggleMasterMute),
             ]
-            .spacing(8)
+            .spacing(7)
             .align_x(Alignment::Center),
         )
-        .padding(8)
+        .padding(7)
         .width(STRIP_WIDTH)
         .height(self.strip_tall())
-        .style(move |_| palette.strip())
+        .style(move |_| palette.channel())
         .into()
     }
 
@@ -233,7 +249,8 @@ impl App {
         let grab_bar = mouse_area(container(Space::new(Length::Fill, GRAB_BAR)).style(move |_| palette.bar()))
             .on_press(Message::MixerGrabbed)
             .interaction(mouse::Interaction::ResizingVertically);
-        column![grab_bar, self.mixer_strips()].into()
+        let shadow = container(Space::new(Length::Fill, 10)).style(move |_| palette.shadow_below(0.9));
+        column![grab_bar, stack![self.mixer_strips(), shadow]].into()
     }
 
     pub(crate) fn mixer_alone(&self) -> Element<'_, Message> {
@@ -261,20 +278,23 @@ impl App {
             let count = track.sends.len();
             let wired = count > 0 || track.parent.is_some();
             let routes = if count > 0 { format!("→{count}") } else { "→".to_string() };
+            let small = |words: String| text(words).size(11.5).font(palette.semibold).width(Length::Fill).center();
             container(
                 column![
                     container(Space::new(Length::Fill, 3)).style(move |_| container::Style {
                         background: Some(colour.into()),
                         ..Default::default()
                     }),
-                    text(name).size(12).font(palette.medium),
+                    strip_title(palette, &format!("{:02}", index + 1), name),
                     self.fx_block(id),
+                    self.pan_knob(id, track.pan),
                     hrow![
                         mouse_area(
                             vertical_slider(SILENT_DB..=LOUDEST_DB, db, move |db| Message::TrackGain(id, db))
                                 .step(0.1)
                                 .default(0.0)
                                 .on_release(Message::DragEnd)
+                                .width(FADER_W)
                                 .height(Length::Fill)
                                 .style(move |_, status| palette.slider(status))
                         )
@@ -284,62 +304,90 @@ impl App {
                         .on_exit(Message::Hint(None)),
                         meter(palette, level),
                     ]
-                    .spacing(10)
+                    .spacing(6)
                     .height(Length::Fill)
                     .align_y(Alignment::Center),
-                    hrow![self.pan_knob(id, track.pan), self.level_readout(Level::Track(id), shown)].spacing(4).align_y(Alignment::Center),
+                    self.readouts(Level::Track(id), shown, level),
                     hrow![
-                        button(text("M").size(11.5).font(palette.semibold))
-                            .padding([3, 7])
+                        button(small("M".into()))
+                            .padding([3, 0])
+                            .width(Length::Fill)
                             .style(move |_, status| palette.mute(muted, status))
                             .on_press(Message::ToggleMute(id)),
-                        button(text("S").size(11.5).font(palette.semibold))
-                            .padding([3, 7])
+                        button(small("S".into()))
+                            .padding([3, 0])
+                            .width(Length::Fill)
                             .style(move |_, status| palette.solo(soloed, status))
                             .on_press(Message::ToggleSolo(id)),
-                        button(text(routes).size(11.5).font(palette.semibold))
-                            .padding([3, 7])
-                            .style(move |_, status| palette.toggled(wired, status))
+                        button(small(routes))
+                            .padding([3, 0])
+                            .width(Length::Fill)
+                            .style(move |_, status| palette.route(wired, status))
                             .on_press(Message::OpenRouting(id)),
                     ]
-                    .spacing(6),
+                    .spacing(4),
                 ]
-                .spacing(8)
+                .spacing(7)
                 .align_x(Alignment::Center),
             )
-            .padding(8)
+            .padding(7)
             .width(STRIP_WIDTH)
             .height(self.strip_tall())
-            .style(move |_| palette.strip())
+            .style(move |_| palette.channel())
             .into()
         });
-        let row = iced::widget::row(strips).spacing(8);
+        let row = iced::widget::row(strips).spacing(10);
         let faders: Element<'_, Message> = if self.project.tracks.is_empty() {
             container(text("Each track gets a fader here.").size(12.5).color(palette.text_dim))
                 .center_x(Length::Fill)
                 .center_y(self.mixer_tall())
                 .into()
         } else {
-            container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
-                .padding([4, 10])
+            container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new().width(4).scroller_width(4))))
+                .padding([6, 10])
                 .width(Length::Fill)
                 .height(self.mixer_tall())
                 .into()
         };
         let master = container(self.master_strip())
-            .padding([4, 10])
+            .padding([6, 10])
             .height(self.mixer_tall());
         container(iced::widget::row![master, upright_rule(palette), faders].align_y(Alignment::Center))
             .width(Length::Fill)
             .height(self.mixer_tall())
-            .style(move |_| palette.bar())
+            .style(move |_| palette.floor())
             .into()
     }
 }
-pub const METER_W: f32 = 14.0;
+
+fn strip_title(palette: crate::theme::Palette, number: &str, name: String) -> Element<'static, Message> {
+    hrow![
+        text(number.to_string()).size(10).font(palette.mono).color(palette.text_faint),
+        text(name).size(12).font(palette.semibold).wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .spacing(5)
+    .width(Length::Fill)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn peak_text(palette: crate::theme::Palette, level: f32) -> Element<'static, Message> {
+    let db = 20.0 * level.max(1e-6).log10();
+    let (words, colour) = match level {
+        l if l <= 0.0 => ("-inf".to_string(), palette.text_faint),
+        l if l >= 1.0 => (format!("{db:+.1}"), palette.danger),
+        _ => (format!("{db:.1}"), palette.text_dim),
+    };
+    text(words).size(11.5).font(palette.mono).color(colour).into()
+}
+
+pub const METER_W: f32 = 32.0;
+const FADER_W: f32 = 20.0;
+const SCALE_W: f32 = 20.0;
 const FLOOR_DB: f32 = -60.0;
 const MID_DB: f32 = -12.0;
 const HIGH_DB: f32 = -6.0;
+const SCALE_MARKS: [f32; 8] = [0.0, -12.0, -24.0, -48.0, -6.0, -36.0, -18.0, 6.0];
 
 pub struct Meter {
     level: f32,
@@ -360,35 +408,52 @@ impl canvas::Program<Message> for Meter {
         let p = self.palette;
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let h = bounds.height;
-        let w = bounds.width;
-        frame.fill_rectangle(iced::Point::ORIGIN, iced::Size::new(w, h), crate::theme::mix(p.panel, p.background, 0.6));
+        let w = bounds.width - SCALE_W;
+        let x = SCALE_W;
+        let inset = 5.0;
+        let travel = (h - inset * 2.0).max(1.0);
+        frame.fill_rectangle(iced::Point::new(x, 0.0), iced::Size::new(w, h), crate::theme::mix(p.panel, p.background, 0.6));
         let db = 20.0 * self.level.max(1e-6).log10();
-        let up = |db: f32| ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0) * h;
+        let up = |db: f32| ((db - FLOOR_DB) / (LOUDEST_DB - FLOOR_DB)).clamp(0.0, 1.0) * travel;
         let filled = up(db);
         let zones = [(FLOOR_DB, p.meter_low), (MID_DB, p.meter_mid), (HIGH_DB, p.meter_high)];
         for (i, (from_db, colour)) in zones.iter().enumerate() {
             let from = up(*from_db);
-            let to = zones.get(i + 1).map_or(h, |(next, _)| up(*next)).min(filled);
+            let to = zones.get(i + 1).map_or(travel, |(next, _)| up(*next)).min(filled);
             if to > from {
                 let colour = if self.level >= 1.0 { p.danger } else { *colour };
-                frame.fill_rectangle(iced::Point::new(0.0, h - to), iced::Size::new(w, to - from), colour);
+                frame.fill_rectangle(iced::Point::new(x, h - inset - to), iced::Size::new(w, to - from), colour);
             }
         }
-        for mark in [-6.0, -12.0, -24.0, -48.0] {
-            let y = h - up(mark);
-            frame.fill_rectangle(iced::Point::new(0.0, y), iced::Size::new(w, 1.0), crate::theme::alpha(p.text_faint, 0.5));
+        let mut labelled: Vec<f32> = Vec::new();
+        for mark in SCALE_MARKS {
+            let y = (h - inset - up(mark)).round();
+            let named = labelled.iter().all(|other| (other - y).abs() >= 11.0);
+            frame.fill_rectangle(iced::Point::new(x, y), iced::Size::new(w, 1.0), crate::theme::alpha(p.background, 0.7));
+            frame.fill_rectangle(iced::Point::new(SCALE_W - 3.0, y), iced::Size::new(3.0, 1.0), p.text_faint);
+            if !named {
+                continue;
+            }
+            labelled.push(y);
+            frame.fill_text(canvas::Text {
+                content: if mark > 0.0 { format!("+{}", mark as i32) } else { format!("{}", mark.abs() as i32) },
+                position: iced::Point::new(SCALE_W - 4.0, y),
+                color: p.text_faint,
+                size: 9.0.into(),
+                font: p.mono,
+                horizontal_alignment: iced::alignment::Horizontal::Right,
+                vertical_alignment: iced::alignment::Vertical::Center,
+                ..canvas::Text::default()
+            });
         }
+        frame.stroke(
+            &canvas::Path::rectangle(iced::Point::new(x + 0.5, 0.5), iced::Size::new(w - 1.0, h - 1.0)),
+            canvas::Stroke::default().with_color(p.line).with_width(1.0),
+        );
         vec![frame.into_geometry()]
     }
 }
 
 pub fn meter(palette: crate::theme::Palette, level: f32) -> Element<'static, Message> {
-    let db = if level <= 0.0 { "-inf".to_string() } else { format!("{:.1}", 20.0 * level.log10()) };
-    column![
-        canvas(Meter { level, palette }).width(METER_W).height(Length::Fill),
-        text(db).size(10).font(palette.mono).color(palette.text_faint),
-    ]
-    .spacing(4)
-    .align_x(Alignment::Center)
-    .into()
+    canvas(Meter { level, palette }).width(METER_W).height(Length::Fill).into()
 }

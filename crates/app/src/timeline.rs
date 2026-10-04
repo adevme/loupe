@@ -1565,11 +1565,22 @@ impl Timeline<'_> {
             b.rounded_rectangle(Point::new(shown_left, top), Size::new(shown_width, height), p.clip_corner.into());
         });
         let tint = if selected { 0.26 } else { 0.16 };
+        for (drop, strength) in [(1.0, 0.55), (2.5, 0.25)] {
+            let shadow = Path::new(|b| {
+                b.rounded_rectangle(Point::new(shown_left, top + drop), Size::new(shown_width, height), p.clip_corner.into());
+            });
+            frame.fill(&shadow, theme::alpha(Color::BLACK, p.shade() * strength));
+        }
         frame.fill(&body, theme::mix(p.background, colour, tint));
         let title = Path::new(|b| {
             b.rounded_rectangle(Point::new(shown_left, top), Size::new(shown_width, p.clip_title_height), iced::border::top(p.clip_corner));
         });
-        frame.fill(&title, theme::mix(p.background, colour, tint + 0.18));
+        frame.fill(
+            &title,
+            canvas::gradient::Linear::new(Point::new(0.0, top), Point::new(0.0, top + p.clip_title_height))
+                .add_stop(0.0, theme::mix(p.background, colour, tint + 0.25))
+                .add_stop(1.0, theme::mix(p.background, colour, tint + 0.17)),
+        );
 
         let wave_top = top + self.palette.clip_title_height + 2.0;
         let wave_height = height - self.palette.clip_title_height - 5.0;
@@ -1904,6 +1915,7 @@ impl Timeline<'_> {
                 Size::new(size.width, height - 1.0),
                 theme::mix(p.panel, self.colour_of(i), tint),
             );
+            frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, height - 1.0), sheen_fill(p, top, height - 1.0));
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
             let depth = self.project.depth_of(track.id).min(4) as f32;
             let indent = depth * INDENT_W;
@@ -1952,7 +1964,7 @@ impl Timeline<'_> {
             let shape = Path::new(|b| {
                 b.rounded_rectangle(Point::new(mute.x - self.header_left(), mute.y - self.lanes_top()), mute.size(), small_corner.into());
             });
-            frame.fill(&shape, if track.muted { p.danger } else { p.raised });
+            frame.fill(&shape, if track.muted { p.danger.into() } else { raised_fill(p, p.raised, mute.y - self.lanes_top(), mute.height) });
             frame.fill_text(Text {
                 content: "M".into(),
                 position: Point::new(mute.center_x() - self.header_left(), mute.center_y() - self.lanes_top()),
@@ -1968,7 +1980,7 @@ impl Timeline<'_> {
             let shape = Path::new(|b| {
                 b.rounded_rectangle(Point::new(solo.x - self.header_left(), solo.y - self.lanes_top()), solo.size(), small_corner.into());
             });
-            frame.fill(&shape, if track.solo { p.accent } else { p.raised });
+            frame.fill(&shape, if track.solo { p.accent.into() } else { raised_fill(p, p.raised, solo.y - self.lanes_top(), solo.height) });
             frame.fill_text(Text {
                 content: "S".into(),
                 position: Point::new(solo.center_x() - self.header_left(), solo.center_y() - self.lanes_top()),
@@ -2004,7 +2016,7 @@ impl Timeline<'_> {
             let surround = Path::new(|b| {
                 b.rounded_rectangle(Point::new(arm.x - self.header_left(), arm.y - self.lanes_top()), arm.size(), small_corner.into());
             });
-            frame.fill(&surround, p.raised);
+            frame.fill(&surround, raised_fill(p, p.raised, arm.y - self.lanes_top(), arm.height));
             let middle = Point::new(arm.center_x() - self.header_left(), arm.center_y() - self.lanes_top());
             let dot = match p.arm_shape {
                 ArmShape::Dot => Path::circle(middle, ARM_DOT_RADIUS),
@@ -2024,7 +2036,7 @@ impl Timeline<'_> {
             let pad = Path::new(|b| {
                 b.rounded_rectangle(Point::new(route.x, route.y - self.lanes_top()), route.size(), 5.0.into());
             });
-            frame.fill(&pad, p.raised);
+            frame.fill(&pad, raised_fill(p, p.raised, route.y - self.lanes_top(), route.height));
             frame.fill_text(Text {
                 content: "→".into(),
                 position: Point::new(route.center_x(), route.center_y() - self.lanes_top()),
@@ -2066,4 +2078,20 @@ fn take_lane_height(clip: &Clip, wave_height: f32) -> Option<f32> {
     }
     let lane = wave_height / clip.takes.len() as f32;
     (lane >= MIN_TAKE_LANE).then_some(lane)
+}
+
+fn raised_fill(p: &Palette, base: Color, top: f32, height: f32) -> canvas::Fill {
+    canvas::gradient::Linear::new(Point::new(0.0, top), Point::new(0.0, top + height))
+        .add_stop(0.0, theme::mix(base, Color::WHITE, p.glint() * 1.4))
+        .add_stop(1.0, theme::mix(base, Color::BLACK, p.shade() * 0.2))
+        .into()
+}
+
+fn sheen_fill(p: &Palette, top: f32, height: f32) -> canvas::Fill {
+    let light = if p.is_light() { 0.28 } else { 0.08 };
+    canvas::gradient::Linear::new(Point::new(0.0, top), Point::new(0.0, top + height))
+        .add_stop(0.0, theme::alpha(Color::WHITE, light))
+        .add_stop(0.6, theme::alpha(Color::WHITE, 0.0))
+        .add_stop(1.0, theme::alpha(Color::WHITE, 0.0))
+        .into()
 }
