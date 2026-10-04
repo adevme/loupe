@@ -1,7 +1,10 @@
 use iced::Element;
 
 use loupe_engine::TrackId;
-use loupe_stock_ui::{Change, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock_ui::{
+    Change, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor,
+    SaturationEditor,
+};
 
 use crate::racks::Peek;
 use crate::{App, Message};

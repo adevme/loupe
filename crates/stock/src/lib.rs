@@ -12,14 +12,14 @@ mod smooth;
 
 pub use biquad::{Coefficients, Shape};
 pub use compressor::{Compressor, Curve, STYLES};
-pub use delay::{echo_seconds, Delay, NOTES};
 pub use deesser::Deesser;
+pub use delay::{echo_seconds, Delay, NOTES};
 pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
-pub use scope::Scope;
 pub use limiter::Limiter;
 pub use reverb::{decay_seconds, Reverb};
 pub use saturation::{curve_of as saturation_curve, Saturation, STYLES as SATURATION_STYLES};
+pub use scope::Scope;
 
 pub type Frame = [f32; 2];
 
