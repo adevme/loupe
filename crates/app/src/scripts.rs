@@ -150,7 +150,14 @@ impl App {
                 return Task::none();
             }
         };
-        let view = View { playhead: self.playhead, playing: self.playing, selected: self.selection.iter().copied().collect() };
+        let mut plugins: Vec<(String, PathBuf, usize)> = self.found.iter().map(|found| (found.name.clone(), found.path.clone(), found.index)).collect();
+        for (index, name) in loupe_stock::NAMES.iter().enumerate() {
+            if !plugins.iter().any(|(known, _, _)| known == name) {
+                plugins.push((name.to_string(), PathBuf::from(loupe_plugins::BUILT_IN), index));
+            }
+        }
+        let folder = self.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+        let view = View { playhead: self.playhead, playing: self.playing, selected: self.selection.iter().copied().collect(), plugins, folder };
         let mut finished = None;
         self.transact(None, |project| {
             let ran = scripting::run(&source, &name, project, &view);
@@ -178,12 +185,27 @@ impl App {
         if let Some(at) = wishes.seek {
             self.seek(at);
         }
+        for (track, slot, knob, value) in wishes.tweaks {
+            self.engine.tweak(track, slot, knob, value);
+        }
+        if let Some(range) = wishes.looped {
+            self.set_loop(range);
+            self.cache.clear();
+        }
         let printed = wishes.printed.iter().rev().take(MOST_PRINTED).rev().cloned().collect::<Vec<_>>().join("  ·  ");
         self.notice = (!printed.is_empty()).then_some(printed);
-        match wishes.play {
+        let playing = match wishes.play {
             Some(play) if play != self.playing => self.handle(Message::TogglePlay),
             _ => Task::none(),
-        }
+        };
+        let exporting = match wishes.export {
+            Some(stems) => {
+                self.export_split = stems;
+                self.start_export()
+            }
+            None => Task::none(),
+        };
+        Task::batch([playing, exporting])
     }
 }
 
@@ -222,7 +244,7 @@ mod tests {
     fn the_examples_run_cleanly() {
         let mut project = loupe_engine::Project::new(48_000);
         project.apply(loupe_engine::Command::AddTrack { name: "Drums".into() }).unwrap();
-        let view = View { playhead: 0, playing: false, selected: Vec::new() };
+        let view = View { playhead: 0, playing: false, selected: Vec::new(), plugins: Vec::new(), folder: None };
         for (name, body) in EXAMPLES {
             scripting::run(body, name, &mut project, &view).unwrap_or_else(|why| panic!("{name}: {why}"));
         }

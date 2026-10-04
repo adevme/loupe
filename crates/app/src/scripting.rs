@@ -1,14 +1,16 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use loupe_engine::{ClipId, Command, CommandError, Frames, Note, Outcome, Project, TrackId};
+use std::path::PathBuf;
+
+use loupe_engine::{ClipId, Command, CommandError, Frames, Fx, Instrument, Note, Outcome, Point, Project, Shape, Source, Target, TrackId};
 use mlua::{Lua, LuaOptions, StdLib, Table, Value, Variadic};
 
 const LONGEST_RUN: Duration = Duration::from_secs(5);
 const CHECK_EVERY: u32 = 10_000;
 const HIGHEST_KEY: i64 = 127;
 
-pub const FUNCTIONS: [(&str, &str); 47] = [
+pub const FUNCTIONS: [(&str, &str); 57] = [
     ("print(...)", "Show text in Loupe's status line"),
     ("bpm()", "The tempo in beats per minute"),
     ("set_bpm(bpm)", "Change the tempo"),
@@ -56,12 +58,24 @@ pub const FUNCTIONS: [(&str, &str); 47] = [
     ("selected_clips()", "The selected clip ids"),
     ("select_clips(clips)", "Select these clips"),
     ("clear_selection()", "Select nothing"),
+    ("track_plugins(track)", "The names of a track's plugins, slot 1 first"),
+    ("add_plugin(track, name)", "Add a plugin by name, for example \"Loupe EQ\", and return its slot"),
+    ("set_plugin_knob(track, slot, knob, value)", "Turn a knob on one of Loupe's own plugins; knob is a number from 1 or a name like \"threshold\""),
+    ("add_send(from, to, db)", "Send a track to another, for example a reverb bus"),
+    ("set_track_folder(track, folder)", "Put a track inside a folder track, or nil to take it out"),
+    ("add_automation_point(track, what, seconds, value)", "Draw automation: what is \"volume\" in dB or \"pan\" from -1 to 1"),
+    ("set_loop(start, finish)", "Loop between two times in seconds, or set_loop() to clear it"),
+    ("import_audio(file, track, seconds)", "Place an audio file on a track and return the clip; paths can be relative to the song's folder"),
+    ("set_instrument(track, name)", "Use \"synth\" or \"drums\" on a track"),
+    ("export(stems)", "Export the song like File > Export once the script ends; pass true to also write stems"),
 ];
 
 pub struct View {
     pub playhead: Frames,
     pub playing: bool,
     pub selected: Vec<ClipId>,
+    pub plugins: Vec<(String, PathBuf, usize)>,
+    pub folder: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -70,6 +84,9 @@ pub struct Wishes {
     pub seek: Option<Frames>,
     pub select: Option<Vec<ClipId>>,
     pub printed: Vec<String>,
+    pub tweaks: Vec<(TrackId, usize, usize, f32)>,
+    pub looped: Option<Option<(Frames, Frames)>>,
+    pub export: Option<bool>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -370,6 +387,116 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Resu
             host.borrow_mut().wishes.select = Some(Vec::new());
             Ok(())
         });
+        def!("track_plugins", |lua, track: u64| {
+            let h = host.borrow();
+            lua.create_sequence_from(h.track(track)?.fx.iter().map(|fx| fx.name.clone()))
+        });
+        def!("add_plugin", |_, (track, name): (u64, String)| {
+            let mut h = host.borrow_mut();
+            h.track(track)?;
+            let wanted = name.to_lowercase();
+            let plugins = &h.view.plugins;
+            let found = plugins
+                .iter()
+                .find(|(known, _, _)| known.to_lowercase() == wanted)
+                .or_else(|| plugins.iter().find(|(known, _, _)| known.to_lowercase().contains(&wanted)))
+                .cloned()
+                .ok_or_else(|| fail(format!("no plugin called {name} was found")))?;
+            let (name, path, index) = found;
+            h.apply(Command::AddFx { track: TrackId(track), fx: Fx { path, index, name, bypassed: false, state: Vec::new() } })?;
+            Ok(h.track(track)?.fx.len())
+        });
+        def!("set_plugin_knob", |_, (track, slot, knob, value): (u64, usize, Value, f32)| {
+            let mut h = host.borrow_mut();
+            let fx = h.track(track)?.fx.get(slot.wrapping_sub(1)).cloned().ok_or_else(|| fail(format!("track {track} has no plugin in slot {slot}")))?;
+            if !loupe_plugins::rack::is_built_in(&fx.path) {
+                return Err(fail(format!("{} is not one of Loupe's own plugins, so scripts cannot turn its knobs yet", fx.name)));
+            }
+            let mut effect = loupe_stock::make(&fx.name).ok_or_else(|| fail(format!("Loupe has no plugin called {}", fx.name)))?;
+            let params = effect.params();
+            let index = match &knob {
+                Value::Integer(number) => (*number as usize).wrapping_sub(1),
+                Value::Number(number) => (*number as usize).wrapping_sub(1),
+                Value::String(text) => {
+                    let text = text.to_str()?.to_lowercase();
+                    params.iter().position(|param| param.id == text || param.name.to_lowercase() == text).unwrap_or(usize::MAX)
+                }
+                _ => usize::MAX,
+            };
+            let param = params.get(index).ok_or_else(|| fail(format!("{} has no knob {}", fx.name, knob.to_string().unwrap_or_default())))?;
+            let mut values: Vec<f32> = if fx.state.len() == params.len() * 4 {
+                fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect()
+            } else {
+                (0..params.len()).map(|i| effect.value(i)).collect()
+            };
+            let value = param.clamp(value);
+            values[index] = value;
+            effect.set(index, value);
+            let state = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            h.apply(Command::SetFxState { track: TrackId(track), slot: slot - 1, state })?;
+            h.wishes.tweaks.push((TrackId(track), slot - 1, index, value));
+            Ok(value)
+        });
+        def!("add_send", |_, (from, to, db): (u64, u64, Option<f64>)| {
+            let mut h = host.borrow_mut();
+            h.apply(Command::AddSend { from: TrackId(from), to: TrackId(to) })?;
+            h.apply(Command::SetSendGain { from: TrackId(from), to: TrackId(to), gain: gain_of(db.unwrap_or(0.0)) }).map(|_| ())
+        });
+        def!("set_track_folder", |_, (track, folder): (u64, Option<u64>)| {
+            host.borrow_mut().apply(Command::SetTrackParent { track: TrackId(track), parent: folder.map(TrackId) }).map(|_| ())
+        });
+        def!("add_automation_point", |_, (track, what, seconds, value): (u64, String, f64, f32)| {
+            let mut h = host.borrow_mut();
+            h.track(track)?;
+            let (target, value) = match what.to_lowercase().as_str() {
+                "volume" => (Target::TrackGain(TrackId(track)), gain_of(value as f64).clamp(0.0, 2.0)),
+                "pan" => (Target::TrackPan(TrackId(track)), value.clamp(-1.0, 1.0)),
+                _ => return Err(fail(format!("{what} cannot be automated from scripts yet; use \"volume\" or \"pan\""))),
+            };
+            if h.project.envelope(target).is_none() {
+                h.apply(Command::AddEnvelope { target })?;
+                h.apply(Command::ShowEnvelopeLane { target, open: true })?;
+            }
+            let at = h.frames(seconds);
+            h.apply(Command::PutPoint { target, point: Point { at, value, shape: Shape::Linear } }).map(|_| ())
+        });
+        def!("set_loop", |_, (start, finish): (Option<f64>, Option<f64>)| {
+            let mut h = host.borrow_mut();
+            h.wishes.looped = Some(match (start, finish) {
+                (Some(start), Some(finish)) if finish > start => Some((h.frames(start), h.frames(finish))),
+                (None, None) => None,
+                _ => return Err(fail("set_loop needs a start before the finish, or nothing to clear the loop")),
+            });
+            Ok(())
+        });
+        def!("import_audio", |_, (file, track, seconds): (String, u64, Option<f64>)| {
+            let mut h = host.borrow_mut();
+            h.track(track)?;
+            let mut path = PathBuf::from(&file);
+            if path.is_relative() {
+                if let Some(folder) = &h.view.folder {
+                    path = folder.join(path);
+                }
+            }
+            let source = std::sync::Arc::new(Source::load(&path, h.project.rate).map_err(|why| fail(format!("could not read {file}: {why}")))?);
+            let start = h.frames(seconds.unwrap_or(0.0));
+            match h.apply(Command::AddClip { track: TrackId(track), source, start })? {
+                Outcome::Clip(id) => Ok(id.0),
+                _ => Err(fail("the clip was not placed")),
+            }
+        });
+        def!("set_instrument", |_, (track, name): (u64, String)| {
+            let instrument = match name.to_lowercase().as_str() {
+                "synth" => Instrument::default(),
+                "drums" => Instrument::Drums,
+                _ => return Err(fail(format!("{name} is not an instrument; use \"synth\" or \"drums\""))),
+            };
+            host.borrow_mut().apply(Command::SetInstrument { track: TrackId(track), instrument }).map(|_| ())
+        });
+        def!("export", |_, stems: Option<bool>| {
+            host.borrow_mut().wishes.export = Some(stems.unwrap_or(false));
+            Ok(())
+        });
         globals.set("loupe", api)?;
         lua.load(source).set_name(format!("={name}")).exec()
     });
@@ -404,7 +531,13 @@ mod tests {
     }
 
     fn view() -> View {
-        View { playhead: 48_000, playing: false, selected: Vec::new() }
+        View {
+            playhead: 48_000,
+            playing: false,
+            selected: Vec::new(),
+            plugins: loupe_stock::NAMES.iter().enumerate().map(|(index, name)| (name.to_string(), PathBuf::from(loupe_plugins::BUILT_IN), index)).collect(),
+            folder: None,
+        }
     }
 
     fn ran(source: &str, project: &mut Project) -> Result<Ran, String> {
@@ -484,6 +617,97 @@ mod tests {
         let stuck = ran("while true do end", &mut project).unwrap_err();
         assert!(stuck.contains("more than 5 seconds"), "{stuck}");
         assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[test]
+    fn plugins_can_be_added_and_their_knobs_turned() {
+        let mut project = song();
+        let done = ran(
+            r#"
+            local track = loupe.tracks()[1]
+            local slot = loupe.add_plugin(track, "loupe compressor")
+            local set = loupe.set_plugin_knob(track, slot, "threshold", -30)
+            local clamped = loupe.set_plugin_knob(track, slot, 2, 500)
+            print(slot, loupe.track_plugins(track)[1], set, clamped)
+            "#,
+            &mut project,
+        )
+        .unwrap();
+        assert_eq!(done.wishes.printed, vec!["1 Loupe Compressor -30 20".to_string()]);
+        let fx = &project.tracks[0].fx[0];
+        let values: Vec<f32> = fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect();
+        assert_eq!((values[0], values[1]), (-30.0, 20.0));
+        assert_eq!(done.wishes.tweaks, vec![(project.tracks[0].id, 0, 0, -30.0), (project.tracks[0].id, 0, 1, 20.0)]);
+        assert!(ran("loupe.add_plugin(loupe.tracks()[1], 'Fog machine')", &mut project).unwrap_err().contains("no plugin called"));
+        assert!(ran("loupe.set_plugin_knob(loupe.tracks()[1], 1, 'colour', 1)", &mut project).unwrap_err().contains("has no knob"));
+    }
+
+    #[test]
+    fn routing_automation_and_instruments_from_a_script() {
+        let mut project = song();
+        let done = ran(
+            r#"
+            local drums = loupe.tracks()[1]
+            local verb = loupe.add_track("Verb")
+            local bus = loupe.add_track("Bus")
+            loupe.add_send(drums, verb, -12)
+            loupe.set_track_folder(drums, bus)
+            loupe.add_automation_point(drums, "volume", 2, -6)
+            loupe.add_automation_point(drums, "pan", 4, -2)
+            loupe.set_instrument(verb, "drums")
+            loupe.set_loop(1, 3)
+            loupe.export(true)
+            "#,
+            &mut project,
+        )
+        .unwrap();
+        let drums = &project.tracks.iter().find(|t| t.name == "Drums").unwrap();
+        assert_eq!(drums.sends.len(), 1);
+        assert!((db_of(drums.sends[0].gain) + 12.0).abs() < 1e-3);
+        assert!(drums.parent.is_some());
+        let volume = project.envelope(Target::TrackGain(drums.id)).unwrap();
+        assert!(volume.points.iter().any(|p| p.at == 96_000 && (db_of(p.value) + 6.0).abs() < 1e-3));
+        let pan = project.envelope(Target::TrackPan(drums.id)).unwrap();
+        assert!(pan.points.iter().any(|p| p.at == 192_000 && p.value == -1.0));
+        assert!(project.tracks.iter().any(|t| t.instrument == Instrument::Drums));
+        assert_eq!(done.wishes.looped, Some(Some((48_000, 144_000))));
+        assert_eq!(done.wishes.export, Some(true));
+        assert!(ran("loupe.set_loop(3, 1)", &mut project).is_err());
+        assert_eq!(ran("loupe.set_loop()", &mut project).unwrap().wishes.looped, Some(None));
+        assert!(ran("loupe.add_automation_point(loupe.tracks()[1], 'reverb', 1, 1)", &mut project).is_err());
+    }
+
+    #[test]
+    fn audio_files_can_be_placed_from_a_script() {
+        let folder = std::env::temp_dir().join(format!("loupe-script-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let frames = 4_800u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + frames * 4).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 4).to_le_bytes());
+        for i in 0..frames {
+            let value = ((i as f32 * 0.05).sin() * 8_000.0) as i16;
+            wav.extend_from_slice(&value.to_le_bytes());
+            wav.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(folder.join("hit.wav"), wav).unwrap();
+        let mut project = song();
+        let mut here = view();
+        here.folder = Some(folder.clone());
+        let done = run("local clip = loupe.import_audio('hit.wav', loupe.tracks()[1], 1.5) print(loupe.clip_start(clip), loupe.clip_length(clip))", "test", &mut project, &here).unwrap();
+        assert_eq!(done.wishes.printed, vec!["1.5 0.1".to_string()]);
+        assert!(run("loupe.import_audio('missing.wav', loupe.tracks()[1], 0)", "test", &mut project, &here).unwrap_err().contains("could not read"));
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
