@@ -272,7 +272,6 @@ pub enum Message {
     ToggleTypingKeys,
     Both(Box<Message>, Box<Message>),
     OpenVersions,
-    UseVersion(String),
     CheckForUpdates,
     UpdateChecked(Result<Option<versions::Update>, String>),
     InstallUpdate,
@@ -1882,7 +1881,6 @@ impl App {
             Message::Recover => return self.recover(),
             Message::SkipRecovery => self.skip_recovery(),
             Message::OpenVersions => self.overlay = Overlay::About,
-            Message::UseVersion(version) => return self.switch_version(version),
             Message::CheckForUpdates => return self.check_for_updates(),
             Message::UpdateChecked(result) => {
                 let quiet = std::mem::replace(&mut self.quiet_check, false);

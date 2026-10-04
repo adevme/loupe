@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CURRENT_FILE: &str = "current";
 const VERSIONS_FOLDER: &str = "versions";
 
 fn program_name() -> &'static str {
@@ -33,20 +32,39 @@ fn installed(home: &Path) -> Vec<String> {
     found
 }
 
-pub fn chosen(home: &Path) -> Option<PathBuf> {
-    let wanted = std::fs::read_to_string(home.join(CURRENT_FILE)).ok().map(|text| text.trim().to_string());
-    let versions = installed(home);
-    let version = wanted.filter(|wanted| versions.contains(wanted)).or_else(|| versions.last().cloned())?;
+pub fn newest(home: &Path) -> Option<PathBuf> {
+    let version = installed(home).pop()?;
     Some(home.join(VERSIONS_FOLDER).join(version).join(program_name()))
+}
+
+/// There is one Loupe. An update replaces the one before it, so everything in the
+/// versions folder that is not the newest goes, and so does anything left there that
+/// is not a version of Loupe at all.
+pub fn clear_the_rest(home: &Path, keep: &Path) -> Vec<PathBuf> {
+    let keeping = keep.parent();
+    let mut gone = Vec::new();
+    for entry in std::fs::read_dir(home.join(VERSIONS_FOLDER)).into_iter().flatten().filter_map(|entry| entry.ok()) {
+        let folder = entry.path();
+        if !folder.is_dir() || Some(folder.as_path()) == keeping {
+            continue;
+        }
+        // A folder still in use cannot be removed, and that is fine: the next start
+        // finds it again when whatever was holding it has gone.
+        if std::fs::remove_dir_all(&folder).is_ok() {
+            gone.push(folder);
+        }
+    }
+    gone
 }
 
 fn main() {
     let Some(home) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) else {
         return;
     };
-    let Some(program) = chosen(&home) else {
+    let Some(program) = newest(&home) else {
         return;
     };
+    clear_the_rest(&home, &program);
     // Wait for Loupe rather than spawning and leaving. Whoever started the launcher
     // may hold it in a job that is killed when it returns, which would take Loupe with it.
     let _ = Command::new(program).args(std::env::args_os().skip(1)).status();
@@ -56,7 +74,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn home(name: &str, versions: &[&str], current: Option<&str>) -> PathBuf {
+    fn home(name: &str, versions: &[&str]) -> PathBuf {
         let home = std::env::temp_dir().join(format!("loupe-launcher-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         for version in versions {
@@ -65,9 +83,6 @@ mod tests {
             std::fs::write(folder.join(program_name()), "").unwrap();
         }
         std::fs::create_dir_all(home.join(VERSIONS_FOLDER).join("1.9.0-broken")).unwrap();
-        if let Some(current) = current {
-            std::fs::write(home.join(CURRENT_FILE), format!("{current}\n")).unwrap();
-        }
         home
     }
 
@@ -80,16 +95,29 @@ mod tests {
     }
 
     #[test]
-    fn the_chosen_version_starts_and_a_missing_choice_falls_back_to_the_newest() {
-        let place = home("chosen", &["1.0.0", "1.2.0", "1.10.0"], Some("1.2.0"));
-        assert_eq!(chosen(&place), Some(place.join("versions").join("1.2.0").join(program_name())));
-        std::fs::write(place.join(CURRENT_FILE), "3.0.0").unwrap();
-        assert_eq!(chosen(&place), Some(place.join("versions").join("1.10.0").join(program_name())));
-        std::fs::remove_file(place.join(CURRENT_FILE)).unwrap();
-        assert_eq!(chosen(&place), Some(place.join("versions").join("1.10.0").join(program_name())));
-        let empty = home("empty", &[], None);
-        assert_eq!(chosen(&empty), None);
+    fn the_newest_version_is_the_one_that_starts() {
+        let place = home("newest", &["1.0.0", "1.2.0", "1.10.0"]);
+        assert_eq!(newest(&place), Some(place.join("versions").join("1.10.0").join(program_name())));
+        let empty = home("empty", &[]);
+        assert_eq!(newest(&empty), None);
         std::fs::remove_dir_all(place).unwrap();
         std::fs::remove_dir_all(empty).unwrap();
+    }
+
+    #[test]
+    fn starting_leaves_the_newest_version_and_nothing_else() {
+        let place = home("one", &["1.0.0", "1.2.0", "1.10.0"]);
+        let keep = newest(&place).unwrap();
+        let gone = clear_the_rest(&place, &keep);
+        assert_eq!(gone.len(), 3, "the two older versions and the folder that was never a version");
+        let left: Vec<String> = std::fs::read_dir(place.join(VERSIONS_FOLDER))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left, vec!["1.10.0".to_string()]);
+        assert!(keep.is_file(), "the version that stays is untouched");
+        assert!(clear_the_rest(&place, &keep).is_empty(), "there is nothing left to clear");
+        std::fs::remove_dir_all(place).unwrap();
     }
 }

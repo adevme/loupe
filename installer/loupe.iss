@@ -59,7 +59,8 @@ Type: files; Name: "{app}\current"
 
 [Code]
 const
-  Kept = 3;
+  // One Loupe. An update replaces the one before it.
+  Kept = 1;
 
 function RelaunchAfterUpdate: Boolean;
 begin
@@ -152,7 +153,9 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
   begin
-    SaveStringToFile(ExpandConstant('{app}\current'), '{#AppVersion}', False);
+    // Older Loupes let you pick a version; this file is what they picked. Nothing
+    // reads it now, so it goes with the versions it used to point at.
+    DeleteFile(ExpandConstant('{app}\current'));
     KeepNewest;
   end;
 end;

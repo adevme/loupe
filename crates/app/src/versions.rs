@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use iced::futures::channel::oneshot;
 use iced::widget::{button, column, row, text, Space};
@@ -7,9 +7,6 @@ use iced::{Alignment, Element, Length, Task};
 use crate::{App, Message};
 
 pub const THIS: &str = env!("CARGO_PKG_VERSION");
-const CURRENT_FILE: &str = "current";
-const VERSIONS_FOLDER: &str = "versions";
-const LAUNCHER: &str = if cfg!(windows) { "Loupe.exe" } else { "Loupe" };
 const RELEASES: &str = "https://api.github.com/repos/adevme/loupe/releases/latest";
 const SETUP_PREFIX: &str = "loupe-setup-";
 
@@ -25,27 +22,6 @@ pub fn newer_than_this(version: &str) -> bool {
         (None, _) => false,
         (_, None) => false,
     }
-}
-
-pub fn install_home() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let version_folder = exe.parent()?;
-    let versions = version_folder.parent()?;
-    (versions.file_name()? == VERSIONS_FOLDER).then(|| versions.parent().map(Path::to_path_buf)).flatten()
-}
-
-pub fn installed(home: &Path) -> Vec<String> {
-    let program = if cfg!(windows) { "loupe.exe" } else { "loupe" };
-    let mut found: Vec<String> = std::fs::read_dir(home.join(VERSIONS_FOLDER))
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().join(program).is_file())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| parts(name).is_some())
-        .collect();
-    found.sort_by_key(|name| std::cmp::Reverse(parts(name)));
-    found
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -229,42 +205,12 @@ impl App {
         }
     }
 
-    pub(crate) fn switch_version(&mut self, version: String) -> Task<Message> {
-        let Some(home) = install_home() else {
-            return Task::none();
-        };
-        if let Err(why) = std::fs::write(home.join(CURRENT_FILE), &version) {
-            self.problem = Some(format!("Could not switch to Loupe {version}: {why}"));
-            return Task::none();
-        }
-        match std::process::Command::new(home.join(LAUNCHER)).spawn() {
-            Ok(_) => iced::exit(),
-            Err(why) => {
-                self.problem = Some(format!("Switched to Loupe {version}, but could not restart: {why}. Open Loupe again."));
-                Task::none()
-            }
-        }
-    }
-
-    /// The updates half of the About window: what is installed, what is available,
-    /// and the button that goes looking. It has no window of its own because on its
-    /// own it would say nothing About does not already say.
+    /// The updates half of the About window: what is available and the button that
+    /// goes looking. It has no window of its own because on its own it would say
+    /// nothing About does not already say.
     pub(crate) fn updates_block(&self) -> Element<'_, Message> {
         let palette = self.palette;
-        let mut body = column![].spacing(12);
-        // Only worth listing when there is more than one to pick between.
-        let list = install_home().map(|home| installed(&home)).unwrap_or_default();
-        if list.len() > 1 {
-            body = body.push(text("Installed versions. Your songs and settings stay the same whichever you use.").size(12).color(palette.text_dim));
-            for version in list {
-                let using = version == THIS;
-                let choose = button(text(if using { "In use" } else { "Use this version" }).size(12.5).font(palette.medium))
-                    .padding([5, 12])
-                    .style(move |_, status| palette.outlined(status))
-                    .on_press_maybe((!using).then(|| Message::UseVersion(version.clone())));
-                body = body.push(row![text(format!("Loupe {version}")).size(13).width(Length::Fill), choose].align_y(Alignment::Center));
-            }
-        }
+        let body = column![].spacing(12);
         let status: Element<'_, Message> = match &self.update_state {
             UpdateState::Idle => text("").size(12).into(),
             UpdateState::Checking => text("Checking for updates...").size(12).color(palette.text_dim).into(),
@@ -335,11 +281,6 @@ mod tests {
         let setup = Setup { name: "loupe-setup-1.2.0.exe".into(), url: "https://x/loupe-setup-1.2.0.exe".into(), sha256: Some("abcd12".into()) };
         assert_eq!(found[1], setup);
         assert_eq!(found[0].sha256, None);
-    }
-
-    #[test]
-    fn only_a_copy_inside_a_versions_folder_counts_as_installed() {
-        assert!(install_home().is_none());
     }
 }
 
