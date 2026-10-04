@@ -177,9 +177,8 @@ impl App {
         let dim = |words: &'static str| text(words).size(12).color(palette.text_dim);
         column![
             text("Anonymous usage info").size(13).font(palette.medium),
-            dim("When on, Loupe tells the Loupe server when it is installed, opened, updated, closed or after a crash, so we know how many people use it and on which systems."),
-            dim("Each message holds only a random install ID made on this computer, the action, the Loupe version and whether this is Windows, Mac or Linux, plus the length of the session when Loupe closes and the old and new version after an update."),
-            dim("Never your name, files, songs, plugins or settings. The server keeps the day, not the time, and no IP address."),
+            dim("When on, Loupe sends a random install ID, the action (installed, opened, updated, closed or crashed), the Loupe version and whether this is Windows, Mac or Linux, plus the session length when it closes and the version numbers for an update or crash."),
+            dim("Never your name, files, songs, plugins or settings."),
             checkbox("Send anonymous usage info", self.usage.on).on_toggle(Message::UsageToggled).text_size(13),
         ]
         .spacing(8)
