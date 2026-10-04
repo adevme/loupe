@@ -189,13 +189,6 @@ impl App {
 
     pub(crate) fn mixer(&self) -> Element<'_, Message> {
         let palette = self.palette;
-        if self.project.tracks.is_empty() {
-            return container(text("Each track gets a fader here.").size(12.5).color(palette.text_dim))
-                .center_x(Length::Fill)
-                .center_y(self.mixer_height)
-                .style(move |_| palette.bar())
-                .into();
-        }
         let strips = self.project.tracks.iter().enumerate().map(|(index, track)| {
             let id = track.id;
             let level = self.track_levels.get(index).copied().unwrap_or(0.0);
@@ -271,10 +264,19 @@ impl App {
         let grab_bar = mouse_area(container(Space::new(Length::Fill, GRAB_BAR)).style(move |_| palette.bar()))
             .on_press(Message::MixerGrabbed)
             .interaction(mouse::Interaction::ResizingVertically);
-        let faders = container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
-            .padding([4, 10])
-            .width(Length::Fill)
-            .height(self.mixer_height - GRAB_BAR);
+        // Master is always there, even before the first track, so the mixer is never empty.
+        let faders: Element<'_, Message> = if self.project.tracks.is_empty() {
+            container(text("Each track gets a fader here.").size(12.5).color(palette.text_dim))
+                .center_x(Length::Fill)
+                .center_y(self.mixer_height - GRAB_BAR)
+                .into()
+        } else {
+            container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
+                .padding([4, 10])
+                .width(Length::Fill)
+                .height(self.mixer_height - GRAB_BAR)
+                .into()
+        };
         let master = container(self.master_strip())
             .padding([4, 10])
             .height(self.mixer_height - GRAB_BAR);
