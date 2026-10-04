@@ -181,6 +181,8 @@ const NEUTRAL: Palette = Palette {
     headers: Side::Left,
     all_audio: Side::Right,
     top_bar: [
+        BarItem::Master,
+        BarItem::Space,
         BarItem::ToStart,
         BarItem::Play,
         BarItem::Record,
@@ -188,8 +190,6 @@ const NEUTRAL: Palette = Palette {
         BarItem::Position,
         BarItem::Clock,
         BarItem::Tempo,
-        BarItem::Space,
-        BarItem::Master,
         BarItem::Gap,
         BarItem::History,
         BarItem::Mixer,
