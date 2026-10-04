@@ -198,8 +198,13 @@ impl App {
         let Some(fell) = self.fell.first() else {
             return Space::new(0, 0).into();
         };
+        let quit = fell.why.contains("crashed");
+        let said = match quit {
+            true => format!("{} crashed, and Loupe carried on without it.", fell.name),
+            false => format!("{} stopped answering, and Loupe carried on without it.", fell.name),
+        };
         let body = column![
-            text(format!("{} crashed, and Loupe carried on without it.", fell.name)).size(14),
+            text(said).size(14),
             text("Turn it off in this song? Its settings are kept, and you can turn it back on from its plugin list.")
                 .size(12.5)
                 .color(palette.text_dim),
@@ -217,7 +222,7 @@ impl App {
             .spacing(10),
         ]
         .spacing(12);
-        let sheet = self.window("A plugin crashed".to_string(), body.into(), 520.0);
+        let sheet = self.window(if quit { "A plugin crashed" } else { "A plugin stopped answering" }.to_string(), body.into(), 520.0);
         opaque(iced::widget::center(opaque(sheet)).padding(16).style(move |_| palette.backdrop()))
     }
 }

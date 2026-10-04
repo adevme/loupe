@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use crate::wire::{next_line, read_block, write_block, Ask, Reply};
 
 const PATIENCE: Duration = Duration::from_secs(20);
-const BLOCK_PATIENCE: Duration = Duration::from_millis(500);
+const BLOCK_PATIENCE: Duration = Duration::from_millis(2_000);
+const CATCHING_UP: Duration = Duration::from_millis(1);
+const LATE_BLOCKS_ALLOWED: u16 = 200;
 const FIRST_BLOCK_PATIENCE: Duration = Duration::from_secs(10);
 
 enum Want {
@@ -30,6 +32,8 @@ pub struct Sandbox {
     reader: Option<JoinHandle<()>>,
     lost: bool,
     ran: bool,
+    late: u16,
+    owed: bool,
 }
 
 impl Sandbox {
@@ -61,7 +65,7 @@ impl Sandbox {
         let (wants, asked) = channel::<Want>();
         let (sends, gets) = channel::<Got>();
         let reader = std::thread::spawn(move || read_for(out, asked, sends));
-        Ok(Self { child, writing, wants: Some(wants), gets, reader: Some(reader), lost: false, ran: false })
+        Ok(Self { child, writing, wants: Some(wants), gets, reader: Some(reader), lost: false, ran: false, late: 0, owed: false })
     }
 
     pub fn ask(&mut self, ask: Ask) -> Result<Reply, String> {
@@ -100,6 +104,9 @@ impl Sandbox {
         if self.lost {
             return Err("the plugin host is gone".into());
         }
+        if self.owed {
+            return self.catch_up();
+        }
         if ask.write(&mut self.writing).is_err() || write_block(&mut self.writing, audio).is_err() {
             return Err(self.give_up("the plugin host stopped listening"));
         }
@@ -113,15 +120,41 @@ impl Sandbox {
         self.ran = true;
         match self.gets.recv_timeout(waiting) {
             Ok(Got::Block(came)) => {
+                self.late = 0;
                 audio.clear();
                 audio.extend_from_slice(&came);
                 Ok(())
             }
             Ok(Got::Line(line)) => Err(self.give_up(&format!("the plugin host said {}", line.trim()))),
             Ok(Got::Gone) => Err(self.give_up("the plugin crashed")),
-            Err(RecvTimeoutError::Timeout) => Err(self.give_up("the plugin took too long on a block")),
+            Err(RecvTimeoutError::Timeout) => {
+                self.owed = true;
+                self.fell_behind()
+            }
             Err(RecvTimeoutError::Disconnected) => Err(self.give_up("the plugin crashed")),
         }
+    }
+
+    fn catch_up(&mut self) -> Result<(), String> {
+        match self.gets.recv_timeout(CATCHING_UP) {
+            Ok(Got::Block(_)) => {
+                self.owed = false;
+                self.late = 0;
+                Ok(())
+            }
+            Ok(Got::Line(line)) => Err(self.give_up(&format!("the plugin host said {}", line.trim()))),
+            Ok(Got::Gone) => Err(self.give_up("the plugin crashed")),
+            Err(RecvTimeoutError::Timeout) => self.fell_behind(),
+            Err(RecvTimeoutError::Disconnected) => Err(self.give_up("the plugin crashed")),
+        }
+    }
+
+    fn fell_behind(&mut self) -> Result<(), String> {
+        self.late = self.late.saturating_add(1);
+        if self.late >= LATE_BLOCKS_ALLOWED {
+            return Err(self.give_up("the plugin stopped answering, so the song carried on without it"));
+        }
+        Ok(())
     }
 
     pub fn gone(&self) -> bool {

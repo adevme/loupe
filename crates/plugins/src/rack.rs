@@ -801,4 +801,20 @@ mod fallen_tests {
         assert!(rack.slots()[0].trouble.is_some());
         assert!(!rack.has_fallen());
     }
+
+    #[test]
+    fn a_plugin_that_is_late_with_one_block_keeps_playing() {
+        let script = host(
+            "slow",
+            "read ask\nprintf 'loaded\\t2\\t2\\t0\\n'\nwhile read ask; do\n  head -c 512 > /dev/null\n  sleep 3\n  head -c 512 > /dev/null\n  printf 'block\\n'\ndone\n",
+        );
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
+        assert!(rack.reconcile(&[wanted("Dawdler")]).is_empty());
+        play_until_settled(&mut rack);
+        let mut audio = vec![[0.5; 2]; 64];
+        rack.process(&mut audio);
+        assert_eq!(audio, vec![[0.5; 2]; 64], "a late block passes the song through untouched");
+        assert!(rack.slots()[0].trouble.is_none(), "being late is not being dead");
+        assert!(!rack.has_fallen(), "a late plugin is not reported as a crash");
+    }
 }

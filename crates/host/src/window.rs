@@ -91,6 +91,7 @@ mod real {
         fn SetWindowPos(window: Handle, after: Handle, x: i32, y: i32, width: i32, height: i32, how: u32) -> i32;
         fn SetForegroundWindow(window: Handle) -> i32;
         fn SetFocus(window: Handle) -> Handle;
+        fn GetDpiForWindow(window: Handle) -> u32;
         fn FillRect(dc: Handle, rect: *const [i32; 4], brush: Handle) -> i32;
         fn DrawTextW(dc: Handle, text: *const u16, length: i32, rect: *mut [i32; 4], how: u32) -> i32;
         fn InvalidateRect(window: Handle, rect: *const [i32; 4], erase: i32) -> i32;
@@ -110,6 +111,8 @@ mod real {
         fn SetTextColor(dc: Handle, colour: u32) -> u32;
         fn SetBkMode(dc: Handle, mode: i32) -> i32;
         fn CreatePen(style: i32, width: i32, colour: u32) -> Handle;
+        #[allow(clippy::too_many_arguments)]
+        fn CreateFontW(height: i32, width: i32, escape: i32, orient: i32, weight: i32, italic: u32, under: u32, strike: u32, set: u32, precision: u32, clip: u32, quality: u32, pitch: u32, face: *const u16) -> Handle;
         fn SelectObject(dc: Handle, object: Handle) -> Handle;
         fn MoveToEx(dc: Handle, x: i32, y: i32, was: *mut [i32; 2]) -> i32;
         fn LineTo(dc: Handle, x: i32, y: i32) -> i32;
@@ -154,7 +157,7 @@ mod real {
     const CAPTION_COLOUR: u32 = 35;
     const CAPTION_TEXT_COLOUR: u32 = 36;
     const TRANSPARENT_BACKGROUND: i32 = 1;
-    const CORNER: i32 = 6;
+    const CORNER: i32 = 7;
     const CHEVRON: i32 = 4;
     const POPUP: u32 = 0x8000_0000;
     const TOP_MOST_WINDOW: u32 = 0x0000_0008;
@@ -162,6 +165,9 @@ mod real {
     const KILL_FOCUS: u32 = 0x0008;
     const NO_CLIP_ELLIPSIS: u32 = 0x0004_0000;
     const NAME_HINT: &str = "Name this preset";
+    const NAME_WIDEST: i32 = 300;
+    const TEXT_HEIGHT: i32 = 15;
+    const FONT_FACE: &str = "Segoe UI";
     const PAINT_MESSAGE: u32 = 0x000F;
     const LEFT_DOWN: u32 = 0x0201;
     const LEFT_UP: u32 = 0x0202;
@@ -169,17 +175,17 @@ mod real {
     const MOUSE_LEFT: u32 = 0x02A3;
     const CHARACTER: u32 = 0x0102;
     const LEAVE_WANTED: u32 = 0x0000_0002;
-    const TEXT_INSET: i32 = 7;
+    const TEXT_INSET: i32 = 10;
     const CENTRED: u32 = 0x0001;
     const LEFT_ALIGNED: u32 = 0x0000;
     const MIDDLE: u32 = 0x0004;
     const ONE_LINE: u32 = 0x0020;
-    const BAR: i32 = 34;
-    const GAP: i32 = 6;
-    const LIST_WIDTH: i32 = 220;
-    const SAVE_WIDTH: i32 = 90;
-    const DELETE_WIDTH: i32 = 70;
-    const ROW: i32 = 22;
+    const BAR: i32 = 44;
+    const GAP: i32 = 9;
+    const LIST_WIDTH: i32 = 260;
+    const SAVE_WIDTH: i32 = 86;
+    const DELETE_WIDTH: i32 = 86;
+    const ROW: i32 = 30;
     const PICK: &str = "Presets";
 
     #[derive(Clone, Copy)]
@@ -235,17 +241,52 @@ mod real {
         static FOLLOWING: RefCell<Option<Box<dyn Fn(i32, i32)>>> = const { RefCell::new(None) };
     }
 
+    thread_local! {
+        static SCALED: Cell<f32> = const { Cell::new(1.0) };
+        static LETTERING: Cell<Handle> = const { Cell::new(std::ptr::null_mut()) };
+    }
+
+    unsafe fn measure_screen(window: Handle) {
+        let dots = GetDpiForWindow(window);
+        let scale = if dots == 0 { 1.0 } else { dots as f32 / 96.0 };
+        SCALED.with(|held| held.set(scale));
+        let was = LETTERING.with(Cell::get);
+        if !was.is_null() {
+            DeleteObject(was);
+        }
+        let face = wide(FONT_FACE);
+        let made = CreateFontW(-grown(TEXT_HEIGHT), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, face.as_ptr());
+        LETTERING.with(|held| held.set(made));
+    }
+
+    fn grown(size: i32) -> i32 {
+        let scale = SCALED.with(Cell::get);
+        ((size as f32 * scale).round() as i32).max(1)
+    }
+
+    unsafe fn lettering() -> Handle {
+        let found = LETTERING.with(Cell::get);
+        if found.is_null() {
+            GetStockObject(GUI_FONT)
+        } else {
+            found
+        }
+    }
+
     fn spots(width: i32) -> [(Spot, [i32; 4]); 4] {
-        let top = (BAR - ROW) / 2;
-        let bottom = top + ROW;
-        let save_at = width - GAP - SAVE_WIDTH - GAP - DELETE_WIDTH;
-        let delete_at = width - GAP - DELETE_WIDTH;
-        let name_at = GAP * 2 + LIST_WIDTH;
+        let (bar, row, gap) = (grown(BAR), grown(ROW), grown(GAP));
+        let (picker, save_wide, delete_wide) = (grown(LIST_WIDTH), grown(SAVE_WIDTH), grown(DELETE_WIDTH));
+        let top = (bar - row) / 2;
+        let bottom = top + row;
+        let save_at = width - gap - save_wide - gap - delete_wide;
+        let delete_at = width - gap - delete_wide;
+        let name_at = gap * 2 + picker;
+        let name_to = (save_at - gap).min(name_at + grown(NAME_WIDEST)).max(name_at + grown(60));
         [
-            (Spot::Picker, [GAP, top, GAP + LIST_WIDTH, bottom]),
-            (Spot::Name, [name_at, top, (save_at - GAP).max(name_at + 40), bottom]),
-            (Spot::Save, [save_at, top, save_at + SAVE_WIDTH, bottom]),
-            (Spot::Delete, [delete_at, top, delete_at + DELETE_WIDTH, bottom]),
+            (Spot::Picker, [gap, top, gap + picker, bottom]),
+            (Spot::Name, [name_at, top, name_to, bottom]),
+            (Spot::Save, [save_at, top, save_at + save_wide, bottom]),
+            (Spot::Delete, [delete_at, top, delete_at + delete_wide, bottom]),
         ]
     }
 
@@ -260,8 +301,8 @@ mod real {
         let wide_text = wide(text);
         let mut area = rect;
         if !centred {
-            area[0] += TEXT_INSET;
-            area[2] -= TEXT_INSET;
+            area[0] += grown(TEXT_INSET);
+            area[2] -= grown(TEXT_INSET);
         }
         SetTextColor(dc, colour);
         SetBkMode(dc, TRANSPARENT_BACKGROUND);
@@ -274,7 +315,8 @@ mod real {
         let pen = CreatePen(0, 1, edge);
         let was_brush = SelectObject(dc, brush);
         let was_pen = SelectObject(dc, pen);
-        RoundRect(dc, rect[0], rect[1], rect[2], rect[3], CORNER, CORNER);
+        let round = grown(CORNER);
+        RoundRect(dc, rect[0], rect[1], rect[2], rect[3], round, round);
         SelectObject(dc, was_pen);
         SelectObject(dc, was_brush);
         DeleteObject(pen);
@@ -285,19 +327,20 @@ mod real {
         let pen = CreatePen(0, 1, colour);
         let was_pen = SelectObject(dc, pen);
         let middle = (rect[1] + rect[3]) / 2;
-        let right = rect[2] - TEXT_INSET - 2;
-        for step in 0..CHEVRON {
-            MoveToEx(dc, right - CHEVRON * 2 + step, middle - CHEVRON / 2 + step, std::ptr::null_mut());
-            LineTo(dc, right - CHEVRON * 2 + step + 1, middle - CHEVRON / 2 + step + 1);
-            MoveToEx(dc, right - step, middle - CHEVRON / 2 + step, std::ptr::null_mut());
-            LineTo(dc, right - step - 1, middle - CHEVRON / 2 + step + 1);
+        let right = rect[2] - grown(TEXT_INSET);
+        let tick = grown(CHEVRON);
+        for step in 0..tick {
+            MoveToEx(dc, right - tick * 2 + step, middle - tick / 2 + step, std::ptr::null_mut());
+            LineTo(dc, right - tick * 2 + step + 1, middle - tick / 2 + step + 1);
+            MoveToEx(dc, right - step, middle - tick / 2 + step, std::ptr::null_mut());
+            LineTo(dc, right - step - 1, middle - tick / 2 + step + 1);
         }
         SelectObject(dc, was_pen);
         DeleteObject(pen);
     }
 
     const LIST_CLASS: &str = "LoupePresetList";
-    const ROW_TALL: i32 = 26;
+    const ROW_TALL: i32 = 32;
     const LONGEST_NAME: usize = 48;
 
     unsafe extern "system" fn list_proc(window: Handle, what: u32, first: usize, second: isize) -> isize {
@@ -309,11 +352,11 @@ mod real {
                 let mut whole = [0i32; 4];
                 GetClientRect(window, &mut whole);
                 FillRect(dc, &whole, shade.panel);
-                let was_font = SelectObject(dc, GetStockObject(GUI_FONT));
+                let was_font = SelectObject(dc, lettering());
                 STRIP.with(|kept| {
                     let bar = kept.borrow();
                     for (at, name) in bar.names.iter().enumerate() {
-                        let row = [1, 1 + at as i32 * ROW_TALL, whole[2] - 1, 1 + (at as i32 + 1) * ROW_TALL];
+                        let row = [1, 1 + at as i32 * grown(ROW_TALL), whole[2] - 1, 1 + (at as i32 + 1) * grown(ROW_TALL)];
                         if bar.lit == Some(at) {
                             FillRect(dc, &row, shade.accent_brush);
                         }
@@ -321,7 +364,7 @@ mod real {
                         text_out(dc, name, row, colour, false);
                     }
                     if bar.names.is_empty() {
-                        text_out(dc, "No presets saved yet", [1, 1, whole[2] - 1, 1 + ROW_TALL], shade.dim, false);
+                        text_out(dc, "No presets saved yet", [1, 1, whole[2] - 1, 1 + grown(ROW_TALL)], shade.dim, false);
                     }
                 });
                 SelectObject(dc, was_font);
@@ -330,7 +373,7 @@ mod real {
             }
             MOUSE_MOVED => {
                 let y = ((second >> 16) & 0xFFFF) as i16 as i32;
-                let over = usize::try_from((y - 1) / ROW_TALL).ok();
+                let over = usize::try_from((y - 1) / grown(ROW_TALL)).ok();
                 let changed = STRIP.with(|kept| {
                     let mut bar = kept.borrow_mut();
                     let lit = over.filter(|at| *at < bar.names.len());
@@ -345,7 +388,7 @@ mod real {
             }
             LEFT_UP => {
                 let y = ((second >> 16) & 0xFFFF) as i16 as i32;
-                let picked = usize::try_from((y - 1) / ROW_TALL).ok();
+                let picked = usize::try_from((y - 1) / grown(ROW_TALL)).ok();
                 let asked = STRIP.with(|kept| {
                     let mut bar = kept.borrow_mut();
                     let at = picked.filter(|at| *at < bar.names.len())?;
@@ -391,7 +434,7 @@ mod real {
         let mut inside = [0i32; 4];
         GetClientRect(parent, &mut inside);
         let edge = (where_it_is[2] - where_it_is[0] - inside[2]) / 2;
-        let top = where_it_is[3] - (inside[3] - BAR) - edge - (BAR - ROW) / 2 - ROW;
+        let top = where_it_is[3] - (inside[3] - grown(BAR)) - edge - (grown(BAR) - grown(ROW)) / 2 - grown(ROW);
         let name = wide(LIST_CLASS);
         let instance = GetModuleHandleW(std::ptr::null());
         register(&name, list_proc, instance);
@@ -400,10 +443,10 @@ mod real {
             name.as_ptr(),
             std::ptr::null(),
             POPUP | CLIP_CHILDREN,
-            where_it_is[0] + edge + GAP,
-            top + ROW,
-            LIST_WIDTH,
-            rows * ROW_TALL + 2,
+            where_it_is[0] + edge + grown(GAP),
+            top + grown(ROW),
+            grown(LIST_WIDTH),
+            rows * grown(ROW_TALL) + 2,
             parent,
             std::ptr::null_mut(),
             instance,
@@ -423,11 +466,11 @@ mod real {
         let mut whole = [0i32; 4];
         GetClientRect(window, &mut whole);
         let width = whole[2];
-        let bar_area = [0, 0, width, BAR];
+        let bar_area = [0, 0, width, grown(BAR)];
         FillRect(dc, &bar_area, shade.panel);
-        let line = [0, BAR - 1, width, BAR];
+        let line = [0, grown(BAR) - 1, width, grown(BAR)];
         FillRect(dc, &line, shade.edge_brush);
-        let was_font = SelectObject(dc, GetStockObject(GUI_FONT));
+        let was_font = SelectObject(dc, lettering());
         STRIP.with(|held| {
             let bar = held.borrow();
             for (spot, rect) in spots(width) {
@@ -506,10 +549,10 @@ mod real {
                 if let Some(parts) = PARTS.with(Cell::get) {
                     let width = (second & 0xFFFF) as i32;
                     let height = ((second >> 16) & 0xFFFF) as i32;
-                    MoveWindow(parts.area, 0, BAR, width, (height - BAR).max(0), 1);
+                    MoveWindow(parts.area, 0, grown(BAR), width, (height - grown(BAR)).max(0), 1);
                     FOLLOWING.with(|held| {
                         if let Some(follow) = held.borrow().as_ref() {
-                            follow(width, (height - BAR).max(0));
+                            follow(width, (height - grown(BAR)).max(0));
                         }
                     });
                 }
@@ -722,7 +765,7 @@ mod real {
                 let instance = GetModuleHandleW(std::ptr::null());
                 register(&name, handle, instance);
                 register(&area_name, plain, instance);
-                let mut rect = [0, 0, width, height + BAR];
+                let mut rect = [0, 0, width, height + grown(BAR)];
                 AdjustWindowRectEx(&mut rect, frame, 0, 0);
                 let title = wide(title);
                 let handle = CreateWindowExW(
@@ -742,8 +785,12 @@ mod real {
                 if handle.is_null() {
                     return Err("Loupe could not open a window for the plugin".into());
                 }
+                measure_screen(handle);
+                let mut fitted = [0, 0, width, height + grown(BAR)];
+                AdjustWindowRectEx(&mut fitted, frame, 0, 0);
+                SetWindowPos(handle, TOP, 0, 0, fitted[2] - fitted[0], fitted[3] - fitted[1], KEEP_PLACE);
                 wear_dark(handle);
-                let area = CreateWindowExW(0, area_name.as_ptr(), std::ptr::null(), CHILD | VISIBLE | CLIP_CHILDREN, 0, BAR, width, height, handle, std::ptr::null_mut(), instance, std::ptr::null_mut());
+                let area = CreateWindowExW(0, area_name.as_ptr(), std::ptr::null(), CHILD | VISIBLE | CLIP_CHILDREN, 0, grown(BAR), width, height, handle, std::ptr::null_mut(), instance, std::ptr::null_mut());
                 if area.is_null() {
                     DestroyWindow(handle);
                     return Err("Loupe could not open a window for the plugin".into());
@@ -774,7 +821,7 @@ mod real {
 
         pub fn fit_around(&self, width: i32, height: i32) {
             unsafe {
-                let mut rect = [0, 0, width, height + BAR];
+                let mut rect = [0, 0, width, height + grown(BAR)];
                 let style = GetWindowLongW(self.handle, GWL_STYLE) as u32;
                 AdjustWindowRectEx(&mut rect, style, 0, 0);
                 let mut where_it_is = [0i32; 4];
