@@ -120,7 +120,7 @@ impl App {
     fn file_menu(&self) -> Element<'_, Message> {
         let has_song = !self.project.tracks.is_empty();
         let mut items = vec![self.item("Open project…", "Ctrl+O", Some(Message::OpenProject))];
-        items.push(self.item("Open with plugins off…", "Shift", Some(Message::OpenWithPluginsOff)));
+        items.push(self.item("Open with plugins off…", "Hold Shift", Some(Message::OpenWithPluginsOff)));
         if self.plugins_are_off() {
             items.push(self.item("Turn plugins back on", "", Some(Message::PluginsBackOn)));
         }
