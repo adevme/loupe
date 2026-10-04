@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::sandbox::Sandbox;
 use crate::wire::{Ask, Reply};
 
+type Opened = Result<(Sandbox, usize), (String, bool)>;
+
 pub struct Slot {
     pub path: PathBuf,
     pub index: usize,
@@ -15,7 +17,7 @@ pub struct Slot {
     built: Option<Box<dyn loupe_stock::Effect>>,
     /// A plugin being opened on a thread of its own. Starting a host and loading a
     /// plugin takes seconds, and the song cannot stop while it happens.
-    coming: Option<std::sync::mpsc::Receiver<Result<(Sandbox, usize), String>>>,
+    coming: Option<std::sync::mpsc::Receiver<Opened>>,
     /// The window was asked for before the plugin had finished opening, so it opens
     /// as soon as there is something to open.
     wanted_open: bool,
@@ -46,16 +48,41 @@ pub struct Wanted {
     pub record: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fallen {
+    pub slot: usize,
+    pub name: String,
+    pub why: String,
+}
+
 pub struct Rack {
     host: PathBuf,
     rate: u32,
     block: usize,
     slots: Vec<Slot>,
+    fallen: Vec<Fallen>,
 }
 
 impl Rack {
     pub fn new(host: PathBuf, rate: u32, block: usize) -> Self {
-        Self { host, rate, block, slots: Vec::new() }
+        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new() }
+    }
+
+    pub fn has_fallen(&self) -> bool {
+        !self.fallen.is_empty()
+    }
+
+    pub fn take_fallen(&mut self) -> Vec<Fallen> {
+        std::mem::take(&mut self.fallen)
+    }
+
+    fn lost_host(&mut self, slot: usize, why: String, fell: bool) {
+        let Some(found) = self.slots.get_mut(slot) else { return };
+        found.host = None;
+        found.trouble = Some(why.clone());
+        if fell {
+            self.fallen.push(Fallen { slot, name: found.name.clone(), why });
+        }
     }
 
     pub fn slots(&self) -> &[Slot] {
@@ -133,9 +160,10 @@ impl Rack {
             return;
         }
         let Some(host) = found.host.as_mut() else { return };
-        if let Err(why) = host.ask(Ask::Turn { knob, value }) {
-            found.trouble = Some(why);
-            found.host = None;
+        let asked = host.ask(Ask::Turn { knob, value });
+        let fell = host.gone();
+        if let Err(why) = asked {
+            self.lost_host(slot, why, fell);
         }
     }
 
@@ -147,9 +175,10 @@ impl Rack {
             return;
         }
         let Some(host) = found.host.as_mut() else { return };
-        if let Err(why) = host.ask(Ask::Turn { knob, value }) {
-            found.trouble = Some(why);
-            found.host = None;
+        let asked = host.ask(Ask::Turn { knob, value });
+        let fell = host.gone();
+        if let Err(why) = asked {
+            self.lost_host(slot, why, fell);
         }
     }
 
@@ -242,13 +271,14 @@ impl Rack {
             return Err("the built in plugins do not have their own window yet".into());
         }
         let host = found.host.as_mut().ok_or("that plugin is not loaded")?;
-        match host.ask(ask) {
+        let asked = host.ask(ask);
+        let fell = host.gone();
+        match asked {
             Ok(Reply::Fine) => Ok(()),
             Ok(Reply::Trouble(why)) => Err(why),
             Ok(other) => Err(format!("the plugin host answered out of turn: {other:?}")),
             Err(why) => {
-                found.trouble = Some(why.clone());
-                found.host = None;
+                self.lost_host(slot, why.clone(), fell);
                 Err(why)
             }
         }
@@ -260,17 +290,17 @@ impl Rack {
             return Some(take_knobs(made.as_ref()));
         }
         let host = found.host.as_mut()?;
-        match host.ask(Ask::Save) {
+        let asked = host.ask(Ask::Save);
+        let fell = host.gone();
+        match asked {
             Ok(Reply::State(state)) => Some(state),
             Ok(Reply::Trouble(why)) => {
-                found.trouble = Some(why);
-                found.host = None;
+                self.lost_host(slot, why, false);
                 None
             }
             Ok(_) => None,
             Err(why) => {
-                found.trouble = Some(why);
-                found.host = None;
+                self.lost_host(slot, why, fell);
                 None
             }
         }
@@ -303,7 +333,7 @@ impl Rack {
 
     fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool) {
         self.take_arrivals();
-        for slot in self.slots.iter_mut() {
+        for (at, slot) in self.slots.iter_mut().enumerate() {
             if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
                 continue;
             }
@@ -313,8 +343,12 @@ impl Rack {
             }
             let Some(host) = slot.host.as_mut() else { continue };
             if let Err(why) = host.run_with(audio, side) {
-                slot.trouble = Some(why);
+                let fell = host.gone();
+                slot.trouble = Some(why.clone());
                 slot.host = None;
+                if fell {
+                    self.fallen.push(Fallen { slot: at, name: slot.name.clone(), why });
+                }
             }
         }
     }
@@ -384,7 +418,7 @@ impl Rack {
     /// Picks up any plugin that has finished opening on its thread. Takes nothing
     /// that blocks, so it is safe where the audio is made.
     fn take_arrivals(&mut self) {
-        for slot in self.slots.iter_mut() {
+        for (at, slot) in self.slots.iter_mut().enumerate() {
             let Some(waiting) = slot.coming.as_ref() else { continue };
             match waiting.try_recv() {
                 Ok(Ok((host, latency))) => {
@@ -392,9 +426,12 @@ impl Rack {
                     slot.host = Some(host);
                     slot.coming = None;
                 }
-                Ok(Err(why)) => {
-                    slot.trouble = Some(why);
+                Ok(Err((why, fell))) => {
+                    slot.trouble = Some(why.clone());
                     slot.coming = None;
+                    if fell {
+                        self.fallen.push(Fallen { slot: at, name: slot.name.clone(), why });
+                    }
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     slot.trouble = Some("the plugin host stopped before it loaded".into());
@@ -499,6 +536,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(rack.slots().iter().all(|slot| slot.trouble.is_some()));
+        assert!(!rack.has_fallen(), "a host that never started has not crashed");
         let shorter = vec![Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: false, state: Vec::new(), record: false }];
         rack.reconcile(&shorter);
         let names: Vec<_> = rack.slots().iter().map(|slot| slot.name.clone()).collect();
@@ -621,14 +659,92 @@ fn open_on_a_thread(
     rate: u32,
     block: usize,
     state: &[u8],
-) -> Result<(Sandbox, usize), String> {
-    let mut sandbox = Sandbox::start(host)?;
+) -> Opened {
+    let mut sandbox = Sandbox::start(host).map_err(|why| (why, false))?;
     let ask = Ask::Load { path: path.to_string_lossy().to_string(), index, rate, block };
-    let latency = match sandbox.ask(ask)? {
-        Reply::Loaded { latency, .. } => latency,
-        Reply::Trouble(why) => return Err(why),
-        other => return Err(format!("the plugin host answered out of turn: {other:?}")),
-    };
-    settle(&mut sandbox, state)?;
+    let loaded = sandbox.ask(ask).and_then(|reply| match reply {
+        Reply::Loaded { latency, .. } => Ok(latency),
+        Reply::Trouble(why) => Err(why),
+        other => Err(format!("the plugin host answered out of turn: {other:?}")),
+    });
+    let latency = loaded.map_err(|why| (why, sandbox.gone()))?;
+    settle(&mut sandbox, state).map_err(|why| (why, sandbox.gone()))?;
     Ok((sandbox, latency))
+}
+
+#[cfg(all(test, unix))]
+mod fallen_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Host(PathBuf);
+
+    impl Drop for Host {
+        fn drop(&mut self) {
+            if let Some(folder) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+
+    fn host(name: &str, script: &str) -> Host {
+        let folder = std::env::temp_dir().join(format!("loupe-fallen-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("loupe-host");
+        std::fs::write(&file, format!("#!/bin/sh\n{script}")).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Host(file)
+    }
+
+    fn wanted(name: &str) -> Wanted {
+        Wanted { path: PathBuf::from("crashy.vst3"), index: 0, name: name.into(), bypassed: false, state: Vec::new(), record: false }
+    }
+
+    fn play_until_settled(rack: &mut Rack) {
+        let mut audio = vec![[0.25; 2]; 64];
+        let gave_up = std::time::Instant::now();
+        while rack.slots().iter().any(|slot| slot.on_its_way()) {
+            assert!(gave_up.elapsed() < std::time::Duration::from_secs(10), "the plugin never answered");
+            rack.process(&mut audio);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        rack.process(&mut audio);
+    }
+
+    #[test]
+    fn a_host_that_dies_while_playing_is_named_once() {
+        let script = host("playing", "read ask\nprintf 'loaded\\t2\\t2\\t0\\n'\nread ask\nexit 3\n");
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
+        assert!(rack.reconcile(&[wanted("Crashy Synth")]).is_empty());
+        play_until_settled(&mut rack);
+        let mut audio = vec![[0.5; 2]; 64];
+        rack.process(&mut audio);
+        assert_eq!(audio, vec![[0.5; 2]; 64], "the song carries on without the plugin");
+        assert!(rack.slots()[0].trouble.is_some());
+        let fallen = rack.take_fallen();
+        assert_eq!(fallen.len(), 1);
+        assert_eq!(fallen[0].slot, 0);
+        assert_eq!(fallen[0].name, "Crashy Synth");
+        assert!(!rack.has_fallen());
+    }
+
+    #[test]
+    fn a_host_that_dies_while_loading_is_named() {
+        let script = host("loading", "read ask\nexit 3\n");
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
+        rack.reconcile(&[wanted("Crashy Reverb")]);
+        play_until_settled(&mut rack);
+        let fallen = rack.take_fallen();
+        assert_eq!(fallen.iter().map(|fell| fell.name.as_str()).collect::<Vec<_>>(), vec!["Crashy Reverb"]);
+    }
+
+    #[test]
+    fn a_plugin_that_refuses_to_load_has_not_crashed() {
+        let script = host("refusing", "read ask\nprintf 'trouble\\tno such plugin\\n'\nread ask\n");
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
+        rack.reconcile(&[wanted("Missing")]);
+        play_until_settled(&mut rack);
+        assert!(rack.slots()[0].trouble.is_some());
+        assert!(!rack.has_fallen());
+    }
 }

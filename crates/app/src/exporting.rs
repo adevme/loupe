@@ -196,7 +196,7 @@ impl App {
                 progress.store((fraction * crate::EXPORT_PROGRESS_STEPS as f32) as u32, Ordering::Relaxed);
             };
             let mut racks: Box<dyn loupe_engine::Chains> =
-                Box::new(crate::racks::Racks::new(rate, 512, crate::racks::Peeks::default(), plugins_off));
+                Box::new(crate::racks::Racks::new(rate, 512, crate::racks::Peeks::default(), plugins_off, crate::racks::Falls::default()));
             racks.follow(&project);
             let went = loupe_engine::export_through(&project, &plan, &report, Some(racks.as_mut()));
             drop(racks);

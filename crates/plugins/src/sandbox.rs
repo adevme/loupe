@@ -115,6 +115,10 @@ impl Sandbox {
         }
     }
 
+    pub fn gone(&self) -> bool {
+        self.lost
+    }
+
     pub fn alive(&mut self) -> bool {
         !self.lost && matches!(self.child.try_wait(), Ok(None))
     }

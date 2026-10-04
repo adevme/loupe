@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use loupe_engine::{Chains, ClipId, Project, TrackId};
-use loupe_plugins::rack::{Rack, Wanted};
+use loupe_plugins::rack::{Fallen, Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_stock::{Findings, History, Readings, Scopes};
 
@@ -27,6 +27,20 @@ pub enum Spot {
 pub type Peeks = Arc<Mutex<HashMap<Spot, Peek>>>;
 pub type PluginsOff = Arc<AtomicBool>;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fell {
+    pub spot: Spot,
+    pub name: String,
+    pub why: String,
+}
+
+pub type Falls = Arc<Mutex<Vec<Fell>>>;
+
+fn tell_falls(falls: &Falls, fallen: Vec<Fallen>, spot: impl Fn(usize) -> Spot) {
+    let Ok(mut held) = falls.lock() else { return };
+    held.extend(fallen.into_iter().map(|fell| Fell { spot: spot(fell.slot), name: fell.name, why: fell.why }));
+}
+
 pub struct Racks {
     host: PathBuf,
     rate: u32,
@@ -38,10 +52,11 @@ pub struct Racks {
     scratch: Vec<[f32; 2]>,
     peeks: Peeks,
     off: PluginsOff,
+    falls: Falls,
 }
 
 impl Racks {
-    pub fn new(rate: u32, block: usize, peeks: Peeks, off: PluginsOff) -> Self {
+    pub fn new(rate: u32, block: usize, peeks: Peeks, off: PluginsOff, falls: Falls) -> Self {
         Self {
             host: host_beside_us(),
             rate,
@@ -52,6 +67,7 @@ impl Racks {
             scratch: Vec::new(),
             peeks,
             off,
+            falls,
         }
     }
 
@@ -134,7 +150,24 @@ impl Racks {
             }
         }
         self.publish();
+        self.gather();
         troubles
+    }
+
+    fn gather(&mut self) {
+        for (id, rack) in self.chains.iter_mut() {
+            if rack.has_fallen() {
+                tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Track(*id, slot));
+            }
+        }
+        for (id, rack) in self.clips.iter_mut() {
+            if rack.has_fallen() {
+                tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Clip(*id, slot));
+            }
+        }
+        if let Some(rack) = self.master.as_mut().filter(|rack| rack.has_fallen()) {
+            tell_falls(&self.falls, rack.take_fallen(), Spot::Master);
+        }
     }
 
     fn publish(&mut self) {
@@ -232,6 +265,9 @@ impl Chains for Racks {
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
         rack.process(&mut self.scratch);
+        if rack.has_fallen() {
+            tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Clip(clip, slot));
+        }
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }
@@ -277,6 +313,7 @@ impl Chains for Racks {
 
     fn nudge(&mut self) {
         self.publish();
+        self.gather();
     }
 
     fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {
@@ -311,6 +348,9 @@ impl Chains for Racks {
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
         rack.process_with(&mut self.scratch, side);
+        if rack.has_fallen() {
+            tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
+        }
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }
@@ -323,6 +363,9 @@ impl Chains for Racks {
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
         rack.process_takes(&mut self.scratch);
+        if rack.has_fallen() {
+            tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
+        }
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }
@@ -335,6 +378,9 @@ impl Chains for Racks {
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
         rack.process(&mut self.scratch);
+        if rack.has_fallen() {
+            tell_falls(&self.falls, rack.take_fallen(), Spot::Master);
+        }
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }
@@ -363,7 +409,7 @@ mod tests {
     }
 
     fn racks(off: bool) -> Racks {
-        Racks::new(48_000, 512, Peeks::default(), Arc::new(AtomicBool::new(off)))
+        Racks::new(48_000, 512, Peeks::default(), Arc::new(AtomicBool::new(off)), Falls::default())
     }
 
     #[test]
