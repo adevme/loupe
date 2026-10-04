@@ -215,8 +215,10 @@ pub enum Message {
     SkipRecovery,
     NewNotesClip(TrackId),
     UseInstrument(TrackId, Instrument),
-    RollPlaced { clip: ClipId, notes: Vec<Note>, key: u8 },
-    RollEdit { clip: ClipId, notes: Vec<Note> },
+    RollPlaced { clip: ClipId, notes: Vec<Note>, key: u8, chosen: Vec<Note> },
+    RollEdit { clip: ClipId, notes: Vec<Note>, chosen: Option<Vec<Note>> },
+    RollChoose(Vec<Note>),
+    RollAction(piano_roll::RollAction),
     RollSound { key: u8, on: bool },
     RollSlide { from: Option<u8>, to: u8 },
     RollDone { remember_beats: Option<f64> },
@@ -461,6 +463,8 @@ struct App {
     marked: Option<backup::Place>,
     roll_view: piano_roll::RollView,
     roll_beats: f64,
+    roll_chosen: Vec<Note>,
+    roll_copied: Vec<Note>,
     typing: HashSet<u8>,
     midi_keys: Option<loupe_engine::MidiKeys>,
     keys_aimed_at: Option<TrackId>,
@@ -568,6 +572,8 @@ impl App {
             marked: None,
             roll_view: piano_roll::RollView::default(),
             roll_beats: 1.0,
+            roll_chosen: Vec::new(),
+            roll_copied: Vec::new(),
             typing: HashSet::new(),
             midi_keys: None,
             keys_aimed_at: None,
@@ -658,6 +664,18 @@ impl App {
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
+        let message = match (&self.overlay, message) {
+            (Overlay::Roll(_), Message::Delete) => Message::RollAction(piano_roll::RollAction::Delete),
+            (Overlay::Roll(_), Message::CopyClips) => Message::RollAction(piano_roll::RollAction::Copy),
+            (Overlay::Roll(_), Message::CutClips) => Message::RollAction(piano_roll::RollAction::Cut),
+            (Overlay::Roll(_), Message::PasteClips) => Message::RollAction(piano_roll::RollAction::Paste),
+            (Overlay::Roll(_), Message::DuplicateClips) => Message::RollAction(piano_roll::RollAction::Duplicate),
+            (Overlay::Roll(_), Message::SelectAll) => Message::RollAction(piano_roll::RollAction::SelectAll),
+            (Overlay::Roll(_), Message::CloseOverlay) if !self.roll_chosen.is_empty() => Message::RollAction(piano_roll::RollAction::Clear),
+            (_, message) => message,
+        };
+        let roll_open = matches!(self.overlay, Overlay::Roll(_));
+        let fine_in_the_roll = roll_open && matches!(message, Message::TogglePlay | Message::ToStart | Message::Undo | Message::Redo);
         let belongs_to_the_song = matches!(
             message,
             Message::TogglePlay
@@ -673,7 +691,7 @@ impl App {
                 | Message::Redo
                 | Message::Import
         );
-        if (self.overlay != Overlay::None || self.screen == Screen::Home) && belongs_to_the_song {
+        if (self.overlay != Overlay::None || self.screen == Screen::Home) && belongs_to_the_song && !fine_in_the_roll {
             return Task::none();
         }
         let would_break_the_take = matches!(
@@ -930,13 +948,19 @@ impl App {
                 self.overlay = Overlay::None;
                 self.edit(None, Command::SetInstrument { track, instrument });
             }
-            Message::RollPlaced { clip, notes, key } => {
+            Message::RollPlaced { clip, notes, key, chosen } => {
                 self.edit(Some(Run::Notes(clip)), Command::SetNotes { clip, notes });
+                self.roll_chosen = chosen;
                 self.sound(key, true);
             }
-            Message::RollEdit { clip, notes } => {
+            Message::RollEdit { clip, notes, chosen } => {
                 self.edit(Some(Run::Notes(clip)), Command::SetNotes { clip, notes });
+                if let Some(chosen) = chosen {
+                    self.roll_chosen = chosen;
+                }
             }
+            Message::RollChoose(chosen) => self.roll_chosen = chosen,
+            Message::RollAction(action) => self.roll_action(action),
             Message::RollSound { key, on } => self.sound(key, on),
             Message::RollSlide { from, to } => {
                 if let Some(from) = from {
@@ -2441,6 +2465,8 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::F6) => Some(Message::ToggleMixer),
         keyboard::Key::Named(Named::F7) => Some(Message::OpenMatrix),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
+        keyboard::Key::Named(Named::ArrowUp) => Some(Message::RollAction(piano_roll::RollAction::Transpose(if modifiers.shift() { 12 } else { 1 }))),
+        keyboard::Key::Named(Named::ArrowDown) => Some(Message::RollAction(piano_roll::RollAction::Transpose(if modifiers.shift() { -12 } else { -1 }))),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
@@ -2451,6 +2477,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
                 ("m", true, _) => Some(Message::ToggleMetronome),
+                ("q", true, _) => Some(Message::RollAction(piano_roll::RollAction::Quantize)),
                 ("c", true, _) => Some(Message::CopyClips),
                 ("x", true, _) => Some(Message::CutClips),
                 ("v", true, _) => Some(Message::PasteClips),
