@@ -9,6 +9,7 @@ pub const DEFAULT_AUTOSAVE_MINUTES: u32 = 2;
 pub const BACKUPS_KEPT: std::ops::RangeInclusive<u32> = 1..=100;
 pub const DEFAULT_BACKUPS_KEPT: u32 = 20;
 pub const COUNT_IN_BARS: [u32; 4] = [0, 1, 2, 4];
+pub const DEFAULT_PREROLL_BARS: u32 = 2;
 const LONGEST_NUMBER: usize = 3;
 
 pub struct Settings {
@@ -26,6 +27,8 @@ pub struct Settings {
     pub last_version: Option<String>,
     pub metronome: bool,
     pub count_in_bars: u32,
+    pub preroll_bars: u32,
+    pub punch: bool,
     pub hear_input: bool,
     pub snap: bool,
     pub midi_inputs: Option<Vec<String>>,
@@ -51,6 +54,8 @@ impl Settings {
             last_version: value_of("last_version").map(str::to_string),
             metronome: value_of("metronome") == Some("on"),
             count_in_bars: value_of("count_in").and_then(count_in_from).unwrap_or(0),
+            preroll_bars: value_of("preroll").and_then(count_in_from).unwrap_or(DEFAULT_PREROLL_BARS),
+            punch: value_of("punch") == Some("on"),
             hear_input: value_of("hear_input") != Some("off"),
             snap: value_of("snap") != Some("off"),
             // Empty means every MIDI input; a list means only those, kept tab separated.

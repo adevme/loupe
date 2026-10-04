@@ -18,6 +18,7 @@ pub struct Recording {
     counted_in: bool,
     looping: Option<(Frames, Frames)>,
     pub began: Option<i64>,
+    pub punch: Option<(Frames, Frames)>,
 }
 
 impl App {
@@ -32,6 +33,14 @@ impl App {
             self.notice = Some("Arm a track to record: the dot beside M.".into());
             return Task::none();
         }
+        let punch = match (self.punch, self.loop_range.filter(|(from, to)| to > from)) {
+            (false, _) => None,
+            (true, Some(range)) => Some(range),
+            (true, None) => {
+                self.notice = Some("Punch is on: mark the part to redo on the ruler first.".into());
+                return Task::none();
+            }
+        };
         if let Some(first) = tracks.first() {
             let Some(input) = &self.input else {
                 self.notice = Some("The recording input is not open. Check Settings > Recording.".into());
@@ -55,12 +64,17 @@ impl App {
         }
         self.problem = None;
         self.notice = None;
-        let looping = self.loop_range.filter(|(from, to)| to > from && (!self.playing || (*from..*to).contains(&self.playhead)));
+        let looping = self.loop_range.filter(|(from, to)| punch.is_none() && to > from && (!self.playing || (*from..*to).contains(&self.playhead)));
         self.engine.set_endless(looping.is_none());
-        let counted_in = !self.playing && self.count_in_bars > 0;
+        let counted_in = !self.playing && self.count_in_bars > 0 && punch.is_none();
         if !self.playing {
-            if let Some((from, _)) = self.loop_range {
-                self.seek(from);
+            match (punch, self.loop_range) {
+                (Some((from, _)), _) => {
+                    let preroll = bar_frames(self.project.bpm, self.project.rate) * self.preroll_bars as Frames;
+                    self.seek(from.saturating_sub(preroll));
+                }
+                (None, Some((from, _))) => self.seek(from),
+                (None, None) => {}
             }
             if counted_in {
                 self.engine.count_in(bar_frames(self.project.bpm, self.project.rate) * self.count_in_bars as Frames);
@@ -68,7 +82,7 @@ impl App {
             self.engine.play();
             self.playing = true;
         }
-        self.recording = Some(Recording { from: self.playhead, tracks, note_tracks, taped: Vec::new(), counted_in, looping, began: None });
+        self.recording = Some(Recording { from: self.playhead, tracks, note_tracks, taped: Vec::new(), counted_in, looping, began: None, punch });
         self.listen_if_armed();
         Task::none()
     }
@@ -124,6 +138,7 @@ impl App {
             .collect();
         let host = loupe_plugins::sandbox::host_beside_us();
         let keep_from = if recording.counted_in { recording.from as i64 } else { 0 };
+        let punch = recording.punch;
         let passes = recording.looping.and_then(|(from, to)| loop_takes(start, from, to, take.frames, rate));
         let pad = passes.as_ref().map_or(0, |passes| passes.pad);
         self.loading += 1;
@@ -150,11 +165,11 @@ impl App {
         });
         Task::perform(
             async move { loaded.await.unwrap_or_else(|_| Err("reading the take stopped unexpectedly".into())) },
-            move |result| Message::TakeReady { start, keep_from, passes: passes.clone(), warning: warning.clone(), result },
+            move |result| Message::TakeReady { start, keep_from, passes: passes.clone(), punch, warning: warning.clone(), result },
         )
     }
 
-    pub(crate) fn place_take(&mut self, start: i64, keep_from: i64, passes: Option<Passes>, result: Result<Vec<(TrackId, Arc<Source>)>, String>) {
+    pub(crate) fn place_take(&mut self, start: i64, keep_from: i64, passes: Option<Passes>, punch: Option<(Frames, Frames)>, result: Result<Vec<(TrackId, Arc<Source>)>, String>) {
         self.loading = self.loading.saturating_sub(1);
         let sources = match result {
             Ok(sources) => sources,
@@ -165,6 +180,10 @@ impl App {
         };
         if let Some(passes) = passes {
             self.place_passes(passes, sources);
+            return;
+        }
+        if let Some((from, to)) = punch {
+            self.place_punched(start, from, to, sources);
             return;
         }
         let cut = (keep_from.max(0) - start).max(0) as Frames;
@@ -266,6 +285,14 @@ mod tests {
     }
 
     #[test]
+    fn a_punched_take_keeps_only_the_marked_part() {
+        assert_eq!(punched_span(1_000, 10_000, 5_000, 7_000), Some((5_000, 4_000, 2_000)));
+        assert_eq!(punched_span(6_000, 10_000, 5_000, 7_000), Some((6_000, 0, 1_000)), "started late, kept from where it began");
+        assert_eq!(punched_span(1_000, 5_000, 5_000, 7_000), Some((5_000, 4_000, 1_000)), "stopped early, kept up to the stop");
+        assert_eq!(punched_span(1_000, 3_000, 5_000, 7_000), None);
+    }
+
+    #[test]
     fn each_time_round_the_loop_is_a_take_and_the_last_whole_one_plays() {
         let counted = loop_takes(1_000 - 400, 1_000, 2_000, 400 + 3_500, 100).unwrap();
         assert_eq!(counted.offsets, vec![400, 1_400, 2_400, 3_400]);
@@ -358,6 +385,46 @@ impl App {
         if !placed.is_empty() {
             self.choose(placed);
             self.notice = Some(format!("{count} takes. Click a lane to hear it, or use the comp tool (K) to pick the best parts."));
+        }
+    }
+}
+
+pub fn punched_span(start: i64, frames: Frames, from: Frames, to: Frames) -> Option<(Frames, Frames, Frames)> {
+    let recorded_end = start + frames as i64;
+    let begin = (from as i64).max(start);
+    let end = (to as i64).min(recorded_end);
+    (end > begin).then(|| (begin as Frames, (begin - start) as Frames, (end - begin) as Frames))
+}
+
+impl App {
+    fn place_punched(&mut self, start: i64, from: Frames, to: Frames, sources: Vec<(TrackId, Arc<Source>)>) {
+        let Some(frames) = sources.first().map(|(_, source)| source.frames.len() as Frames) else {
+            return;
+        };
+        let Some((begin, offset, len)) = punched_span(start, frames, from, to) else {
+            self.notice = Some("Nothing was recorded inside the punch range.".into());
+            return;
+        };
+        let fade = crate::takes::short_fade(self.project.rate);
+        let mut placed = Vec::new();
+        self.transact(None, |project| {
+            for (track, source) in sources {
+                if project.track(track).is_none() {
+                    continue;
+                }
+                crate::takes::clear_between(project, track, begin, begin + len, fade)?;
+                let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source, start: begin })? else {
+                    return Err(CommandError::NoSuchClip);
+                };
+                project.apply(Command::TrimClip { clip, offset, len })?;
+                project.apply(Command::SetClipFade { clip, edge: loupe_engine::Edge::In, fade })?;
+                project.apply(Command::SetClipFade { clip, edge: loupe_engine::Edge::Out, fade })?;
+                placed.push(clip);
+            }
+            Ok(Outcome::Done)
+        });
+        if !placed.is_empty() {
+            self.choose(placed);
         }
     }
 }

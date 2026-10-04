@@ -55,6 +55,39 @@ pub fn comp(project: &mut Project, track: TrackId, take: usize, from: Frames, to
     Ok(chosen)
 }
 
+pub fn clear_between(project: &mut Project, track: TrackId, from: Frames, to: Frames, fade: Fade) -> Result<(), CommandError> {
+    let touched: Vec<ClipId> = project
+        .track(track)
+        .ok_or(CommandError::NoSuchTrack)?
+        .clips
+        .iter()
+        .filter(|clip| !clip.is_notes() && clip.start < to && clip.end() > from)
+        .map(|clip| clip.id)
+        .collect();
+    for clip in touched {
+        let Some(found) = project.clip(clip) else { continue };
+        let (start, end) = (found.start, found.end());
+        let mut middle = clip;
+        if start < from {
+            if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip, at: from })? {
+                project.apply(Command::SetClipFade { clip, edge: Edge::Out, fade })?;
+                middle = right;
+            }
+        }
+        if end > to {
+            if let Outcome::Clip(right) = project.apply(Command::SplitClip { clip: middle, at: to })? {
+                project.apply(Command::SetClipFade { clip: right, edge: Edge::In, fade })?;
+            }
+        }
+        project.apply(Command::DeleteClip(middle))?;
+    }
+    Ok(())
+}
+
+pub fn short_fade(rate: u32) -> Fade {
+    Fade { len: (COMP_FADE_SECONDS * rate as f64) as Frames, curve: 0.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -62,6 +95,22 @@ mod tests {
     use loupe_engine::Source;
 
     use super::*;
+
+    #[test]
+    fn punching_in_keeps_what_is_either_side_and_clears_the_middle() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("Verse", vec![[0.5, 0.5]; 10_000]));
+        project.apply(Command::AddClip { track, source, start: 1_000 }).unwrap();
+        clear_between(&mut project, track, 4_000, 6_000, Fade { len: 4, curve: 0.0 }).unwrap();
+        let mut spans: Vec<(Frames, Frames, Frames)> = project.track(track).unwrap().clips.iter().map(|clip| (clip.start, clip.end(), clip.offset)).collect();
+        spans.sort();
+        assert_eq!(spans, vec![(1_000, 4_000, 0), (6_000, 11_000, 5_000)]);
+        let clips = &project.track(track).unwrap().clips;
+        assert!(clips.iter().all(|clip| clip.fade_in.len == 4 || clip.fade_out.len == 4));
+        clear_between(&mut project, track, 0, 20_000, Fade::NONE).unwrap();
+        assert!(project.track(track).unwrap().clips.is_empty(), "a range over everything clears everything");
+    }
 
     #[test]
     fn a_swipe_cuts_the_clip_and_plays_that_take_between_the_cuts() {

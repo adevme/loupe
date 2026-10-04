@@ -97,6 +97,7 @@ pub struct Timeline<'a> {
     pub selection: &'a HashSet<ClipId>,
     pub playhead: Frames,
     pub loop_range: LoopRange,
+    pub punch: bool,
     pub tool: Tool,
     pub snap: bool,
     pub armed: &'a HashSet<TrackId>,
@@ -1151,6 +1152,7 @@ impl canvas::Program<Message> for Timeline<'_> {
 
         let mut overlay = Frame::new(renderer, bounds.size());
         if let Some((from, to)) = self.loop_range {
+            let marked = if self.punch { p.danger } else { p.accent };
             let left = self.x_of(from as f64).max(self.lanes_left());
             let right = self.x_of(to as f64).min(self.lanes_right());
             if right > left {
@@ -1158,18 +1160,18 @@ impl canvas::Program<Message> for Timeline<'_> {
                 overlay.fill_rectangle(
                     Point::new(left, self.palette.scrollbar_height),
                     Size::new(width, self.palette.ruler_height - 1.0),
-                    theme::mix(p.panel, p.accent, 0.28),
+                    theme::mix(p.panel, marked, 0.28),
                 );
                 overlay.fill_rectangle(
                     Point::new(left, self.lanes_top()),
                     Size::new(width, bounds.height - self.lanes_top()),
-                    theme::alpha(p.accent, 0.05),
+                    theme::alpha(marked, 0.05),
                 );
                 for x in [left, right] {
                     overlay.fill_rectangle(
                         Point::new(x.round() - 0.5, self.lanes_top()),
                         Size::new(1.0, bounds.height - self.lanes_top()),
-                        theme::alpha(p.accent, 0.45),
+                        theme::alpha(marked, 0.45),
                     );
                 }
             }
