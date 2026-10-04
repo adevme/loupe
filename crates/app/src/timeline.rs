@@ -101,7 +101,7 @@ pub struct Timeline<'a> {
     pub snap: bool,
     pub armed: &'a HashSet<TrackId>,
     pub recording_from: Option<Frames>,
-    pub input_level: f32,
+    pub input_levels: &'a [f32],
     pub opening: bool,
     pub width: f32,
     pub knobs: &'a HashMap<(u64, usize, usize, bool), String>,
@@ -1234,10 +1234,11 @@ impl canvas::Program<Message> for Timeline<'_> {
             if !self.armed.contains(&track.id) || bar.y < self.lanes_top() || bar.y > bounds.height {
                 continue;
             }
-            let db = 20.0 * self.input_level.max(1e-6).log10();
+            let level = track.input.level(self.input_levels);
+            let db = 20.0 * level.max(1e-6).log10();
             let along = |db: f32| ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0) * bar.width;
             let filled = along(db);
-            let clipping = self.input_level >= 1.0;
+            let clipping = level >= 1.0;
             overlay.fill_rectangle(bar.position(), bar.size(), theme::mix(p.panel, p.background, 0.6));
             let zones = [(METER_FLOOR_DB, p.meter_low), (METER_MID_DB, p.meter_mid), (METER_HIGH_DB, p.meter_high)];
             for (i, (from_db, colour)) in zones.iter().enumerate() {

@@ -110,6 +110,24 @@ mod tests {
     }
 
     #[test]
+    fn a_stereo_take_cut_off_mid_frame_keeps_its_whole_frames() {
+        let folder = std::env::temp_dir().join(format!("loupe-repair-stereo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&folder);
+        fs::create_dir_all(&folder).unwrap();
+        let take = folder.join("Keys (take 1).wav");
+        let mut bytes = float_header(2, 44_100, 0);
+        for i in 0..1001u32 {
+            bytes.extend_from_slice(&(i as f32).to_le_bytes());
+        }
+        fs::write(&take, &bytes).unwrap();
+        assert_eq!(repair_takes(&folder), 1);
+        let fixed = fs::read(&take).unwrap();
+        assert_eq!(&fixed[..HEADER_BYTES as usize], &float_header(2, 44_100, 500)[..]);
+        assert_eq!(fixed.len(), HEADER_BYTES as usize + 500 * 8);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn the_header_is_as_long_as_it_says() {
         assert_eq!(float_header(2, 48_000, 10).len() as u32, HEADER_BYTES);
     }

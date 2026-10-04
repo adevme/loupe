@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use iced::futures::channel::oneshot;
 use iced::Task;
-use loupe_engine::{bar_frames, Command, CommandError, Frames, Input, Note, Outcome, Source, TapedKey, TrackId};
+use loupe_engine::{bar_frames, Command, CommandError, Frames, Input, InputChannels, Note, Outcome, Source, TapedKey, TrackId};
 
 use crate::selection::TAKES_FOLDER;
 use crate::{App, Message, SETTLE_TICKS};
@@ -12,7 +12,7 @@ const UNNAMED_TAKE: &str = "Take";
 
 pub struct Recording {
     pub from: Frames,
-    tracks: Vec<TrackId>,
+    tracks: Vec<(TrackId, usize)>,
     note_tracks: Vec<TrackId>,
     pub taped: Vec<TapedKey>,
     counted_in: bool,
@@ -32,7 +32,8 @@ impl App {
             self.notice = Some("Arm a track to record: the dot beside M.".into());
             return Task::none();
         }
-        if let Some(first) = tracks.first() {
+        let mut tracks: Vec<(TrackId, usize)> = tracks.into_iter().map(|track| (track, 0)).collect();
+        if !tracks.is_empty() {
             let Some(input) = &self.input else {
                 self.notice = Some("The recording input is not open. Check Settings > Recording.".into());
                 return Task::none();
@@ -42,9 +43,18 @@ impl App {
                 self.entry_problem = Some("Save the project first. Takes are kept in its Audio folder.".into());
                 return asked;
             };
-            let track_name = self.project.track(*first).map(|track| crate::files::file_safe(&track.name)).unwrap_or_default();
-            let file = unused_take(&folder, if track_name.is_empty() { UNNAMED_TAKE } else { &track_name });
-            if let Err(why) = input.begin_take(&file) {
+            let inputs = input.inputs();
+            let recorded: Vec<&loupe_engine::Track> = tracks.iter().filter_map(|(id, _)| self.project.track(*id)).collect();
+            if let Some(track) = recorded.iter().find(|track| !track.input.fits(inputs)) {
+                let has = if inputs == 1 { "1 input".to_string() } else { format!("{inputs} inputs") };
+                self.problem = Some(format!("{} records from {}, but the recording input has {has}. Right click the track to choose another.", track.name, track.input.name()));
+                return Task::none();
+            }
+            let (files, file_for) = take_files(&folder, &recorded);
+            for ((_, file_at), at) in tracks.iter_mut().zip(file_for) {
+                *file_at = at;
+            }
+            if let Err(why) = input.begin_takes(&files) {
                 self.problem = Some(format!("Could not start recording: {why}"));
                 return Task::none();
             }
@@ -93,23 +103,26 @@ impl App {
             return Task::none();
         }
         let finished = match &self.input {
-            Some(input) => input.finish_take(),
+            Some(input) => input.finish_takes(),
             None => Err("the recording input closed".to_string()),
         };
-        let take = match finished {
-            Ok(take) => take,
+        let takes = match finished {
+            Ok(takes) => takes,
             Err(why) => {
                 self.problem = Some(format!("Could not keep the take: {why}"));
                 return Task::none();
             }
         };
-        let (Some(start), true) = (began, take.frames > 0) else {
-            let _ = std::fs::remove_file(&take.path);
+        let (frames, lost, take_rate) = takes.first().map_or((0, 0, 1), |take| (take.frames, take.lost, take.rate));
+        let (Some(start), true) = (began, frames > 0) else {
+            for take in &takes {
+                let _ = std::fs::remove_file(&take.path);
+            }
             self.notice = Some("Nothing was recorded.".into());
             return Task::none();
         };
-        let warning = (take.lost > 0).then(|| {
-            let lost_ms = take.lost * 1000 / take.rate.max(1) as u64;
+        let warning = (lost > 0).then(|| {
+            let lost_ms = lost * 1000 / take_rate.max(1) as u64;
             format!("The disk fell behind: about {lost_ms} ms of the take were lost.")
         });
         let rate = self.project.rate;
@@ -117,31 +130,36 @@ impl App {
         self.gather_fx_state();
         let printing: Vec<(TrackId, Vec<loupe_plugins::rack::Wanted>)> = tracks
             .iter()
-            .filter_map(|id| self.project.track(*id))
+            .filter_map(|(id, _)| self.project.track(*id))
             .filter(|track| track.print_takes)
             .map(|track| (track.id, crate::printing::wanted(&track.fx)))
             .filter(|(_, want)| !want.is_empty())
             .collect();
         let host = loupe_plugins::sandbox::host_beside_us();
         let keep_from = if recording.counted_in { recording.from as i64 } else { 0 };
-        let passes = recording.looping.and_then(|(from, to)| loop_takes(start, from, to, take.frames, rate));
+        let passes = recording.looping.and_then(|(from, to)| loop_takes(start, from, to, frames, rate));
         let pad = passes.as_ref().map_or(0, |passes| passes.pad);
         self.loading += 1;
         let (done, loaded) = oneshot::channel();
         std::thread::spawn(move || {
-            let read = Source::load(&take.path, rate).and_then(|dry| padded(dry, &take.path, pad, rate)).map(Arc::new).map(|dry| {
+            let dries: Result<Vec<Arc<Source>>, String> =
+                takes.iter().map(|take| Source::load(&take.path, rate).and_then(|dry| padded(dry, &take.path, pad, rate)).map(Arc::new)).collect();
+            let read = dries.map(|dries| {
                 let mut trouble = None;
                 let sources = tracks
                     .iter()
-                    .map(|id| match printing.iter().find(|(track, _)| track == id) {
-                        Some((_, want)) => match crate::printing::print_take(&dry, &take.path, want, rate, &host) {
-                            Ok(printed) => (*id, Arc::new(printed)),
-                            Err(why) => {
-                                trouble = Some(why);
-                                (*id, dry.clone())
-                            }
-                        },
-                        None => (*id, dry.clone()),
+                    .map(|(id, at)| {
+                        let dry = &dries[*at];
+                        match printing.iter().find(|(track, _)| track == id) {
+                            Some((_, want)) => match crate::printing::print_take(dry, &takes[*at].path, want, rate, &host) {
+                                Ok(printed) => (*id, Arc::new(printed)),
+                                Err(why) => {
+                                    trouble = Some(why);
+                                    (*id, dry.clone())
+                                }
+                            },
+                            None => (*id, dry.clone()),
+                        }
                     })
                     .collect();
                 (sources, trouble)
@@ -197,10 +215,27 @@ impl App {
     }
 }
 
-fn unused_take(folder: &Path, name: &str) -> PathBuf {
+fn take_files(folder: &Path, recorded: &[&loupe_engine::Track]) -> (Vec<(PathBuf, InputChannels)>, Vec<usize>) {
+    let mut files: Vec<(PathBuf, InputChannels, bool)> = Vec::new();
+    let mut file_for = Vec::new();
+    for track in recorded {
+        let shareable = !track.print_takes;
+        if let Some(at) = files.iter().position(|(_, input, open)| shareable && *open && *input == track.input) {
+            file_for.push(at);
+            continue;
+        }
+        let name = crate::files::file_safe(&track.name);
+        let file = unused_take(folder, if name.is_empty() { UNNAMED_TAKE } else { &name }, &files);
+        files.push((file, track.input, shareable));
+        file_for.push(files.len() - 1);
+    }
+    (files.into_iter().map(|(file, input, _)| (file, input)).collect(), file_for)
+}
+
+fn unused_take(folder: &Path, name: &str, taken: &[(PathBuf, InputChannels, bool)]) -> PathBuf {
     (1..)
         .map(|number| folder.join(format!("{name} (take {number}).wav")))
-        .find(|file| !file.exists())
+        .find(|file| !file.exists() && taken.iter().all(|(chosen, _, _)| chosen != file))
         .unwrap_or_else(|| folder.join(format!("{name}.wav")))
 }
 
@@ -263,6 +298,35 @@ mod tests {
 
     fn tapped(track: TrackId, key: u8, velocity: f32, at: Frames) -> TapedKey {
         TapedKey { track, key, velocity, at }
+    }
+
+    #[test]
+    fn tracks_on_the_same_input_share_a_take_and_other_inputs_get_their_own() {
+        let mut project = loupe_engine::Project::new(48_000);
+        let mut add = |name: &str, input: InputChannels, print: bool| {
+            let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: name.into() }) else { panic!() };
+            project.apply(Command::SetTrackInput { track, input }).unwrap();
+            project.apply(Command::SetPrintTakes { track, on: print }).unwrap();
+        };
+        add("Vocal", InputChannels::Mono(1), false);
+        add("Double", InputChannels::Mono(1), false);
+        add("Keys", InputChannels::Stereo(2), false);
+        add("Printed", InputChannels::Mono(1), true);
+        add("Vocal", InputChannels::Mono(0), false);
+        let recorded: Vec<&loupe_engine::Track> = project.tracks.iter().collect();
+        let folder = std::env::temp_dir().join(format!("loupe-take-files-{}", std::process::id()));
+        let (files, file_for) = take_files(&folder, &recorded);
+        assert_eq!(file_for, [0, 0, 1, 2, 3]);
+        let named = |name: &str| folder.join(name);
+        assert_eq!(
+            files,
+            [
+                (named("Vocal (take 1).wav"), InputChannels::Mono(1)),
+                (named("Keys (take 1).wav"), InputChannels::Stereo(2)),
+                (named("Printed (take 1).wav"), InputChannels::Mono(1)),
+                (named("Vocal (take 2).wav"), InputChannels::Mono(0)),
+            ]
+        );
     }
 
     #[test]
