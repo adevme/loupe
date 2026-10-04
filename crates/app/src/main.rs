@@ -516,7 +516,7 @@ impl App {
         engine.set_metronome(settings.metronome);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
-        let (usage_now, first_usage) = usage::Usage::begin(&settings);
+        let (usage_now, _) = usage::Usage::begin(&settings);
         let mut app = Self {
             palette: loaded.palette,
             heights: HashMap::new(),
@@ -653,9 +653,6 @@ impl App {
         app.find_scripts();
         app.keep_safe();
         app.listen_to_keyboards();
-        if first_usage {
-            app.notice = Some(usage::NOTICE.to_string());
-        }
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
         let look = if app.check_updates {
             app.quiet_check = true;
