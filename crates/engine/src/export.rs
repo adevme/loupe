@@ -2,11 +2,12 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use loupe_stock::{Effect, Meter, SILENT_LUFS};
 
 use crate::encode::{Format, Writer};
-use crate::model::{Frames, Project, Track};
+use crate::model::{Frames, Project, Track, TrackId};
 use crate::wav;
 
 const BLOCK: usize = 16_384;
@@ -16,6 +17,12 @@ const MEASURING: &str = "measuring.wav";
 const METER_STEPS_PER_SECOND: u32 = 10;
 pub const TRUE_PEAK_CEILING: f32 = -1.0;
 const LOWEST_TARGET: f32 = -60.0;
+const MOST_HELD_FRAMES: Frames = 1 << 26;
+const METER_NANOSECONDS_A_FRAME: f64 = 18.0;
+const READING_BACK_NANOSECONDS_A_FRAME: f64 = 3.0;
+const RENDER_NANOSECONDS_A_UNIT: f64 = 1.0;
+const PLUGIN_SLOT_UNITS: f32 = 8.0;
+const FRAMES_BEFORE_TIMING_THE_RENDER: Frames = BLOCK as Frames * 4;
 
 pub struct ExportPlan {
     pub folder: PathBuf,
@@ -129,6 +136,134 @@ impl fmt::Display for Normalise {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Stage {
+    pub frames: Frames,
+    pub render_units: f32,
+    pub other_nanoseconds_a_frame: f64,
+}
+
+impl Stage {
+    fn nanoseconds(&self, frames: Frames, nanoseconds_a_unit: f64) -> f64 {
+        frames as f64 * (self.other_nanoseconds_a_frame + self.render_units as f64 * nanoseconds_a_unit)
+    }
+}
+
+pub(crate) fn render_units(project: &Project, only: Option<TrackId>) -> f32 {
+    let mut units = 1.0 + PLUGIN_SLOT_UNITS * project.master_fx.len() as f32;
+    for track in &project.tracks {
+        if only.is_some_and(|wanted| wanted != track.id) {
+            continue;
+        }
+        units += 1.0 + PLUGIN_SLOT_UNITS * track.fx.len() as f32;
+        for clip in &track.clips {
+            units += PLUGIN_SLOT_UNITS * clip.fx.len() as f32;
+        }
+    }
+    units
+}
+
+pub(crate) fn stages_of(project: &Project, plan: &ExportPlan, span: Frames, stems: &[&Track], held_in_memory: bool) -> Vec<Stage> {
+    let encoding = plan.format.nanoseconds_a_frame();
+    let mut stages = Vec::with_capacity(2 + stems.len());
+    if plan.normalise == Normalise::Off {
+        stages.push(Stage { frames: span, render_units: render_units(project, None), other_nanoseconds_a_frame: encoding });
+    } else {
+        let spilling = if held_in_memory { 0.0 } else { Format::WavFloat.nanoseconds_a_frame() };
+        stages.push(Stage {
+            frames: span,
+            render_units: render_units(project, None),
+            other_nanoseconds_a_frame: METER_NANOSECONDS_A_FRAME + spilling,
+        });
+        let reading = if held_in_memory { 0.0 } else { READING_BACK_NANOSECONDS_A_FRAME };
+        stages.push(Stage { frames: span, render_units: 0.0, other_nanoseconds_a_frame: reading + encoding });
+    }
+    for track in stems {
+        stages.push(Stage {
+            frames: span,
+            render_units: render_units(project, Some(track.id)),
+            other_nanoseconds_a_frame: encoding,
+        });
+    }
+    stages
+}
+
+pub(crate) struct Pacer<'a> {
+    report: &'a dyn Fn(f32),
+    stages: Vec<Stage>,
+    at: usize,
+    done: Frames,
+    stages_before: f64,
+    stage_begun: Instant,
+    nanoseconds_a_unit: f64,
+    highest: f32,
+}
+
+impl<'a> Pacer<'a> {
+    pub fn new(report: &'a dyn Fn(f32), stages: Vec<Stage>) -> Self {
+        Self {
+            report,
+            stages,
+            at: 0,
+            done: 0,
+            stages_before: 0.0,
+            stage_begun: Instant::now(),
+            nanoseconds_a_unit: RENDER_NANOSECONDS_A_UNIT,
+            highest: 0.0,
+        }
+    }
+
+    fn left(&self) -> f64 {
+        let mut left = 0.0;
+        if let Some(stage) = self.stages.get(self.at) {
+            left += stage.nanoseconds(stage.frames.saturating_sub(self.done), self.nanoseconds_a_unit);
+        }
+        for stage in self.stages.iter().skip(self.at + 1) {
+            left += stage.nanoseconds(stage.frames, self.nanoseconds_a_unit);
+        }
+        left
+    }
+
+    fn spent(&self) -> f64 {
+        self.stages_before + self.stage_begun.elapsed().as_nanos() as f64
+    }
+
+    fn time_the_render(&mut self) {
+        let Some(stage) = self.stages.get(self.at) else { return };
+        if stage.render_units <= 0.0 || self.done < FRAMES_BEFORE_TIMING_THE_RENDER {
+            return;
+        }
+        let apart_from_the_render = self.done as f64 * stage.other_nanoseconds_a_frame;
+        let seen = (self.stage_begun.elapsed().as_nanos() as f64 - apart_from_the_render)
+            / (self.done as f64 * stage.render_units as f64);
+        if seen.is_finite() && seen > 0.0 {
+            self.nanoseconds_a_unit = seen;
+        }
+    }
+
+    fn tell(&mut self) {
+        let spent = self.spent();
+        let whole = spent + self.left();
+        let fraction = if whole > 0.0 { (spent / whole) as f32 } else { 0.0 };
+        self.highest = self.highest.max(fraction.clamp(0.0, 1.0));
+        (self.report)(self.highest);
+    }
+
+    pub fn wrote(&mut self, frames: Frames) {
+        self.done += frames;
+        self.time_the_render();
+        self.tell();
+    }
+
+    pub fn finished_a_stage(&mut self) {
+        self.stages_before += self.stage_begun.elapsed().as_nanos() as f64;
+        self.stage_begun = Instant::now();
+        self.done = 0;
+        self.at += 1;
+        self.tell();
+    }
+}
+
 pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> Result<Option<String>, String> {
     export_through(project, plan, progress, None)
 }
@@ -149,27 +284,28 @@ pub fn export_through(
     let stems: Vec<&Track> =
         if plan.split { project.tracks.iter().filter(|track| !track.muted).collect() } else { Vec::new() };
     let measuring = plan.normalise != Normalise::Off;
-    let all_frames = (to - from) * (1 + stems.len() as Frames + measuring as Frames);
-    let mut written = 0;
-    let mut count = |frames: Frames| {
-        written += frames;
-        progress(written as f32 / all_frames as f32);
-    };
+    let span = to - from;
+    let in_memory = span <= MOST_HELD_FRAMES;
+    let mut pacer = Pacer::new(progress, stages_of(project, plan, span, &stems, in_memory));
 
     let extension = plan.format.extension();
     let mix = plan.folder.join(format!("{}.{extension}", plan.name));
     let gain = if measuring {
-        let held = plan.folder.join(format!("{}.{MEASURING}", plan.name));
-        let made = measure_into(&held, project, from, to, &mut count, chains.as_deref_mut()).and_then(|levels| {
+        let spilt = plan.folder.join(format!("{}.{MEASURING}", plan.name));
+        let mut mixdown = if in_memory { Mixed::Memory(Vec::new()) } else { Mixed::Spilt(spilt.clone()) };
+        let made = measure_into(&mut mixdown, project, from, to, &mut pacer, chains.as_deref_mut()).and_then(|levels| {
+            pacer.finished_a_stage();
             let gain = plan.normalise.gain(levels);
-            copy_with_gain(&held, &mix, plan, project.rate, to - from, gain.linear(), &mut count)?;
+            write_mixdown(&mixdown, &mix, plan, project.rate, span, gain.linear(), &mut pacer)?;
+            pacer.finished_a_stage();
             Ok(gain)
         });
-        let _ = fs::remove_file(&held);
+        let _ = fs::remove_file(&spilt);
         made.map_err(|why| failed(&mix, why))?
     } else {
-        write_file(&mix, plan.format, plan.dither, project, from, to, 1.0, &mut count, chains.as_deref_mut())
+        write_file(&mix, plan.format, plan.dither, project, from, to, 1.0, &mut pacer, chains.as_deref_mut())
             .map_err(|why| failed(&mix, why))?;
+        pacer.finished_a_stage();
         Gain::unchanged(None)
     };
     let copy = plan.folder.join(format!("{}.lp", plan.name));
@@ -184,8 +320,9 @@ pub fn export_through(
             alone.tracks.retain(|other| other.id == track.id);
             alone.master = 1.0;
             let file = stems_folder.join(format!("{}.{extension}", unused_name(&track.name, &mut used)));
-            write_file(&file, plan.format, plan.dither, &alone, from, to, gain.linear(), &mut count, chains.as_deref_mut())
+            write_file(&file, plan.format, plan.dither, &alone, from, to, gain.linear(), &mut pacer, chains.as_deref_mut())
                 .map_err(|why| failed(&file, why))?;
+            pacer.finished_a_stage();
         }
     }
     let mut notes: Vec<String> = gain.note.into_iter().collect();
@@ -210,7 +347,14 @@ pub fn render_to_wav_through(
     if to <= from {
         return Err("there is nothing to write".into());
     }
-    write_file(path, Format::WavFloat, false, project, from, to, 1.0, &mut |_| {}, chains)
+    let quiet = |_: f32| {};
+    let span = to - from;
+    let mut pacer = Pacer::new(&quiet, vec![Stage {
+        frames: span,
+        render_units: render_units(project, None),
+        other_nanoseconds_a_frame: Format::WavFloat.nanoseconds_a_frame(),
+    }]);
+    write_file(path, Format::WavFloat, false, project, from, to, 1.0, &mut pacer, chains)
         .map_err(|why| format!("{}: {why}", path.display()))
 }
 
@@ -251,7 +395,7 @@ fn render_into(
     project: &Project,
     from: Frames,
     to: Frames,
-    wrote: &mut dyn FnMut(Frames),
+    pacer: &mut Pacer<'_>,
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
     take: &mut dyn FnMut(&mut [[f32; 2]]) -> io::Result<()>,
 ) -> io::Result<()> {
@@ -263,7 +407,7 @@ fn render_into(
         crate::render::render_through(project, pos, &mut block[..count], &mut spare, chains.as_deref_mut());
         take(&mut block[..count])?;
         pos += count as Frames;
-        wrote(count as Frames);
+        pacer.wrote(count as Frames);
     }
     Ok(())
 }
@@ -277,11 +421,11 @@ fn write_file(
     from: Frames,
     to: Frames,
     gain: f32,
-    wrote: &mut dyn FnMut(Frames),
+    pacer: &mut Pacer<'_>,
     chains: Option<&mut (dyn crate::render::Chains + '_)>,
 ) -> io::Result<()> {
     let mut writer = Writer::create(path, format, project.rate, to - from, dither)?;
-    render_into(project, from, to, wrote, chains, &mut |block| {
+    render_into(project, from, to, pacer, chains, &mut |block| {
         amplify(block, gain);
         writer.push(block)
     })?;
@@ -296,54 +440,83 @@ fn levels_of(meter: &mut Meter, rate: u32) -> Levels {
     Levels { loudness: readings.integrated(), true_peak: readings.peak() }
 }
 
+enum Mixed {
+    Memory(Vec<[f32; 2]>),
+    Spilt(PathBuf),
+}
+
 fn measure_into(
-    held: &Path,
+    mixdown: &mut Mixed,
     project: &Project,
     from: Frames,
     to: Frames,
-    wrote: &mut dyn FnMut(Frames),
+    pacer: &mut Pacer<'_>,
     chains: Option<&mut (dyn crate::render::Chains + '_)>,
 ) -> io::Result<Levels> {
-    let mut writer = Writer::create(held, Format::WavFloat, project.rate, to - from, false)?;
     let mut meter = Meter::new();
     meter.prepare(project.rate as f32);
-    render_into(project, from, to, wrote, chains, &mut |block| {
-        meter.process(block);
-        writer.push(block)
-    })?;
-    writer.finish()?;
+    match mixdown {
+        Mixed::Memory(kept) => {
+            kept.reserve((to - from) as usize);
+            render_into(project, from, to, pacer, chains, &mut |block| {
+                meter.process(block);
+                kept.extend_from_slice(block);
+                Ok(())
+            })?;
+        }
+        Mixed::Spilt(path) => {
+            let mut writer = Writer::create(path, Format::WavFloat, project.rate, to - from, false)?;
+            render_into(project, from, to, pacer, chains, &mut |block| {
+                meter.process(block);
+                writer.push(block)
+            })?;
+            writer.finish()?;
+        }
+    }
     Ok(levels_of(&mut meter, project.rate))
 }
 
-fn copy_with_gain(
-    held: &Path,
+fn write_mixdown(
+    mixdown: &Mixed,
     path: &Path,
     plan: &ExportPlan,
     rate: u32,
     frames: Frames,
     gain: f32,
-    wrote: &mut dyn FnMut(Frames),
+    pacer: &mut Pacer<'_>,
 ) -> io::Result<()> {
-    let mut input = BufReader::new(File::open(held)?);
-    let mut header = [0u8; wav::HEADER_BYTES as usize];
-    input.read_exact(&mut header)?;
     let mut writer = Writer::create(path, plan.format, rate, frames, plan.dither)?;
-    let mut bytes = vec![0u8; BLOCK * 8];
     let mut block = vec![[0.0f32; 2]; BLOCK];
-    let mut left = frames;
-    while left > 0 {
-        let count = BLOCK.min(left as usize);
-        input.read_exact(&mut bytes[..count * 8])?;
-        for (frame, raw) in block.iter_mut().zip(bytes[..count * 8].chunks_exact(8)) {
-            *frame = [
-                f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-                f32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
-            ];
+    match mixdown {
+        Mixed::Memory(kept) => {
+            for part in kept.chunks(BLOCK) {
+                block[..part.len()].copy_from_slice(part);
+                amplify(&mut block[..part.len()], gain);
+                writer.push(&block[..part.len()])?;
+                pacer.wrote(part.len() as Frames);
+            }
         }
-        amplify(&mut block[..count], gain);
-        writer.push(&block[..count])?;
-        left -= count as Frames;
-        wrote(count as Frames);
+        Mixed::Spilt(held) => {
+            let mut input = BufReader::new(File::open(held)?);
+            let mut header = [0u8; wav::HEADER_BYTES as usize];
+            input.read_exact(&mut header)?;
+            let mut bytes = vec![0u8; BLOCK * 8];
+            let mut left = frames;
+            while left > 0 {
+                let count = BLOCK.min(left as usize);
+                input.read_exact(&mut bytes[..count * 8])?;
+                for (frame, raw) in block.iter_mut().zip(bytes[..count * 8].chunks_exact(8)) {
+                    *frame = [
+                        f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                        f32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+                    ];
+                }
+                amplify(&mut block[..count], gain);
+                writer.push(&block[..count])?;
+                left -= count as Frames;
+                pacer.wrote(count as Frames);
+            }
+        }
     }
     writer.finish()
 }
@@ -457,6 +630,76 @@ mod tests {
         let summed: Vec<[f32; 2]> =
             vox.frames.iter().zip(&beat.frames).map(|(a, b)| [a[0] + b[0], a[1] + b[1]]).collect();
         assert_eq!(summed, heard(&unmastered));
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    fn shares(stages: &[Stage], nanoseconds_a_unit: f64) -> Vec<f64> {
+        let each: Vec<f64> = stages.iter().map(|stage| stage.nanoseconds(stage.frames, nanoseconds_a_unit)).collect();
+        let whole: f64 = each.iter().sum();
+        each.into_iter().map(|part| part / whole).collect()
+    }
+
+    #[test]
+    fn each_stage_of_an_export_is_weighted_by_what_it_costs() {
+        let project = song();
+        let span = project.length();
+        let folder = scratch("weights");
+        let plain_stages = stages_of(&project, &ExportPlan { format: Format::Mp3Cbr320, ..plan_for(&folder) }, span, &[], true);
+        assert_eq!(plain_stages.len(), 1);
+        assert_eq!(plain_stages[0].other_nanoseconds_a_frame, Format::Mp3Cbr320.nanoseconds_a_frame());
+        assert_eq!(plain_stages[0].render_units, render_units(&project, None));
+
+        let normalising = ExportPlan { format: Format::Mp3Cbr320, normalise: Normalise::Loudness(-14.0), ..plan_for(&folder) };
+        let two = stages_of(&project, &normalising, span, &[], true);
+        assert_eq!(two.len(), 2, "measuring renders once and writes once");
+        assert_eq!(two[0].other_nanoseconds_a_frame, METER_NANOSECONDS_A_FRAME);
+        assert_eq!(two[1].render_units, 0.0, "the second pass renders nothing");
+        assert_eq!(two[1].other_nanoseconds_a_frame, Format::Mp3Cbr320.nanoseconds_a_frame());
+        let measured = shares(&two, RENDER_NANOSECONDS_A_UNIT)[0];
+        assert!(measured < 0.3, "metering an MP3 export is cheap next to encoding it, got {measured}");
+
+        let spilt = stages_of(&project, &normalising, span, &[], false);
+        assert!(spilt[0].other_nanoseconds_a_frame > two[0].other_nanoseconds_a_frame, "a spilt mixdown costs a write");
+        assert!(spilt[1].other_nanoseconds_a_frame > two[1].other_nanoseconds_a_frame, "and a read back");
+
+        let stems: Vec<&Track> = project.tracks.iter().filter(|track| !track.muted).collect();
+        let split = stages_of(&project, &ExportPlan { split: true, ..normalising }, span, &stems, true);
+        assert_eq!(split.len(), 2 + stems.len());
+        for stage in &split[2..] {
+            assert!(stage.render_units < split[0].render_units, "one track is less work than the whole mix");
+        }
+        let whole: f64 = shares(&split, RENDER_NANOSECONDS_A_UNIT).iter().sum();
+        assert!((whole - 1.0).abs() < 1e-9);
+        let _ = fs::remove_dir_all(folder);
+    }
+
+    #[test]
+    fn plugins_count_towards_what_a_render_costs() {
+        let mut project = song();
+        let bare = render_units(&project, None);
+        project.tracks[0].fx.push(crate::model::Fx {
+            path: "a.vst3".into(),
+            index: 0,
+            name: "A".into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: false,
+        });
+        assert!(render_units(&project, None) > bare, "a plugin is work the bar should know about");
+        assert!(render_units(&project, Some(project.tracks[1].id)) < render_units(&project, None));
+    }
+
+    #[test]
+    fn the_bar_does_not_leap_through_the_cheap_half_of_a_normalised_export() {
+        let project = tone_song(0.05, 4);
+        let folder = scratch("pace");
+        let plan = ExportPlan { format: Format::Mp3Cbr320, normalise: Normalise::Loudness(-14.0), ..plan_for(&folder) };
+        let seen = std::cell::RefCell::new(Vec::new());
+        export(&project, &plan, &|fraction| seen.borrow_mut().push(fraction)).unwrap();
+        let seen = seen.into_inner();
+        let rendered = project.length() as usize / BLOCK;
+        let after_the_render = seen[rendered.saturating_sub(1)];
+        assert!(after_the_render < 0.45, "rendering is not half the work of an MP3 export, got {after_the_render}");
         fs::remove_dir_all(folder).unwrap();
     }
 

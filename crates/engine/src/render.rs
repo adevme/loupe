@@ -137,6 +137,8 @@ pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
     }
 }
 
+type Shape = (TrackId, Option<TrackId>, u64);
+
 #[derive(Default)]
 pub struct Mixdown {
     buffers: Vec<Vec<[f32; 2]>>,
@@ -145,6 +147,37 @@ pub struct Mixdown {
     pre: Vec<[f32; 2]>,
     order: Vec<TrackId>,
     index: Vec<usize>,
+    shape: Vec<Shape>,
+    ahead: Vec<Frames>,
+    ordered: bool,
+}
+
+fn shape_of(track: &Track) -> Shape {
+    let sends = track.sends.iter().fold(0u64, |so_far, send| so_far.rotate_left(7) ^ send.to.0);
+    (track.id, track.parent, sends)
+}
+
+impl Mixdown {
+    fn same_shape(&self, project: &Project) -> bool {
+        self.shape.len() == project.tracks.len() && project.tracks.iter().zip(&self.shape).all(|(track, known)| shape_of(track) == *known)
+    }
+
+    fn work_out_order(&mut self, project: &Project) {
+        self.shape.clear();
+        self.shape.extend(project.tracks.iter().map(shape_of));
+        self.order.clear();
+        self.index.clear();
+        self.ordered = match project.render_order() {
+            Some(order) => {
+                self.order.extend(order);
+                for id in &self.order {
+                    self.index.push(project.tracks.iter().position(|t| t.id == *id).unwrap_or(usize::MAX));
+                }
+                true
+            }
+            None => false,
+        };
+    }
 }
 
 impl Mixdown {
@@ -189,23 +222,17 @@ pub fn mix_tracks_metered(
         }
     }
     scratch.room_for(count, len);
-    scratch.order.clear();
-    match project.render_order() {
-        Some(order) => scratch.order.extend(order),
-        None => return,
+    if !scratch.same_shape(project) {
+        scratch.work_out_order(project);
     }
-    scratch.index.clear();
-    for id in &scratch.order {
-        scratch.index.push(project.tracks.iter().position(|t| t.id == *id).unwrap_or(usize::MAX));
+    if !scratch.ordered {
+        return;
     }
-    let ahead: Vec<Frames> = project
-        .tracks
-        .iter()
-        .map(|track| match chains.as_deref() {
-            Some(racks) => head_start(project, track.id, racks) as Frames,
-            None => 0,
-        })
-        .collect();
+    scratch.ahead.clear();
+    scratch.ahead.extend(project.tracks.iter().map(|track| match chains.as_deref() {
+        Some(racks) => head_start(project, track.id, racks) as Frames,
+        None => 0,
+    }));
     let soloing = only.is_none() && project.any_solo();
     for (index, track) in project.tracks.iter().enumerate() {
         scratch.sides[index][..len].fill([0.0; 2]);
@@ -214,7 +241,7 @@ pub fn mix_tracks_metered(
         if soloing && !project.heard_in_solo(track.id) {
             continue;
         }
-        lay_clips(project, track, pos + ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
+        lay_clips(project, track, pos + scratch.ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
     }
     for step in 0..scratch.order.len() {
         let index = scratch.index[step];
