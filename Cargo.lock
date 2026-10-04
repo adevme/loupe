@@ -2309,7 +2309,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "loupe"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "chrono",
  "iced",
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "loupe-engine"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cpal",
  "loupe-stretch",
@@ -2338,21 +2338,21 @@ dependencies = [
 
 [[package]]
 name = "loupe-host"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "loupe-plugins",
 ]
 
 [[package]]
 name = "loupe-launcher"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "winresource",
 ]
 
 [[package]]
 name = "loupe-plugins"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap-sys",
  "libloading 0.8.9",
@@ -2362,11 +2362,11 @@ dependencies = [
 
 [[package]]
 name = "loupe-stock"
-version = "0.5.0"
+version = "0.5.1"
 
 [[package]]
 name = "loupe-stock-ui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "iced",
  "loupe-stock",
@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "loupe-stretch"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "cc",
 ]
