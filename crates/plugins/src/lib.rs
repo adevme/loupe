@@ -1,6 +1,7 @@
 mod scan;
 pub mod vst3;
 pub mod sandbox;
+pub mod presets;
 pub mod au;
 pub mod changes;
 pub mod clap;

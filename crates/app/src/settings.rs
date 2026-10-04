@@ -95,6 +95,8 @@ pub fn count_in_from(text: &str) -> Option<u32> {
 pub const HOME_FOLDER: &str = "Loupe";
 const PROJECTS: &str = "Projects";
 const TEMPLATES: &str = "Templates";
+const CHAINS: &str = "Chains";
+const PRESETS: &str = "Presets";
 
 pub fn home_folder(chosen: Option<&Path>) -> PathBuf {
     chosen.map(Path::to_path_buf).unwrap_or_else(documents).join(HOME_FOLDER)
@@ -108,8 +110,16 @@ pub fn templates_folder(chosen: Option<&Path>) -> PathBuf {
     home_folder(chosen).join(TEMPLATES)
 }
 
+pub fn chains_folder(chosen: Option<&Path>) -> PathBuf {
+    home_folder(chosen).join(CHAINS)
+}
+
+pub fn presets_folder(chosen: Option<&Path>) -> PathBuf {
+    home_folder(chosen).join(PRESETS)
+}
+
 pub fn make_folders(chosen: Option<&Path>) -> Result<(), String> {
-    for folder in [projects_folder(chosen), templates_folder(chosen)] {
+    for folder in [projects_folder(chosen), templates_folder(chosen), chains_folder(chosen)] {
         fs::create_dir_all(&folder).map_err(|why| format!("{}: {why}", folder.display()))?;
     }
     Ok(())

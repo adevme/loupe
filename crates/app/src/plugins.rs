@@ -156,7 +156,8 @@ impl App {
                 .style(move |_| palette.menu())
                 .into()
         };
-        self.window(heading, column![search, body].spacing(10).into(), 460.0)
+        let chains = self.chain_block();
+        self.window(heading, column![search, body].push_maybe(chains).spacing(10).into(), 460.0)
     }
 }
 

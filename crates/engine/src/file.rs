@@ -642,7 +642,7 @@ fn instrument_from(text: &str) -> Option<Instrument> {
     }))
 }
 
-fn hex_of(bytes: &[u8]) -> String {
+pub(crate) fn hex_of(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         out.push_str(&format!("{byte:02x}"));
@@ -650,7 +650,7 @@ fn hex_of(bytes: &[u8]) -> String {
     out
 }
 
-fn bytes_of(text: &str) -> Option<Vec<u8>> {
+pub(crate) fn bytes_of(text: &str) -> Option<Vec<u8>> {
     if text.len() % 2 != 0 {
         return None;
     }
@@ -663,7 +663,7 @@ fn bytes_of(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn fields_of(text: &str) -> HashMap<&str, &str> {
+pub(crate) fn fields_of(text: &str) -> HashMap<&str, &str> {
     text.split_whitespace().filter_map(|field| field.split_once('=')).collect()
 }
 

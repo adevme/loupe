@@ -22,6 +22,7 @@ mod racks;
 mod stretching;
 mod stockwin;
 mod printing;
+mod chains;
 mod recording;
 mod takes;
 mod selection;
@@ -286,6 +287,9 @@ pub enum Message {
     MidiInputToggled(String),
     OpenMasterPlugins,
     AddMasterPlugin(usize),
+    ChainName(String),
+    SaveChain,
+    UseChain(PathBuf),
     RemoveMasterPlugin(usize),
     BypassMasterPlugin(usize),
     ShowMasterPlugin(usize),
@@ -451,6 +455,8 @@ struct App {
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
     plugin_filter: String,
+    chains: Vec<(String, PathBuf)>,
+    chain_name: String,
     plugin_highlight: usize,
     plugin_uses: plugins::Uses,
     project: Project,
@@ -545,6 +551,7 @@ impl App {
         engine.set_metronome(settings.metronome);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
+        loupe_plugins::presets::keep_in(settings::presets_folder(settings.folder.as_deref()));
         let (usage_now, _) = usage::Usage::begin(&settings);
         let mut app = Self {
             palette: loaded.palette,
@@ -662,6 +669,8 @@ impl App {
             since_looked_in: 0,
             reading: None,
             plugin_filter: String::new(),
+            chains: Vec::new(),
+            chain_name: String::new(),
             plugin_highlight: 0,
             plugin_uses: plugins::Uses::load(),
         };
@@ -1277,7 +1286,11 @@ impl App {
             Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
+            Message::ChainName(typed) => self.chain_name = typed,
+            Message::SaveChain => self.save_chain(),
+            Message::UseChain(file) => self.use_chain(file),
             Message::OpenMasterPlugins => {
+                self.refresh_chains();
                 self.plugin_filter.clear();
                 self.plugin_highlight = 0;
                 self.overlay = Overlay::MasterPlugins;
@@ -1411,6 +1424,7 @@ impl App {
             }
             Message::OpenRouting(track) => self.overlay = Overlay::Routing(track),
             Message::OpenPlugins(track) => {
+                self.refresh_chains();
                 self.plugin_filter.clear();
                 self.plugin_highlight = 0;
                 self.overlay = Overlay::Plugins(track);
@@ -1444,6 +1458,7 @@ impl App {
             }
             Message::ShowPlugin(track, slot) => self.open_plugin_window(track, slot),
             Message::OpenClipPlugins(clip) => {
+                self.refresh_chains();
                 self.plugin_filter.clear();
                 self.plugin_highlight = 0;
                 self.overlay = Overlay::ClipPlugins(clip);
@@ -2277,6 +2292,7 @@ impl App {
         };
         self.folder = chosen;
         let made = settings::make_folders(self.folder.as_deref());
+        loupe_plugins::presets::keep_in(settings::presets_folder(self.folder.as_deref()));
         self.problem = saved.and(made).err().map(|why| format!("Could not set the Loupe folder: {why}"));
     }
 
