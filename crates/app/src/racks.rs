@@ -125,7 +125,7 @@ impl Racks {
     fn publish(&mut self) {
         // Runs on the thread that draws, so this is where a waiting window may open.
         for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()) {
-            rack.open_waiting();
+            let _ = rack.open_waiting();
         }
         let mut found: Vec<(Spot, Peek)> = Vec::new();
         for (id, rack) in self.chains.iter_mut() {

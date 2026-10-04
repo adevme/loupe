@@ -62,6 +62,8 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+/// Ticks between looking in on plugins that are still opening, about a fifth of a second.
+const LOOK_IN_EVERY: u8 = 12;
 /// Stands in for a track id when naming the knobs of a master plugin.
 pub const MASTER_OWNER: u64 = u64::MAX;
 const METER_FALL_PER_TICK: f32 = 0.86;
@@ -437,6 +439,7 @@ struct App {
     knob_names: HashMap<(u64, usize, usize, bool), String>,
     hint: Option<&'static str>,
     plugins_opening: bool,
+    since_looked_in: u8,
     reading: Option<String>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
@@ -645,6 +648,7 @@ impl App {
             scanning: true,
             hint: None,
             plugins_opening: false,
+            since_looked_in: 0,
             reading: None,
             plugin_filter: String::new(),
             plugin_highlight: 0,
@@ -787,8 +791,14 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                // Taking the racks back from the sound thread is not free, so look in
+                // every so often rather than on every tick.
                 if self.plugins_opening {
-                    self.nudge_racks();
+                    self.since_looked_in += 1;
+                    if self.since_looked_in >= LOOK_IN_EVERY {
+                        self.since_looked_in = 0;
+                        self.nudge_racks();
+                    }
                 }
                 if let Some(recording) = self.recording.as_mut() {
                     recording.taped.extend(self.engine.taped_keys());
@@ -1966,14 +1976,19 @@ impl App {
             return;
         };
         if !loupe_plugins::rack::is_built_in(&fx.path) {
-            // The rack is built when the chains settle, which may not have happened yet.
-            self.follow_chains();
+            // One borrow for both: settling the chains and then opening the window.
+            // Handing them back between the two can leave the second borrow empty,
+            // and the window request would be dropped without a word.
             if let Some(mut racks) = self.borrow_racks() {
+                racks.follow(&self.project);
                 if let Err(why) = racks.show(track, slot) {
                     self.problem = Some(why);
                 }
+                self.plugins_opening = racks.still_opening();
                 self.racks = Some(racks);
                 self.hand_racks_over();
+            } else {
+                self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
             }
             return;
         }
@@ -2484,7 +2499,7 @@ impl App {
             })
             .width(30)
             .height(30),
-            container(self.level_readout(mixer::Level::Master, self.project.master)).width(52),
+            container(self.level_readout(mixer::Level::Master, self.project.master)).width(44),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
@@ -2848,15 +2863,17 @@ impl App {
             }
             return;
         }
-        // The rack is built when the chains next settle, which may not have happened
-        // yet if the plugin was only just added.
-        self.follow_chains();
+        // One borrow for both, as above.
         if let Some(mut racks) = self.borrow_racks() {
+            racks.follow(&self.project);
             if let Err(why) = racks.show_master(slot) {
                 self.problem = Some(why);
             }
+            self.plugins_opening = racks.still_opening();
             self.racks = Some(racks);
             self.hand_racks_over();
+        } else {
+            self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
         }
     }
 }
