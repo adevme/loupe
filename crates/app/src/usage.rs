@@ -92,8 +92,6 @@ pub struct Usage {
 
 impl Usage {
     pub fn begin(stored: &settings::Settings) -> (Self, bool) {
-        // Off until the user turns it on, so Loupe never sends anything it has not
-        // been told it may send, and nothing has to be announced on the first run.
         let first_run = stored.usage.is_none();
         let on = stored.usage.unwrap_or(false);
         if first_run {
@@ -195,7 +193,7 @@ mod tests {
 
     #[test]
     fn the_first_run_says_nothing_until_the_notice_has_been_seen() {
-        let fresh = settings::Settings { midi_inputs: None,
+        let fresh = settings::Settings { midi_inputs: None, mixer_alone: false,
             theme: None,
             scale: 1.0,
             mixer_height: None,

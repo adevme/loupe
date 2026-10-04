@@ -8,6 +8,8 @@ use crate::{upright_rule, App, Message};
 
 pub const MIXER_HEIGHT: f32 = 236.0;
 pub const SHORTEST_MIXER: f32 = 150.0;
+const MIXER_WINDOW: iced::Size = iced::Size::new(1000.0, 360.0);
+const SHORTEST_MIXER_WINDOW: f32 = 420.0;
 const GRAB_BAR: f32 = 6.0;
 const STRIP_MARGIN: f32 = 32.0;
 const STRIP_WIDTH: f32 = 112.0;
@@ -140,6 +142,16 @@ impl App {
             .into()
     }
 
+    fn mixer_window_button(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let alone = self.mixer_window.is_some();
+        button(text(if alone { "Dock" } else { "Pop out" }).size(10.5).font(palette.medium))
+            .padding([2, 6])
+            .style(move |_, status| palette.outlined(status))
+            .on_press(if alone { Message::MixerBackUnderTheSong } else { Message::MixerToItsOwnWindow })
+            .into()
+    }
+
     fn master_strip(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let muted = self.project.master_muted;
@@ -155,7 +167,8 @@ impl App {
                     background: Some(palette.accent.into()),
                     ..Default::default()
                 }),
-                text("Master").size(12).font(palette.semibold),
+                hrow![text("Master").size(12).font(palette.semibold).width(Length::Fill), self.mixer_window_button()]
+                    .align_y(Alignment::Center),
                 self.master_fx_block(),
                 hrow![
                     mouse_area(
@@ -183,12 +196,51 @@ impl App {
         )
         .padding(8)
         .width(STRIP_WIDTH)
-        .height(self.mixer_height - STRIP_MARGIN - GRAB_BAR)
+        .height(self.strip_tall())
         .style(move |_| palette.strip())
         .into()
     }
 
+    pub(crate) fn mixer_to_its_own_window(&mut self) -> iced::Task<Message> {
+        if self.mixer_window.is_some() {
+            return iced::Task::none();
+        }
+        let (_, opening) = iced::window::open(iced::window::Settings {
+            size: MIXER_WINDOW,
+            min_size: Some(iced::Size::new(SHORTEST_MIXER_WINDOW, SHORTEST_MIXER)),
+            icon: iced::window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
+            ..iced::window::Settings::default()
+        });
+        opening.map(Message::MixerWindowOpened)
+    }
+
+    fn strip_tall(&self) -> Length {
+        match self.mixer_window {
+            Some(_) => Length::Fill,
+            None => Length::Fixed(self.mixer_height - STRIP_MARGIN - GRAB_BAR),
+        }
+    }
+
+    fn mixer_tall(&self) -> Length {
+        match self.mixer_window {
+            Some(_) => Length::Fill,
+            None => Length::Fixed(self.mixer_height - GRAB_BAR),
+        }
+    }
+
     pub(crate) fn mixer(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let grab_bar = mouse_area(container(Space::new(Length::Fill, GRAB_BAR)).style(move |_| palette.bar()))
+            .on_press(Message::MixerGrabbed)
+            .interaction(mouse::Interaction::ResizingVertically);
+        column![grab_bar, self.mixer_strips()].into()
+    }
+
+    pub(crate) fn mixer_alone(&self) -> Element<'_, Message> {
+        container(self.mixer_strips()).width(Length::Fill).height(Length::Fill).into()
+    }
+
+    fn mixer_strips(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let strips = self.project.tracks.iter().enumerate().map(|(index, track)| {
             let id = track.id;
@@ -257,35 +309,31 @@ impl App {
             )
             .padding(8)
             .width(STRIP_WIDTH)
-            .height(self.mixer_height - STRIP_MARGIN - GRAB_BAR)
+            .height(self.strip_tall())
             .style(move |_| palette.strip())
             .into()
         });
         let row = iced::widget::row(strips).spacing(8);
-        let grab_bar = mouse_area(container(Space::new(Length::Fill, GRAB_BAR)).style(move |_| palette.bar()))
-            .on_press(Message::MixerGrabbed)
-            .interaction(mouse::Interaction::ResizingVertically);
-        // Master is always there, even before the first track, so the mixer is never empty.
         let faders: Element<'_, Message> = if self.project.tracks.is_empty() {
             container(text("Each track gets a fader here.").size(12.5).color(palette.text_dim))
                 .center_x(Length::Fill)
-                .center_y(self.mixer_height - GRAB_BAR)
+                .center_y(self.mixer_tall())
                 .into()
         } else {
             container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new())))
                 .padding([4, 10])
                 .width(Length::Fill)
-                .height(self.mixer_height - GRAB_BAR)
+                .height(self.mixer_tall())
                 .into()
         };
         let master = container(self.master_strip())
             .padding([4, 10])
-            .height(self.mixer_height - GRAB_BAR);
-        let strips = container(iced::widget::row![master, upright_rule(palette), faders].align_y(Alignment::Center))
+            .height(self.mixer_tall());
+        container(iced::widget::row![master, upright_rule(palette), faders].align_y(Alignment::Center))
             .width(Length::Fill)
-            .height(self.mixer_height - GRAB_BAR)
-            .style(move |_| palette.bar());
-        column![grab_bar, strips].into()
+            .height(self.mixer_tall())
+            .style(move |_| palette.bar())
+            .into()
     }
 }
 pub const METER_W: f32 = 14.0;

@@ -69,9 +69,7 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
-/// Ticks between looking in on plugins that are still opening, about a fifth of a second.
 const LOOK_IN_EVERY: u8 = 12;
-/// Stands in for a track id when naming the knobs of a master plugin.
 pub const MASTER_OWNER: u64 = u64::MAX;
 const METER_FALL_PER_TICK: f32 = 0.86;
 const FADER_STEP_DB: f32 = 0.5;
@@ -93,7 +91,13 @@ fn main() -> iced::Result {
     let ui_font = loaded.palette.ui;
     let opens_a_song = std::env::args_os().len() > 1;
     let first_size = if opens_a_song { START_SIZE } else { scaled(HOME_SIZE, settings.scale) };
-    let mut loupe = iced::application(starting::Loupe::title, starting::Loupe::update, starting::Loupe::view)
+    let first_window = window::Settings {
+        size: first_size,
+        icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
+        min_size: Some(Size::new(820.0, 420.0)),
+        ..window::Settings::default()
+    };
+    let mut loupe = iced::daemon(starting::Loupe::title, starting::Loupe::update, starting::Loupe::view)
         .subscription(starting::Loupe::subscription)
         .theme(starting::Loupe::theme)
         .scale_factor(starting::Loupe::scale)
@@ -104,17 +108,15 @@ fn main() -> iced::Result {
         .font(include_bytes!("../assets/JetBrainsMono-Medium.ttf").as_slice())
         .font(include_bytes!("../assets/lucide.ttf").as_slice())
         .default_font(ui_font)
-        .antialiasing(true)
-        .window(window::Settings {
-            size: first_size,
-            icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
-            min_size: Some(Size::new(820.0, 420.0)),
-            ..window::Settings::default()
-        });
+        .antialiasing(true);
     if let Some(font) = icon_font {
         loupe = loupe.font(font);
     }
-    let ran = loupe.run_with(move || starting::Loupe::starting(loaded, settings, shift_at_start));
+    let ran = loupe.run_with(move || {
+        let (id, opening) = window::open(first_window);
+        let (state, task) = starting::Loupe::starting(id, loaded, settings, shift_at_start);
+        (state, Task::batch([opening.discard(), task]))
+    });
     backup::mark_closed();
     usage::finish();
     ran
@@ -185,6 +187,12 @@ pub enum Message {
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
     ToggleMixer,
+    MixerToItsOwnWindow,
+    MixerBackUnderTheSong,
+    MixerWindowOpened(window::Id),
+    DroppedOn(window::Id, PathBuf),
+    ResizedTo(window::Id, Size),
+    WindowClosed(window::Id),
     MixerGrabbed,
     MixerDragged(f32),
     MixerReleased,
@@ -519,6 +527,8 @@ struct App {
     settings_tab: SettingsTab,
     entry: String,
     entry_problem: Option<String>,
+    main_window: window::Id,
+    mixer_window: Option<window::Id>,
     mixer_open: bool,
     mixer_height: f32,
     folder: Option<PathBuf>,
@@ -578,7 +588,7 @@ struct App {
 }
 
 impl App {
-    fn new(loaded: theme::Loaded, settings: Settings, shift_at_start: bool) -> (Self, Task<Message>) {
+    fn new(main: window::Id, loaded: theme::Loaded, settings: Settings, shift_at_start: bool) -> (Self, Task<Message>) {
         let scale = settings.scale;
         let silent = std::env::var("LOUPE_AUDIO").as_deref() == Ok("silent");
         let mut engine = Engine::start(if silent { Output::Silent } else { Output::Device(settings.audio.clone()) });
@@ -639,6 +649,8 @@ impl App {
             settings_tab: SettingsTab::default(),
             entry: String::new(),
             entry_problem: None,
+            main_window: main,
+            mixer_window: None,
             mixer_open: settings.mixer_open,
             mixer_height: settings.mixer_height.unwrap_or(mixer::MIXER_HEIGHT).max(mixer::SHORTEST_MIXER),
             resizing_mixer: false,
@@ -747,9 +759,8 @@ impl App {
         app.find_scripts();
         app.keep_safe();
         app.listen_to_keyboards();
-        // The window is open before Loupe is told how big it is, and the timeline draws
-        // to that width, so ask for it rather than waiting for the first resize.
-        let measure = window::get_latest().and_then(window::get_size).map(Message::Resized);
+        let measure = window::get_size(main).map(Message::Resized);
+        let mixer = if app.mixer_open && settings.mixer_alone { app.mixer_to_its_own_window() } else { Task::none() };
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
         let look = if app.check_updates {
             app.quiet_check = true;
@@ -757,7 +768,7 @@ impl App {
         } else {
             Task::none()
         };
-        (app, Task::batch([task, measure, hunt, look]))
+        (app, Task::batch([task, measure, mixer, hunt, look]))
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -769,19 +780,13 @@ impl App {
         match (before, self.screen) {
             (Screen::Song, Screen::Home) => Task::batch([
                 task,
-                window::get_latest()
-                    .and_then(window::get_maximized)
+                window::get_maximized(self.main_window)
                     .map(|maximized| Message::LeftSong { maximized }),
             ]),
             (Screen::Home, Screen::Song) => {
                 let (size, maximized) = (self.song_size, self.song_maximized);
-                let fit = window::get_latest().and_then(move |id| {
-                    if maximized {
-                        window::maximize(id, true)
-                    } else {
-                        window::resize(id, size)
-                    }
-                });
+                let id = self.main_window;
+                let fit = if maximized { window::maximize(id, true) } else { window::resize(id, size) };
                 Task::batch([task, fit])
             }
             _ => task,
@@ -872,8 +877,6 @@ impl App {
                 if punched_out {
                     return self.finish_recording();
                 }
-                // Taking the racks back from the sound thread is not free, so look in
-                // every so often rather than on every tick.
                 if self.plugins_opening {
                     self.since_looked_in += 1;
                     if self.since_looked_in >= LOOK_IN_EVERY {
@@ -932,6 +935,9 @@ impl App {
             Message::Picked(paths) => return self.import(paths),
             Message::KeyTold(message) => self.key_told(message),
             Message::KeyFileHeard(name, result) => self.key_file_heard(name, result),
+            Message::DroppedOn(window, path) if window == self.main_window => return self.update(Message::Dropped(path)),
+            Message::ResizedTo(window, size) if window == self.main_window => return self.update(Message::Resized(size)),
+            Message::DroppedOn(..) | Message::ResizedTo(..) => {}
             Message::Dropped(path) => {
                 if self.key_wants_file() {
                     return self.read_key_from(path);
@@ -1307,6 +1313,32 @@ impl App {
             Message::ToggleMixer => {
                 self.mixer_open = !self.mixer_open;
                 let _ = settings::save("mixer", if self.mixer_open { "open" } else { "closed" });
+                if !self.mixer_open {
+                    if let Some(window) = self.mixer_window.take() {
+                        let _ = settings::save("mixer_alone", "no");
+                        return window::close(window);
+                    }
+                }
+            }
+            Message::MixerToItsOwnWindow => return self.mixer_to_its_own_window(),
+            Message::MixerBackUnderTheSong => {
+                let _ = settings::save("mixer_alone", "no");
+                if let Some(window) = self.mixer_window.take() {
+                    return window::close(window);
+                }
+            }
+            Message::MixerWindowOpened(window) => {
+                self.mixer_window = Some(window);
+                let _ = settings::save("mixer_alone", "yes");
+            }
+            Message::WindowClosed(window) => {
+                if self.mixer_window == Some(window) {
+                    self.mixer_window = None;
+                    let _ = settings::save("mixer_alone", "no");
+                    return window::close(window);
+                } else if window == self.main_window {
+                    return self.shut_down();
+                }
             }
             Message::MixerGrabbed => self.resizing_mixer = true,
             Message::MixerDragged(pointer_y) => {
@@ -1816,8 +1848,8 @@ impl App {
                     self.song_size = scaled(self.window, self.scale);
                 }
                 let home = scaled(HOME_SIZE, self.scale);
-                return window::get_latest()
-                    .and_then(move |id| Task::batch([window::maximize(id, false), window::resize(id, home)]));
+                let id = self.main_window;
+                return Task::batch([window::maximize(id, false), window::resize(id, home)]);
             }
             Message::PickFolder => {
                 let start_in = settings::home_folder(self.folder.as_deref());
@@ -1971,18 +2003,18 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        // The arrows move notes in the piano roll, so they only become shortcuts while it is open.
         let in_the_roll = matches!(self.overlay, Overlay::Roll(_));
         let typing_keys = self.typing_keys;
         let shortcuts = keyboard::on_key_press(if typing_keys { shortcut_while_typing } else { shortcut });
-        // The arrows move the chosen notes, so they are only shortcuts while the roll is open.
         let roll_keys = if in_the_roll { keyboard::on_key_press(transpose_key) } else { Subscription::none() };
-        let window = iced::event::listen_with(|event, _status, _window| match event {
-            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
-            iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
+        let window = iced::event::listen_with(|event, _status, from| match event {
+            iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::DroppedOn(from, path)),
+            iced::Event::Window(window::Event::Resized(size)) => Some(Message::ResizedTo(from, size)),
+            iced::Event::Window(window::Event::CloseRequested | window::Event::Closed) => Some(Message::WindowClosed(from)),
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(Message::ModifiersChanged(modifiers)),
             _ => None,
         });
+        let closing = window::close_events().map(Message::WindowClosed);
         let watching = self.exporting
             || self.copied.is_some()
             || self.input.is_some()
@@ -2034,7 +2066,7 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, ticks, mixer_drag, typing, autosave, picking, roll_keys])
+        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -2162,9 +2194,6 @@ impl App {
             return;
         };
         if !loupe_plugins::rack::is_built_in(&fx.path) {
-            // One borrow for both: settling the chains and then opening the window.
-            // Handing them back between the two can leave the second borrow empty,
-            // and the window request would be dropped without a word.
             if let Some(mut racks) = self.borrow_racks() {
                 racks.follow(&self.project);
                 if let Err(why) = racks.show(track, slot) {
@@ -2254,7 +2283,6 @@ impl App {
             match spot {
                 stockwin::Spot::Track(track) => self.engine.tweak(track, slot, *knob, *value),
                 stockwin::Spot::Clip(clip) => self.engine.tweak_clip(clip, slot, *knob, *value),
-                // Master plugins take their new settings when the rack next settles.
                 stockwin::Spot::Master => {}
             }
             let at = knob * 4;
@@ -2364,7 +2392,6 @@ impl App {
                 let (owner, slot, on_clip) = match spot {
                     racks::Spot::Track(track, slot) => (track.0, *slot, false),
                     racks::Spot::Clip(clip, slot) => (clip.0, *slot, true),
-                    // Master has no track id, so it uses one no track can have.
                     racks::Spot::Master(slot) => (MASTER_OWNER, *slot, false),
                 };
                 for (knob, name) in peek.knobs.iter().enumerate() {
@@ -2405,8 +2432,6 @@ impl App {
             self.input_levels.clear();
             return;
         }
-        // You only hear yourself while the tape is rolling. Armed and stopped, or
-        // armed and playing back, your microphone stays out of the mix.
         let rolling = self.recording.is_some();
         self.engine.hear_on(if self.hear_input && rolling { &heard } else { &[] });
         if self.input.is_some() {
@@ -2560,6 +2585,27 @@ impl App {
         }
     }
 
+    fn view_of(&self, window: window::Id) -> Element<'_, Message> {
+        match self.mixer_window == Some(window) {
+            true => self.mixer_alone(),
+            false => self.view(),
+        }
+    }
+
+    fn title_of(&self, window: window::Id) -> String {
+        match self.mixer_window == Some(window) {
+            true => "Mixer".to_string(),
+            false => self.title(),
+        }
+    }
+
+    fn shut_down(&mut self) -> Task<Message> {
+        match self.mixer_window.take() {
+            Some(mixer) => Task::batch([window::close(mixer), iced::exit()]),
+            None => iced::exit(),
+        }
+    }
+
     fn view(&self) -> Element<'_, Message> {
         if self.screen == Screen::Home {
             return stack![self.home(), self.overlay(), self.opening_layer()].into();
@@ -2598,7 +2644,7 @@ impl App {
             song = song.push(banner).push(rule(palette));
         }
         song = song.push(middle);
-        if self.mixer_open {
+        if self.mixer_open && self.mixer_window.is_none() {
             song = song.push(rule(palette)).push(self.mixer());
         }
         if let Some(status) = self.status() {
@@ -3054,8 +3100,6 @@ fn rule(palette: Palette) -> Element<'static, Message> {
     container(Space::new(Length::Fill, 1)).style(move |_| palette.rule()).into()
 }
 
-/// What the hint panel says about each thing in the top bar. One line, plain words,
-/// the way FL Studio's hint bar and Ableton's info view explain what is under the mouse.
 fn hint_for(item: BarItem) -> Option<&'static str> {
     Some(match item {
         BarItem::ToStart => "Jump back to the start of the song",
@@ -3073,7 +3117,6 @@ fn hint_for(item: BarItem) -> Option<&'static str> {
     })
 }
 
-/// Up and down move the chosen notes by a semitone, or by an octave with shift.
 fn transpose_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
     let steps = match key {
         keyboard::Key::Named(keyboard::key::Named::ArrowUp) => 1,
@@ -3083,13 +3126,11 @@ fn transpose_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<M
     Some(Message::RollAction(piano_roll::RollAction::Transpose(steps * if modifiers.shift() { 12 } else { 1 })))
 }
 
-/// Wraps one thing in the top bar so the hint panel can say what it is.
 fn hinted<'a>(piece: impl Into<Element<'a, Message>>, words: &'static str) -> Element<'a, Message> {
     iced::widget::mouse_area(piece.into()).on_enter(Message::Hint(Some(words))).on_exit(Message::Hint(None)).into()
 }
 
 impl App {
-    /// Opens the window of a plugin over the whole mix.
     fn open_master_window(&mut self, slot: usize) {
         if self.plugins_are_off() {
             self.problem = Some(safe_mode::PLUGINS_OFF_PROBLEM.into());
@@ -3108,7 +3149,6 @@ impl App {
             }
             return;
         }
-        // One borrow for both, as above.
         if let Some(mut racks) = self.borrow_racks() {
             racks.follow(&self.project);
             if let Err(why) = racks.show_master(slot) {
@@ -3124,8 +3164,6 @@ impl App {
 }
 
 impl App {
-    /// While plugins are opening in the background, let the racks publish what has
-    /// arrived and open any window that was asked for early.
     fn nudge_racks(&mut self) {
         let Some(mut racks) = self.borrow_racks() else { return };
         racks.nudge();

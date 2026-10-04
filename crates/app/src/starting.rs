@@ -8,11 +8,12 @@ use crate::{App, Message};
 const ICON_SIZE: f32 = 160.0;
 
 pub enum Loupe {
-    Starting { palette: Palette, scale: f64, waiting: Option<Box<Waiting>> },
+    Starting { main: window::Id, palette: Palette, scale: f64, waiting: Option<Box<Waiting>> },
     Ready(Box<App>),
 }
 
 pub struct Waiting {
+    main: window::Id,
     loaded: theme::Loaded,
     settings: Settings,
     shift_at_start: bool,
@@ -24,28 +25,28 @@ fn splash_icon() -> image::Handle {
 }
 
 impl Loupe {
-    pub fn starting(loaded: theme::Loaded, settings: Settings, shift_at_start: bool) -> (Self, Task<Message>) {
+    pub fn starting(main: window::Id, loaded: theme::Loaded, settings: Settings, shift_at_start: bool) -> (Self, Task<Message>) {
         let palette = loaded.palette;
         let scale = settings.scale;
-        let waiting = Some(Box::new(Waiting { loaded, settings, shift_at_start }));
-        (Loupe::Starting { palette, scale, waiting }, Task::none())
+        let waiting = Some(Box::new(Waiting { main, loaded, settings, shift_at_start }));
+        (Loupe::Starting { main, palette, scale, waiting }, Task::none())
     }
 
-    pub fn title(&self) -> String {
+    pub fn title(&self, window: window::Id) -> String {
         match self {
-            Loupe::Ready(app) => app.title(),
+            Loupe::Ready(app) => app.title_of(window),
             Loupe::Starting { .. } => "Loupe".into(),
         }
     }
 
-    pub fn theme(&self) -> Theme {
+    pub fn theme(&self, _window: window::Id) -> Theme {
         match self {
             Loupe::Ready(app) => app.palette.iced(),
             Loupe::Starting { palette, .. } => palette.iced(),
         }
     }
 
-    pub fn scale(&self) -> f64 {
+    pub fn scale(&self, _window: window::Id) -> f64 {
         match self {
             Loupe::Ready(app) => app.scale,
             Loupe::Starting { scale, .. } => *scale,
@@ -66,8 +67,8 @@ impl Loupe {
             }
             Message::FirstFrame => {
                 let Some(waiting) = waiting.take() else { return Task::none() };
-                let Waiting { loaded, settings, shift_at_start } = *waiting;
-                let (app, task) = App::new(loaded, settings, shift_at_start);
+                let Waiting { main, loaded, settings, shift_at_start } = *waiting;
+                let (app, task) = App::new(main, loaded, settings, shift_at_start);
                 *self = Loupe::Ready(Box::new(app));
                 task
             }
@@ -75,11 +76,12 @@ impl Loupe {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self, window: window::Id) -> Element<'_, Message> {
         match self {
-            Loupe::Ready(app) => app.view(),
-            Loupe::Starting { palette, .. } => {
+            Loupe::Ready(app) => app.view_of(window),
+            Loupe::Starting { main, palette, .. } => {
                 let palette = *palette;
+                let _ = main;
                 center(image(splash_icon()).width(ICON_SIZE).height(ICON_SIZE))
                     .style(move |_| iced::widget::container::Style { background: Some(palette.background.into()), ..Default::default() })
                     .into()

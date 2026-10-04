@@ -18,6 +18,7 @@ pub struct Settings {
     pub mixer_height: Option<f32>,
     pub folder: Option<PathBuf>,
     pub mixer_open: bool,
+    pub mixer_alone: bool,
     pub input: Option<String>,
     pub autosave_minutes: u32,
     pub backups_kept: u32,
@@ -86,6 +87,7 @@ impl Settings {
             mixer_height: value_of("mixer_height").and_then(|value| value.parse().ok()),
             folder: value_of("folder").map(PathBuf::from),
             mixer_open: value_of("mixer") == Some("open"),
+            mixer_alone: value_of("mixer_alone") == Some("yes"),
             input: value_of("input").map(str::to_string),
             autosave_minutes: value_of("autosave_minutes").and_then(|text| autosave_minutes_from(text).ok()).unwrap_or(DEFAULT_AUTOSAVE_MINUTES),
             backups_kept: value_of("backups_kept").and_then(|text| backups_kept_from(text).ok()).unwrap_or(DEFAULT_BACKUPS_KEPT),
@@ -99,7 +101,6 @@ impl Settings {
             punch: value_of("punch") == Some("on"),
             hear_input: value_of("hear_input") != Some("off"),
             snap: value_of("snap") != Some("off"),
-            // Empty means every MIDI input; a list means only those, kept tab separated.
             midi_inputs: value_of("midi_inputs").map(|value| value.split('\t').filter(|name| !name.is_empty()).map(str::to_string).collect()),
             audio: loupe_engine::Device {
                 driver: value_of("audio_driver").map(str::to_string),
