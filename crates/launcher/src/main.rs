@@ -47,7 +47,9 @@ fn main() {
     let Some(program) = chosen(&home) else {
         return;
     };
-    let _ = Command::new(program).args(std::env::args_os().skip(1)).spawn();
+    // Wait for Loupe rather than spawning and leaving. Whoever started the launcher
+    // may hold it in a job that is killed when it returns, which would take Loupe with it.
+    let _ = Command::new(program).args(std::env::args_os().skip(1)).status();
 }
 
 #[cfg(test)]
