@@ -16,6 +16,8 @@ pub struct Recording {
     note_tracks: Vec<TrackId>,
     pub taped: Vec<TapedKey>,
     counted_in: bool,
+    looping: Option<(Frames, Frames)>,
+    pub began: Option<i64>,
 }
 
 impl App {
@@ -53,7 +55,8 @@ impl App {
         }
         self.problem = None;
         self.notice = None;
-        self.engine.set_endless(true);
+        let looping = self.loop_range.filter(|(from, to)| to > from && (!self.playing || (*from..*to).contains(&self.playhead)));
+        self.engine.set_endless(looping.is_none());
         let counted_in = !self.playing && self.count_in_bars > 0;
         if !self.playing {
             if let Some((from, _)) = self.loop_range {
@@ -65,7 +68,7 @@ impl App {
             self.engine.play();
             self.playing = true;
         }
-        self.recording = Some(Recording { from: self.playhead, tracks, note_tracks, taped: Vec::new(), counted_in });
+        self.recording = Some(Recording { from: self.playhead, tracks, note_tracks, taped: Vec::new(), counted_in, looping, began: None });
         self.listen_if_armed();
         Task::none()
     }
@@ -77,7 +80,7 @@ impl App {
         let stopped_at = self.engine.position();
         self.engine.hear_on(&[]);
         self.engine.tape_keys(false);
-        let began = self.input.as_ref().and_then(Input::take_began).map(|at| self.engine.position_at(at));
+        let began = recording.began.or_else(|| self.input.as_ref().and_then(Input::take_began).map(|at| self.engine.position_at(at)));
         self.engine.stop();
         self.engine.set_endless(false);
         self.playing = false;
@@ -121,10 +124,12 @@ impl App {
             .collect();
         let host = loupe_plugins::sandbox::host_beside_us();
         let keep_from = if recording.counted_in { recording.from as i64 } else { 0 };
+        let passes = recording.looping.and_then(|(from, to)| loop_takes(start, from, to, take.frames, rate));
+        let pad = passes.as_ref().map_or(0, |passes| passes.pad);
         self.loading += 1;
         let (done, loaded) = oneshot::channel();
         std::thread::spawn(move || {
-            let read = Source::load(&take.path, rate).map(Arc::new).map(|dry| {
+            let read = Source::load(&take.path, rate).and_then(|dry| padded(dry, &take.path, pad, rate)).map(Arc::new).map(|dry| {
                 let mut trouble = None;
                 let sources = tracks
                     .iter()
@@ -145,11 +150,11 @@ impl App {
         });
         Task::perform(
             async move { loaded.await.unwrap_or_else(|_| Err("reading the take stopped unexpectedly".into())) },
-            move |result| Message::TakeReady { start, keep_from, warning: warning.clone(), result },
+            move |result| Message::TakeReady { start, keep_from, passes: passes.clone(), warning: warning.clone(), result },
         )
     }
 
-    pub(crate) fn place_take(&mut self, start: i64, keep_from: i64, result: Result<Vec<(TrackId, Arc<Source>)>, String>) {
+    pub(crate) fn place_take(&mut self, start: i64, keep_from: i64, passes: Option<Passes>, result: Result<Vec<(TrackId, Arc<Source>)>, String>) {
         self.loading = self.loading.saturating_sub(1);
         let sources = match result {
             Ok(sources) => sources,
@@ -158,6 +163,10 @@ impl App {
                 return;
             }
         };
+        if let Some(passes) = passes {
+            self.place_passes(passes, sources);
+            return;
+        }
         let cut = (keep_from.max(0) - start).max(0) as Frames;
         let Some(whole) = sources.first().map(|(_, source)| source.frames.len() as Frames) else {
             return;
@@ -257,6 +266,19 @@ mod tests {
     }
 
     #[test]
+    fn each_time_round_the_loop_is_a_take_and_the_last_whole_one_plays() {
+        let counted = loop_takes(1_000 - 400, 1_000, 2_000, 400 + 3_500, 100).unwrap();
+        assert_eq!(counted.offsets, vec![400, 1_400, 2_400, 3_400]);
+        assert_eq!((counted.pad, counted.active, counted.len, counted.from), (0, 2, 1_000, 1_000));
+        let late = loop_takes(1_250, 1_000, 2_000, 2_750, 100).unwrap();
+        assert_eq!(late.pad, 250);
+        assert_eq!(late.offsets, vec![0, 1_000, 2_000]);
+        assert_eq!(late.active, 2);
+        assert_eq!(loop_takes(1_000, 1_000, 2_000, 900, 100), None, "once round is an ordinary take");
+        assert_eq!(loop_takes(1_000, 1_000, 2_000, 1_010, 100), None, "a stub after the loop comes round is not a take");
+    }
+
+    #[test]
     fn keys_pressed_and_released_become_notes_and_held_keys_end_at_stop() {
         let mine = TrackId(1);
         let other = TrackId(2);
@@ -277,5 +299,65 @@ mod tests {
             ]
         );
         assert!(notes_from_keys(&taped, TrackId(9), 1_000).is_empty());
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Passes {
+    pub from: Frames,
+    pub len: Frames,
+    pub pad: Frames,
+    pub offsets: Vec<i64>,
+    pub active: usize,
+}
+
+pub fn loop_takes(start: i64, from: Frames, to: Frames, frames: u64, rate: u32) -> Option<Passes> {
+    let len = to.checked_sub(from).filter(|len| *len > 0)?;
+    let first = from as i64 - start;
+    let pad = (-first).max(0) as Frames;
+    let first = first + pad as i64;
+    let recorded = (frames + pad) as i64;
+    let shortest = (rate / 4) as i64;
+    let offsets: Vec<i64> = (0..).map(|pass| first + pass * len as i64).take_while(|at| *at < recorded - shortest).collect();
+    if offsets.len() < 2 {
+        return None;
+    }
+    let whole = offsets.iter().rposition(|at| at + len as i64 <= recorded).unwrap_or(offsets.len() - 1);
+    Some(Passes { from, len, pad, offsets, active: whole })
+}
+
+fn padded(dry: Source, path: &Path, pad: Frames, rate: u32) -> Result<Source, String> {
+    if pad == 0 {
+        return Ok(dry);
+    }
+    let mut frames = vec![[0.0; 2]; pad as usize];
+    frames.extend_from_slice(&dry.frames);
+    loupe_engine::write_frames(path, &frames, rate).map_err(|why| format!("{}: {why}", path.display()))?;
+    Source::load(path, rate)
+}
+
+impl App {
+    fn place_passes(&mut self, passes: Passes, sources: Vec<(TrackId, Arc<Source>)>) {
+        let Passes { from, len, offsets, active, .. } = passes;
+        let count = offsets.len();
+        let mut placed = Vec::new();
+        self.transact(None, |project| {
+            for (track, source) in sources {
+                if project.track(track).is_none() {
+                    continue;
+                }
+                let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source, start: from })? else {
+                    return Err(CommandError::NoSuchClip);
+                };
+                project.apply(Command::TrimClip { clip, offset: offsets[active].max(0) as Frames, len })?;
+                project.apply(Command::SetTakes { clip, offsets: offsets.clone(), active })?;
+                placed.push(clip);
+            }
+            Ok(Outcome::Done)
+        });
+        if !placed.is_empty() {
+            self.choose(placed);
+            self.notice = Some(format!("{count} takes. Click a lane to hear it, or use the comp tool (K) to pick the best parts."));
+        }
     }
 }

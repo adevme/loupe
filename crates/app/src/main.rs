@@ -23,6 +23,7 @@ mod stretching;
 mod stockwin;
 mod printing;
 mod recording;
+mod takes;
 mod selection;
 mod sampler_sheet;
 mod scripting;
@@ -120,7 +121,7 @@ const HOME_SIZE: Size = Size::new(940.0, 600.0);
 pub enum Message {
     TogglePlay,
     ToggleRecord,
-    TakeReady { start: i64, keep_from: i64, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
+    TakeReady { start: i64, keep_from: i64, passes: Option<recording::Passes>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
     ToStart,
     Seek(Frames),
     Tick,
@@ -233,6 +234,8 @@ pub enum Message {
     UseInstrument(TrackId, Instrument),
     ToggleRecordsNotes(TrackId),
     TogglePrintTakes(TrackId),
+    UseTake(ClipId, usize),
+    Comp { track: TrackId, take: usize, from: Frames, to: Frames },
     ShowChain(TrackId, bool),
     HearInputToggled,
     OpenSampler(TrackId),
@@ -773,9 +776,9 @@ impl App {
         }
         match message {
             Message::ToggleRecord => return self.toggle_recording(),
-            Message::TakeReady { start, keep_from, warning, result } => {
+            Message::TakeReady { start, keep_from, passes, warning, result } => {
                 let printing = result.as_ref().ok().and_then(|(_, trouble)| trouble.clone());
-                self.place_take(start, keep_from, result.map(|(sources, _)| sources));
+                self.place_take(start, keep_from, passes, result.map(|(sources, _)| sources));
                 if let Some(why) = printing {
                     self.problem = Some(format!("The take is kept dry, the Rec plugins could not be printed: {why}"));
                 }
@@ -814,6 +817,9 @@ impl App {
                 }
                 if let Some(recording) = self.recording.as_mut() {
                     recording.taped.extend(self.engine.taped_keys());
+                    if recording.began.is_none() {
+                        recording.began = self.input.as_ref().and_then(Input::take_began).map(|at| self.engine.position_at(at));
+                    }
                 }
                 self.keep_writing();
                 if let Some(window) = self.stock.as_mut() {
@@ -1040,6 +1046,12 @@ impl App {
             Message::PickSample(track) => return self.pick_sample(track),
             Message::SampleFile(track, path) => return self.load_sample(track, path),
             Message::SampleLoaded(track, result) => self.sample_loaded(track, result),
+            Message::UseTake(clip, take) => {
+                if self.project.clip(clip).is_some_and(|found| found.take != take) {
+                    self.edit(None, Command::UseTake { clip, take });
+                }
+            }
+            Message::Comp { track, take, from, to } => self.comp(track, take, from, to),
             Message::TogglePrintTakes(track) => {
                 self.overlay = Overlay::None;
                 if let Some(on) = self.project.track(track).map(|t| !t.print_takes) {
@@ -2764,6 +2776,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("c", false, _) => Some(Message::SetTool(Tool::Razor)),
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
+                ("k", false, _) => Some(Message::SetTool(Tool::Comp)),
                 ("m", true, _) => Some(Message::ToggleMetronome),
                 ("t", true, _) => Some(Message::ToggleTypingKeys),
                 ("q", true, _) => Some(Message::RollAction(piano_roll::RollAction::Quantize)),

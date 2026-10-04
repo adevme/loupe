@@ -46,6 +46,8 @@ pub struct Clip {
     pub notes: Option<Arc<Vec<Note>>>,
     pub stretch: f64,
     pub stretched: Option<Arc<Source>>,
+    pub takes: Vec<i64>,
+    pub take: usize,
 }
 
 impl Clip {
@@ -82,6 +84,15 @@ impl Clip {
 
     pub fn end(&self) -> Frames {
         self.start + self.len
+    }
+
+    pub fn has_takes(&self) -> bool {
+        self.takes.len() > 1
+    }
+
+    pub fn take_offset(&self, take: usize) -> Option<Frames> {
+        let shifted = self.offset as i64 + self.takes.get(take)?;
+        (shifted >= 0).then_some(shifted as Frames)
     }
 
     pub fn is_notes(&self) -> bool {
@@ -177,6 +188,8 @@ pub enum Command {
     SetClipMuted { clip: ClipId, muted: bool },
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetStretch { clip: ClipId, stretch: f64 },
+    SetTakes { clip: ClipId, offsets: Vec<i64>, active: usize },
+    UseTake { clip: ClipId, take: usize },
     FillStretch { source: Arc<Source>, stretch: f64, stretched: Arc<Source> },
     SetBpm(f64),
     SetMasterGain(f32),
@@ -417,6 +430,8 @@ impl Project {
                     notes: None,
                     stretch: 1.0,
                     stretched: None,
+                    takes: Vec::new(),
+                    take: 0,
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -451,6 +466,8 @@ impl Project {
                     notes: Some(Arc::new(tidy(notes))),
                     stretch: 1.0,
                     stretched: None,
+                    takes: Vec::new(),
+                    take: 0,
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -528,6 +545,37 @@ impl Project {
                 target.fade_out.len = target.fade_out.len.min(len - target.fade_in.len);
                 Ok(Outcome::Done)
             }
+            Command::SetTakes { clip, offsets, active } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                let Some(chosen) = offsets.get(active).copied() else {
+                    return Err(CommandError::InvalidValue);
+                };
+                if target.notes.is_some() || chosen < 0 {
+                    return Err(CommandError::InvalidValue);
+                }
+                target.offset = chosen as Frames;
+                target.takes = if offsets.len() > 1 { offsets.iter().map(|offset| offset - chosen).collect() } else { Vec::new() };
+                target.take = if offsets.len() > 1 { active } else { 0 };
+                Ok(Outcome::Done)
+            }
+            Command::UseTake { clip, take } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                let Some(shift) = target.takes.get(take).copied() else {
+                    return Err(CommandError::InvalidValue);
+                };
+                let offset = target.offset as i64 + shift;
+                if offset < 0 {
+                    return Err(CommandError::InvalidValue);
+                }
+                for other in target.takes.iter_mut() {
+                    *other -= shift;
+                }
+                target.offset = offset as Frames;
+                target.take = take;
+                Ok(Outcome::Done)
+            }
             Command::SetStretch { clip, stretch } => {
                 let (t, i) = self.locate(clip)?;
                 let target = &mut self.tracks[t].clips[i];
@@ -537,6 +585,9 @@ impl Project {
                 let scale = stretch / target.stretch;
                 let len = ((target.len as f64 * scale).round() as Frames).max(1);
                 target.offset = (target.offset as f64 * scale).round() as Frames;
+                for shift in target.takes.iter_mut() {
+                    *shift = (*shift as f64 * scale).round() as i64;
+                }
                 target.len = len;
                 target.fade_in.len = ((target.fade_in.len as f64 * scale).round() as Frames).min(len);
                 target.fade_out.len = ((target.fade_out.len as f64 * scale).round() as Frames).min(len - target.fade_in.len);

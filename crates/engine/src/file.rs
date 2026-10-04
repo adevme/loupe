@@ -75,6 +75,8 @@ pub struct SavedClip {
     pub fade_out: Fade,
     pub notes: Option<(String, Vec<Note>)>,
     pub stretch: f64,
+    pub takes: Vec<i64>,
+    pub take: usize,
 }
 
 impl SavedProject {
@@ -177,6 +179,8 @@ impl SavedProject {
                             fade_out: clip.fade_out,
                             notes: clip.notes.as_ref().map(|notes| (clip.source.name.clone(), notes.to_vec())),
                             stretch: clip.stretch,
+                            takes: clip.takes.clone(),
+                            take: clip.take,
                             fx: clip
                                 .fx
                                 .iter()
@@ -233,7 +237,7 @@ impl SavedProject {
                     None => format!("clip source={}", clip.source),
                 };
                 out.push_str(&format!(
-                    "{opening} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}{}{}\n",
+                    "{opening} start={} offset={} len={} gain={} muted={} fade_in={}:{} fade_out={}:{}{}{}{}\n",
                     clip.start,
                     clip.offset,
                     clip.len,
@@ -244,6 +248,7 @@ impl SavedProject {
                     clip.fade_out.len,
                     clip.fade_out.curve,
                     if clip.stretch == 1.0 { String::new() } else { format!(" stretch={}", clip.stretch) },
+                    if clip.takes.len() > 1 { format!(" takes={} take={}", clip.takes.iter().map(i64::to_string).collect::<Vec<_>>().join(","), clip.take) } else { String::new() },
                     clip.notes.as_ref().map_or(String::new(), |(name, _)| format!(" name={name}"))
                 ));
                 for note in clip.notes.iter().flat_map(|(_, notes)| notes) {
@@ -413,6 +418,8 @@ impl SavedProject {
                             Some(text) => text.parse::<f64>().ok().filter(|s| s.is_finite() && *s > 0.0).ok_or_else(|| bad("the stretch is not readable"))?,
                             None => 1.0,
                         },
+                        takes: fields.get("takes").map(|text| text.split(',').filter_map(|shift| shift.parse().ok()).collect()).unwrap_or_default(),
+                        take: fields.get("take").and_then(|text| text.parse().ok()).unwrap_or(0),
                     };
                     if clip.notes.is_none() && clip.source >= saved.sources.len() {
                         return Err(bad("the clip points at audio the file does not list"));
@@ -494,6 +501,11 @@ impl SavedProject {
                 let _ = project.apply(trimmed);
                 let _ = project.apply(Command::SetClipGain { clip: id, gain: clip.gain });
                 let _ = project.apply(Command::SetClipMuted { clip: id, muted: clip.muted });
+                if clip.takes.len() > 1 {
+                    let offset = rescale(clip.offset) as i64;
+                    let offsets = clip.takes.iter().map(|shift| offset + shift.signum() * rescale(shift.unsigned_abs()) as i64).collect();
+                    let _ = project.apply(Command::SetTakes { clip: id, offsets, active: clip.take });
+                }
                 for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
                     let fade = Fade { len: rescale(fade.len), curve: fade.curve };
                     let _ = project.apply(Command::SetClipFade { clip: id, edge, fade });
@@ -763,6 +775,41 @@ mod routing_round_trip {
     use super::*;
     use crate::model::{Command, Outcome};
     use crate::source::Source;
+
+    #[test]
+    fn takes_follow_trims_and_splits_and_survive_a_save_and_open() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let passes: Vec<[f32; 2]> = (0..3_000).map(|at| [(at / 1_000) as f32, 0.0]).collect();
+        let source = Arc::new(Source::from_frames("Vocal (take 1)", passes));
+        let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track, source, start: 500 }) else { panic!() };
+        p.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
+        p.apply(Command::SetTakes { clip, offsets: vec![0, 1_000, 2_000], active: 2 }).unwrap();
+        let found = p.clip(clip).unwrap();
+        assert_eq!((found.offset, found.take, found.takes.clone()), (2_000, 2, vec![-2_000, -1_000, 0]));
+        assert_eq!(found.audio()[found.offset as usize][0], 2.0, "the last pass plays");
+        p.apply(Command::UseTake { clip, take: 0 }).unwrap();
+        assert_eq!(p.clip(clip).unwrap().offset, 0);
+        p.apply(Command::TrimClip { clip, offset: 100, len: 900 }).unwrap();
+        p.apply(Command::SplitClip { clip, at: 1_000 }).unwrap();
+        let pieces: Vec<Clip> = p.tracks[0].clips.clone();
+        assert_eq!(pieces.len(), 2);
+        for piece in &pieces {
+            assert_eq!(piece.take_offset(1).unwrap(), piece.offset + 1_000, "every take keeps its place in time");
+        }
+        let right = pieces[1].id;
+        p.apply(Command::UseTake { clip: right, take: 1 }).unwrap();
+        let comped = p.clip(right).unwrap();
+        assert_eq!(comped.audio()[comped.offset as usize][0], 1.0);
+        assert!(p.apply(Command::UseTake { clip: right, take: 7 }).is_err());
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        assert!(text.contains(" takes="));
+        let sources = vec![p.sources[0].clone()];
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&sources, 48_000);
+        for (was, now) in p.tracks[0].clips.iter().zip(&back.tracks[0].clips) {
+            assert_eq!((now.offset, now.take, &now.takes), (was.offset, was.take, &was.takes));
+        }
+    }
 
     #[test]
     fn rec_plugins_and_printing_survive_a_save_and_open() {

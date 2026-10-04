@@ -45,6 +45,7 @@ const MIN_FADE_PX_FOR_SHAPE_HANDLE: f32 = 24.0;
 const CURVE_PER_PX: f32 = 1.0 / 50.0;
 const GAIN_DB_PER_PX: f32 = 0.1;
 pub const MIN_GAIN_DB: f32 = -24.0;
+const MIN_TAKE_LANE: f32 = 10.0;
 pub const MAX_GAIN_DB: f32 = 12.0;
 pub const MIN_ZOOM: f64 = 2.0;
 
@@ -57,10 +58,11 @@ pub enum Tool {
     Razor,
     Mute,
     Delete,
+    Comp,
 }
 
 impl Tool {
-    const ALL: [Tool; 4] = [Tool::Pencil, Tool::Razor, Tool::Mute, Tool::Delete];
+    const ALL: [Tool; 5] = [Tool::Pencil, Tool::Razor, Tool::Mute, Tool::Delete, Tool::Comp];
 
     fn icon(self) -> &'static str {
         match self {
@@ -68,6 +70,7 @@ impl Tool {
             Tool::Razor => "slice",
             Tool::Mute => "volume-x",
             Tool::Delete => "eraser",
+            Tool::Comp => "layers-2",
         }
     }
 }
@@ -115,7 +118,8 @@ pub struct Interaction {
 
 enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
-    Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
+    Clip { id: ClipId, grab: f64, origin: Point, moving: bool, lane: Option<usize> },
+    Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
     Resize { track: TrackId, top: f32 },
     Scroll { grab_x: f32, span: f64 },
     Slice { from: Point, to: Point },
@@ -152,6 +156,11 @@ impl ClipBox {
 
     fn wave_height(&self) -> f32 {
         self.height - self.title - 5.0
+    }
+
+    fn take_band(&self, clip: &Clip, take: usize) -> Option<(f32, f32)> {
+        let lane = take_lane_height(clip, self.wave_height())?;
+        Some((self.wave_top() + lane * take as f32, lane))
     }
 }
 
@@ -551,6 +560,13 @@ impl Timeline<'_> {
         grips
     }
 
+    fn take_at(&self, clip: &Clip, p: Point) -> Option<usize> {
+        let shape = self.clip_box(clip)?;
+        let lane = take_lane_height(clip, shape.wave_height())?;
+        let row = ((p.y - shape.wave_top()) / lane).floor();
+        (row >= 0.0 && (row as usize) < clip.takes.len()).then_some(row as usize)
+    }
+
     fn resize_grip_at(&self, p: Point) -> Option<&Track> {
         if !self.in_header(p.x) {
             return None;
@@ -748,6 +764,17 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Slice { from: p, to: p });
                         Some(Message::Refresh)
                     }
+                    (Tool::Comp, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
+                        let (Some(take), Some(shape), Some(track)) = (self.take_at(clip, p), self.clip_box(clip), self.project.track_of(clip.id)) else {
+                            return (Captured, None);
+                        };
+                        let Some(band) = shape.take_band(clip, take) else {
+                            return (Captured, None);
+                        };
+                        let at = self.snap(self.frames_at(p.x), free);
+                        state.drag = Some(Drag::Comp { clip: clip.id, track: track.id, take, from: at, to: at, band });
+                        Some(Message::Refresh)
+                    }
                     (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
                         let muted = !clip.muted;
                         state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id] });
@@ -821,6 +848,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             grab: self.frames_at(p.x) - clip.start as f64,
                             origin: p,
                             moving: false,
+                            lane: self.take_at(clip, p).filter(|take| *take != clip.take),
                         });
                         (!self.selection.contains(&clip.id)).then_some(Message::Select(Some(clip.id)))
                     }
@@ -868,7 +896,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let range = (here != *anchor).then(|| (here.min(*anchor), here.max(*anchor)));
                         (Captured, (range != self.loop_range).then_some(Message::SetLoop(range)))
                     }
-                    Drag::Clip { id, grab, origin, moving } => {
+                    Drag::Comp { to, .. } => {
+                        *to = self.snap(self.frames_at(p.x), free);
+                        (Captured, Some(Message::Refresh))
+                    }
+                    Drag::Clip { id, grab, origin, moving, .. } => {
                         if !*moving && p.distance(*origin) < DRAG_THRESHOLD {
                             return (Captured, None);
                         }
@@ -1001,6 +1033,14 @@ impl canvas::Program<Message> for Timeline<'_> {
                 }
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
+                Some(Drag::Clip { id, moving: false, lane: Some(take), .. }) => (Captured, Some(Message::UseTake(id, take))),
+                Some(Drag::Comp { clip, track, take, from, to, .. }) => {
+                    let message = match from == to {
+                        true => Message::UseTake(clip, take),
+                        false => Message::Comp { track, take, from: from.min(to), to: from.max(to) },
+                    };
+                    (Captured, Some(message))
+                }
                 Some(Drag::Range { anchor, moving: false, .. }) => (Captured, Some(Message::RulerClicked(anchor))),
                 Some(
                     Drag::Clip { moving: true, .. }
@@ -1169,6 +1209,14 @@ impl canvas::Program<Message> for Timeline<'_> {
                 overlay.stroke(&Path::line(start, end), Stroke::default().with_color(p.accent).with_width(1.0));
             }
         }
+        if let Some(Drag::Comp { from, to, band: (top, height), .. }) = &state.drag {
+            let left = self.x_of(*from.min(to) as f64).max(self.lanes_left());
+            let right = self.x_of(*from.max(to) as f64).min(self.lanes_right());
+            if right > left {
+                overlay.fill_rectangle(Point::new(left, *top), Size::new(right - left, *height), theme::alpha(p.accent, 0.22));
+                overlay.stroke(&Path::rectangle(Point::new(left, *top), Size::new(right - left, *height)), Stroke::default().with_color(p.accent).with_width(1.0));
+            }
+        }
         if let Some(from) = self.recording_from {
             let left = self.x_of(from as f64).max(self.lanes_left());
             let right = self.x_of(self.playhead as f64).min(self.lanes_right());
@@ -1286,6 +1334,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
             (Tool::Mute | Tool::Delete, Some(Hit::Clip(_) | Hit::Grip(..))) => mouse::Interaction::Pointer,
+            (Tool::Comp, Some(Hit::Clip(_) | Hit::Grip(..))) => mouse::Interaction::Crosshair,
             (Tool::Pencil, Some(Hit::Grip(_, grip))) => grip.pointer(),
             (_, Some(Hit::Edge(..))) => mouse::Interaction::ResizingHorizontally,
             (Tool::Pencil, Some(Hit::Clip(_))) => mouse::Interaction::Grab,
@@ -1524,7 +1573,24 @@ impl Timeline<'_> {
         if wave_height > 4.0 {
             match &clip.notes {
                 Some(notes) => self.draw_notes(frame, clip, notes, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
-                None => self.draw_waveform(frame, clip, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
+                None => match take_lane_height(clip, wave_height) {
+                    Some(lane) => {
+                        let (from_x, to_x) = (shown_left.max(0.0), shown_right.min(size.width));
+                        for take in 0..clip.takes.len() {
+                            let lane_top = wave_top + lane * take as f32;
+                            if take == clip.take {
+                                frame.fill_rectangle(Point::new(from_x, lane_top), Size::new((to_x - from_x).max(0.0), lane), theme::alpha(colour, 0.16));
+                            }
+                            if take > 0 {
+                                frame.fill_rectangle(Point::new(from_x, lane_top), Size::new((to_x - from_x).max(0.0), 1.0), theme::alpha(colour, 0.25));
+                            }
+                            let Some(offset) = clip.take_offset(take) else { continue };
+                            let tone = if take == clip.take { colour } else { theme::mix(p.background, colour, 0.45) };
+                            self.draw_waveform(frame, clip, offset, left, from_x, to_x, lane_top + 1.0, lane - 2.0, tone);
+                        }
+                    }
+                    None => self.draw_waveform(frame, clip, clip.offset, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
+                },
             }
         }
 
@@ -1548,7 +1614,7 @@ impl Timeline<'_> {
                         (false, _) => clip.source.name.clone(),
                         (true, false) => format!("{}  {:.0}%", clip.source.name, clip.stretch * 100.0),
                         (true, true) => format!("{}  {:.0}%  stretching…", clip.source.name, clip.stretch * 100.0),
-                    },
+                    } + &if clip.has_takes() { format!("  ·  take {} of {}", clip.take + 1, clip.takes.len()) } else { String::new() },
                     position: Point::new(
                         self.lanes_left() + left.max(0.0) + 8.0 - visible.x,
                         title_on_canvas.y - visible.y + self.palette.clip_title_height / 2.0,
@@ -1603,6 +1669,7 @@ impl Timeline<'_> {
         &self,
         frame: &mut Frame,
         clip: &Clip,
+        offset: Frames,
         clip_left: f32,
         from_x: f32,
         to_x: f32,
@@ -1616,18 +1683,18 @@ impl Timeline<'_> {
         let middle = top + height / 2.0;
         let reach = height / 2.0;
         let frames_per_px = self.rate() / self.view.zoom;
-        let source_at = |x: f32| clip.offset as f64 + (x - clip_left) as f64 * frames_per_px;
-        let source_end = (clip.offset + clip.len) as f64;
+        let source_at = |x: f32| offset as f64 + (x - clip_left) as f64 * frames_per_px;
+        let source_end = (offset + clip.len) as f64;
 
         if frames_per_px < 1.0 {
-            let first = source_at(from_x).floor().max(clip.offset as f64) as usize;
+            let first = source_at(from_x).floor().max(offset as f64) as usize;
             let last = (source_at(to_x).ceil().min(source_end - 1.0)) as usize;
             let samples = clip.audio();
             let point = |i: usize| {
-                let level = clip.gain * clip.fade_level(i as Frames - clip.offset);
+                let level = clip.gain * clip.fade_level(i as Frames - offset);
                 let value = ((samples[i][0] + samples[i][1]) * 0.5 * level).clamp(-1.0, 1.0);
                 Point::new(
-                    clip_left + ((i as f64 - clip.offset as f64) / frames_per_px) as f32,
+                    clip_left + ((i as f64 - offset as f64) / frames_per_px) as f32,
                     middle - value * reach,
                 )
             };
@@ -1656,13 +1723,13 @@ impl Timeline<'_> {
         let mut lows = Vec::with_capacity(columns);
         for c in 0..columns {
             let x = from_x + c as f32;
-            let a = source_at(x).max(clip.offset as f64);
+            let a = source_at(x).max(offset as f64);
             let b = (a + frames_per_px).min(source_end);
             if b <= a {
                 break;
             }
             let (lo, hi) = clip.peak(a as usize, (b.ceil() as usize).max(a as usize + 1));
-            let level = clip.gain * clip.fade_level((a - clip.offset as f64) as Frames);
+            let level = clip.gain * clip.fade_level((a - offset as f64) as Frames);
             let hi = middle - (hi * level).clamp(-1.0, 1.0) * reach;
             let lo = middle - (lo * level).clamp(-1.0, 1.0) * reach;
             let thin = (1.0 - (lo - hi)).max(0.0) / 2.0;
@@ -1988,4 +2055,12 @@ fn shorten(name: &str, most: usize) -> String {
         short.push('…');
         short
     }
+}
+
+fn take_lane_height(clip: &Clip, wave_height: f32) -> Option<f32> {
+    if !clip.has_takes() {
+        return None;
+    }
+    let lane = wave_height / clip.takes.len() as f32;
+    (lane >= MIN_TAKE_LANE).then_some(lane)
 }
