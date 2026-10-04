@@ -342,10 +342,11 @@ impl Rt {
                 return false;
             };
             let instrument = track.instrument;
+            let sample = track.sample.as_deref().map(|sample| &sample.frames[..]);
             let gain = if track.muted { 0.0 } else { track.gain * master };
-            instrument.play(&voice.note, voice.played, out, |_| gain, rate);
+            instrument.play_with(sample, &voice.note, voice.played, out, |_| gain, rate);
             voice.played += frames as Frames;
-            voice.note.len == HELD || voice.played < voice.note.len + instrument.tail(rate)
+            voice.note.len == HELD || voice.played < voice.note.len + instrument.tail_for(&voice.note, rate, sample)
         });
     }
 

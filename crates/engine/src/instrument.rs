@@ -64,9 +64,43 @@ impl Default for Synth {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sampler {
+    pub root: u8,
+    pub tune: f32,
+    pub attack: f32,
+    pub release: f32,
+    pub one_shot: bool,
+    pub keytrack: bool,
+}
+
+impl Default for Sampler {
+    fn default() -> Self {
+        Self { root: 60, tune: 0.0, attack: 0.002, release: 0.08, one_shot: false, keytrack: true }
+    }
+}
+
+impl Sampler {
+    pub fn speed(&self, key: u8) -> f64 {
+        let semitones = if self.keytrack { key as f64 - self.root as f64 } else { 0.0 } + self.tune as f64;
+        2f64.powf(semitones / 12.0)
+    }
+
+    fn level(&self, seconds: f32, held: f32) -> f32 {
+        let rising = if self.attack > 0.0 { (seconds / self.attack).min(1.0) } else { 1.0 };
+        let falling = match (self.one_shot, seconds > held) {
+            (false, true) if self.release > 0.0 => (1.0 - (seconds - held) / self.release).max(0.0),
+            (false, true) => 0.0,
+            _ => 1.0,
+        };
+        rising * falling
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Instrument {
     Synth(Synth),
     Drums,
+    Sampler(Sampler),
 }
 
 impl Default for Instrument {
@@ -196,18 +230,57 @@ impl Instrument {
         let seconds = match self {
             Instrument::Synth(synth) => synth.release,
             Instrument::Drums => DRUM_TAIL_SECONDS,
+            Instrument::Sampler(sampler) => sampler.release,
         };
         (seconds * rate as f32).ceil() as Frames
+    }
+
+    pub fn tail_for(&self, note: &Note, rate: u32, sample: Option<&[[f32; 2]]>) -> Frames {
+        match (self, sample) {
+            (Instrument::Sampler(sampler), Some(frames)) if sampler.one_shot => {
+                let lasts = (frames.len() as f64 / sampler.speed(note.key)).ceil() as Frames;
+                lasts.saturating_sub(note.len)
+            }
+            _ => self.tail(rate),
+        }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
             Instrument::Synth(_) => "Loupe Synth",
             Instrument::Drums => "Loupe Drums",
+            Instrument::Sampler(_) => "Loupe Sampler",
         }
     }
 
     pub fn play(&self, note: &Note, since_start: Frames, out: &mut [[f32; 2]], gain: impl Fn(usize) -> f32, rate: u32) {
+        self.play_with(None, note, since_start, out, gain, rate);
+    }
+
+    pub fn play_with(&self, sample: Option<&[[f32; 2]]>, note: &Note, since_start: Frames, out: &mut [[f32; 2]], gain: impl Fn(usize) -> f32, rate: u32) {
+        if let Instrument::Sampler(sampler) = self {
+            let Some(frames) = sample.filter(|frames| frames.len() > 1) else {
+                return;
+            };
+            let speed = sampler.speed(note.key);
+            let rate_f = rate as f32;
+            let held = note.len as f32 / rate_f;
+            let level = note.velocity.clamp(0.0, 1.0);
+            for (i, frame) in out.iter_mut().enumerate() {
+                let at = since_start + i as Frames;
+                let place = at as f64 * speed;
+                let whole = place as usize;
+                if whole + 1 >= frames.len() {
+                    break;
+                }
+                let part = (place - whole as f64) as f32;
+                let (a, b) = (frames[whole], frames[whole + 1]);
+                let shaped = sampler.level(at as f32 / rate_f, held) * level * gain(i);
+                frame[0] += (a[0] + (b[0] - a[0]) * part) * shaped;
+                frame[1] += (a[1] + (b[1] - a[1]) * part) * shaped;
+            }
+            return;
+        }
         let rate_f = rate as f32;
         let held = note.len as f32 / rate_f;
         let level = note.velocity.clamp(0.0, 1.0);
@@ -217,6 +290,7 @@ impl Instrument {
             let value = match self {
                 Instrument::Synth(synth) => synth.sample(note.key, seconds, held, rate_f) * VOICE_LEVEL,
                 Instrument::Drums => drum(note.key, seconds, at) * DRUM_LEVEL,
+                Instrument::Sampler(_) => 0.0,
             } * level
                 * gain(i);
             frame[0] += value;
@@ -230,6 +304,52 @@ mod tests {
     use super::*;
 
     const RATE: u32 = 48_000;
+
+    fn blip(frames: usize) -> Vec<[f32; 2]> {
+        (0..frames).map(|i| {
+            let v = (i as f32 * 0.05).sin() * 0.5;
+            [v, -v]
+        }).collect()
+    }
+
+    fn sampled(sampler: Sampler, sample: &[[f32; 2]], note: Note, frames: usize) -> Vec<[f32; 2]> {
+        let mut out = vec![[0.0; 2]; frames];
+        Instrument::Sampler(sampler).play_with(Some(sample), &note, 0, &mut out, |_| 1.0, RATE);
+        out
+    }
+
+    fn sounding(audio: &[[f32; 2]]) -> usize {
+        audio.iter().rposition(|f| f[0].abs() > 1e-6).map_or(0, |at| at + 1)
+    }
+
+    #[test]
+    fn the_sampler_plays_the_sound_at_the_root_and_an_octave_up_twice_as_fast() {
+        let sample = blip(4_800);
+        let root = Sampler { attack: 0.0, one_shot: true, ..Sampler::default() };
+        let at_root = sampled(root, &sample, Note { key: 60, start: 0, len: 100, velocity: 1.0 }, 10_000);
+        assert!((at_root[100][0] - sample[100][0]).abs() < 1e-6, "the root key plays the sample as it is");
+        assert!((at_root[100][1] + at_root[100][0]).abs() < 1e-6, "stereo is kept");
+        assert!((sounding(&at_root) as i64 - 4_799).abs() <= 2, "one shot plays to the end: {}", sounding(&at_root));
+        let octave_up = sampled(root, &sample, Note { key: 72, start: 0, len: 100, velocity: 1.0 }, 10_000);
+        assert!((sounding(&octave_up) as i64 - 2_399).abs() <= 2, "{}", sounding(&octave_up));
+        let flat = Sampler { keytrack: false, ..root };
+        let same = sampled(flat, &sample, Note { key: 72, start: 0, len: 100, velocity: 1.0 }, 10_000);
+        assert_eq!(sounding(&same), sounding(&at_root));
+    }
+
+    #[test]
+    fn a_held_sample_stops_after_the_release_and_the_tail_says_so() {
+        let sample = blip(48_000);
+        let gated = Sampler { attack: 0.0, release: 0.1, ..Sampler::default() };
+        let note = Note { key: 60, start: 0, len: 4_800, velocity: 1.0 };
+        let out = sampled(gated, &sample, note, 20_000);
+        let last = sounding(&out);
+        assert!(last > 4_800 && last <= 4_800 + 4_801, "{last}");
+        assert_eq!(Instrument::Sampler(gated).tail_for(&note, RATE, Some(&sample)), 4_800);
+        let one_shot = Sampler { one_shot: true, ..gated };
+        assert_eq!(Instrument::Sampler(one_shot).tail_for(&note, RATE, Some(&sample)), 48_000 - 4_800);
+        assert!(sampled(gated, &[], note, 100).iter().all(|f| *f == [0.0, 0.0]), "no sample plays nothing");
+    }
 
     fn rendered(instrument: Instrument, note: Note, frames: usize) -> Vec<[f32; 2]> {
         let mut out = vec![[0.0; 2]; frames];

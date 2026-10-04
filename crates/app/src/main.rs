@@ -23,6 +23,7 @@ mod stretching;
 mod stockwin;
 mod recording;
 mod selection;
+mod sampler_sheet;
 mod scripting;
 mod scripts;
 mod settings;
@@ -226,6 +227,11 @@ pub enum Message {
     NewNotesClip(TrackId),
     UseInstrument(TrackId, Instrument),
     ToggleRecordsNotes(TrackId),
+    OpenSampler(TrackId),
+    SamplerChanged(TrackId, loupe_engine::Sampler),
+    PickSample(TrackId),
+    SampleFile(TrackId, PathBuf),
+    SampleLoaded(TrackId, Result<Arc<Source>, String>),
     RollPlaced { clip: ClipId, notes: Vec<Note>, key: u8, chosen: Vec<Note> },
     RollEdit { clip: ClipId, notes: Vec<Note>, chosen: Option<Vec<Note>> },
     RollChoose(Vec<Note>),
@@ -349,6 +355,7 @@ enum Run {
     Send(TrackId, TrackId),
     Point(loupe_engine::Target),
     Notes(ClipId),
+    Sampler(TrackId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -368,6 +375,7 @@ pub enum Overlay {
     Export,
     Clip(ClipId),
     Routing(TrackId),
+    Sampler(TrackId),
     Plugins(TrackId),
     ClipPlugins(ClipId),
     Knobs(stockwin::Spot, usize),
@@ -810,7 +818,12 @@ impl App {
                 );
             }
             Message::Picked(paths) => return self.import(paths),
-            Message::Dropped(path) => return self.import(vec![path]),
+            Message::Dropped(path) => {
+                if let Overlay::Sampler(track) = self.overlay {
+                    return self.load_sample(track, path);
+                }
+                return self.import(vec![path]);
+            }
             Message::Loaded(path, result) => {
                 self.loading = self.loading.saturating_sub(1);
                 match result {
@@ -987,6 +1000,11 @@ impl App {
                 }
             }
             Message::NewNotesClip(track) => self.new_notes_clip(track),
+            Message::OpenSampler(track) => self.open_sampler(track),
+            Message::SamplerChanged(track, sampler) => self.change_sampler(track, sampler),
+            Message::PickSample(track) => return self.pick_sample(track),
+            Message::SampleFile(track, path) => return self.load_sample(track, path),
+            Message::SampleLoaded(track, result) => self.sample_loaded(track, result),
             Message::ToggleRecordsNotes(track) => {
                 self.overlay = Overlay::None;
                 if let Some(on) = self.project.track(track).map(|t| !t.records_notes) {

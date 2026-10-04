@@ -8,6 +8,7 @@ mod gate;
 mod history;
 mod limiter;
 mod loudness;
+mod multiband;
 mod reverb;
 mod saturation;
 mod scope;
@@ -23,6 +24,7 @@ pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Sco
 pub use gate::Gate;
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use limiter::Limiter;
+pub use multiband::{band_knob as multiband_knob, Multiband, BANDS as MULTIBAND_BANDS, SOLOS as MULTIBAND_SOLOS};
 pub use loudness::{Meter, Readings, SILENT as SILENT_LUFS};
 pub use reverb::{decay_seconds, Reverb};
 pub use saturation::{curve_of as saturation_curve, Saturation, STYLES as SATURATION_STYLES};
@@ -149,7 +151,7 @@ pub trait Effect: Send {
     }
 }
 
-pub const NAMES: [&str; 11] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter"];
+pub const NAMES: [&str; 12] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband"];
 
 pub fn make(name: &str) -> Option<Box<dyn Effect>> {
     Some(match name {
@@ -164,6 +166,7 @@ pub fn make(name: &str) -> Option<Box<dyn Effect>> {
         "Loupe Transient" => Box::new(Transient::new()),
         "Loupe Gate" => Box::new(Gate::new()),
         "Loupe Meter" => Box::new(Meter::new()),
+        "Loupe Multiband" => Box::new(Multiband::new()),
         _ => return None,
     })
 }

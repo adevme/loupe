@@ -307,7 +307,7 @@ fn lay_clips(
         };
         let first = from - clip.start;
         if let Some(notes) = &clip.notes {
-            play_notes(track.instrument, notes, clip, first, target, rate);
+            play_notes(track.instrument, track.sample.as_deref().map(|sample| &sample.frames[..]), notes, clip, first, target, rate);
         } else {
         let audio = &source[source_from..][..count];
         let fade_in_frames = (clip.fade_in.len.saturating_sub(first) as usize).min(count);
@@ -335,8 +335,7 @@ fn lay_clips(
     }
 }
 
-fn play_notes(instrument: Instrument, notes: &[Note], clip: &Clip, first: Frames, target: &mut [[f32; 2]], rate: u32) {
-    let tail = instrument.tail(rate);
+fn play_notes(instrument: Instrument, sample: Option<&[[f32; 2]]>, notes: &[Note], clip: &Clip, first: Frames, target: &mut [[f32; 2]], rate: u32) {
     let window_from = clip.offset + first;
     let window_to = window_from + target.len() as Frames;
     let content_end = clip.offset + clip.len;
@@ -344,6 +343,7 @@ fn play_notes(instrument: Instrument, notes: &[Note], clip: &Clip, first: Frames
         if note.start >= window_to {
             break;
         }
+        let tail = instrument.tail_for(note, rate, sample);
         if note.start >= content_end || note.end() + tail <= window_from {
             continue;
         }
@@ -355,7 +355,7 @@ fn play_notes(instrument: Instrument, notes: &[Note], clip: &Clip, first: Frames
         let into = (from - window_from) as usize;
         let span = &mut target[into..(to - window_from) as usize];
         let level = |i: usize| clip.gain * clip.fade_level(first + (into + i) as Frames);
-        instrument.play(note, from - note.start, span, level, rate);
+        instrument.play_with(sample, note, from - note.start, span, level, rate);
     }
 }
 

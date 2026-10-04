@@ -13,7 +13,7 @@ const CHECK_EVERY: u32 = 10_000;
 const MOST_MEMORY: usize = 256 * 1024 * 1024;
 const HIGHEST_KEY: i64 = 127;
 
-pub const FUNCTIONS: [(&str, &str); 57] = [
+pub const FUNCTIONS: [(&str, &str); 58] = [
     ("print(...)", "Show text in Loupe's status line"),
     ("bpm()", "The tempo in beats per minute"),
     ("set_bpm(bpm)", "Change the tempo"),
@@ -69,7 +69,8 @@ pub const FUNCTIONS: [(&str, &str); 57] = [
     ("add_automation_point(track, what, seconds, value)", "Draw automation: what is \"volume\" in dB or \"pan\" from -1 to 1"),
     ("set_loop(start, finish)", "Loop between two times in seconds, or set_loop() to clear it"),
     ("import_audio(file, track, seconds)", "Place an audio file on a track and return the clip; paths can be relative to the song's folder"),
-    ("set_instrument(track, name)", "Use \"synth\" or \"drums\" on a track"),
+    ("set_instrument(track, name)", "Use \"synth\", \"drums\" or \"sampler\" on a track"),
+    ("set_sample(track, file)", "Load a sound into a track's sampler; paths can be relative to the song's folder"),
     ("export(stems)", "Export the song like File > Export once the script ends; pass true to also write stems"),
 ];
 
@@ -497,9 +498,25 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Resu
             let instrument = match name.to_lowercase().as_str() {
                 "synth" => Instrument::default(),
                 "drums" => Instrument::Drums,
-                _ => return Err(fail(format!("{name} is not an instrument; use \"synth\" or \"drums\""))),
+                "sampler" => Instrument::Sampler(loupe_engine::Sampler::default()),
+                _ => return Err(fail(format!("{name} is not an instrument; use \"synth\", \"drums\" or \"sampler\""))),
             };
             host.borrow_mut().apply(Command::SetInstrument { track: TrackId(track), instrument }).map(|_| ())
+        });
+        def!("set_sample", |_, (track, file): (u64, String)| {
+            let mut h = host.borrow_mut();
+            h.track(track)?;
+            let mut path = PathBuf::from(&file);
+            if path.is_relative() {
+                if let Some(folder) = &h.view.folder {
+                    path = folder.join(path);
+                }
+            }
+            let sample = std::sync::Arc::new(Source::load(&path, h.project.rate).map_err(|why| fail(format!("could not read {file}: {why}")))?);
+            if !matches!(h.track(track)?.instrument, Instrument::Sampler(_)) {
+                h.apply(Command::SetInstrument { track: TrackId(track), instrument: Instrument::Sampler(loupe_engine::Sampler::default()) })?;
+            }
+            h.apply(Command::SetSample { track: TrackId(track), sample: Some(sample) }).map(|_| ())
         });
         def!("export", |_, stems: Option<bool>| {
             host.borrow_mut().wishes.export = Some(stems.unwrap_or(false));
@@ -722,6 +739,9 @@ mod tests {
         let done = run("local clip = loupe.import_audio('hit.wav', loupe.tracks()[1], 1.5) print(loupe.clip_start(clip), loupe.clip_length(clip))", "test", &mut project, &here).unwrap();
         assert_eq!(done.wishes.printed, vec!["1.5 0.1".to_string()]);
         assert!(run("loupe.import_audio('missing.wav', loupe.tracks()[1], 0)", "test", &mut project, &here).unwrap_err().contains("could not read"));
+        run("loupe.set_sample(loupe.tracks()[1], 'hit.wav')", "test", &mut project, &here).unwrap();
+        assert!(matches!(project.tracks[0].instrument, Instrument::Sampler(_)));
+        assert_eq!(project.tracks[0].sample.as_ref().map(|s| s.frames.len()), Some(4_800));
         std::fs::remove_dir_all(folder).unwrap();
     }
 

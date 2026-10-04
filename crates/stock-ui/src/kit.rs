@@ -206,6 +206,15 @@ pub fn dial<'a, M: 'a>(look: Look, params: &'static [Param], values: &[f32], ind
         .into()
 }
 
+pub fn dial_labelled<'a, M: 'a>(look: Look, params: &'static [Param], values: &[f32], index: usize, colour: Color, label: &'static str, change: fn(usize, f32) -> M) -> Element<'a, M> {
+    let mut param = params[index];
+    param.name = label;
+    canvas::Canvas::new(Dial { param, value: values[index], colour, look, index, change })
+        .width(DIAL_WIDTH)
+        .height(DIAL_HEIGHT)
+        .into()
+}
+
 pub fn toggle<'a, M: Clone + 'a>(look: Look, label: &'static str, on: bool, message: M) -> Element<'a, M> {
     button(text(label).size(12))
         .padding([5, 12])

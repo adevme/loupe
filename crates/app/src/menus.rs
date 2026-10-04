@@ -35,6 +35,7 @@ impl App {
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
             Overlay::Routing(track) => self.centred(self.routing_sheet(*track)),
+            Overlay::Sampler(track) => self.centred(self.sampler_sheet(*track)),
             Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
             Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
@@ -163,9 +164,12 @@ impl App {
         items.push(self.item(if keys { "Record notes from keys ✓" } else { "Record notes from keys" }, "", Some(Message::ToggleRecordsNotes(track))));
         let playing = self.project.track(track).map(|t| t.instrument);
         let synth = matches!(playing, Some(loupe_engine::Instrument::Synth(_)));
+        let drums = matches!(playing, Some(loupe_engine::Instrument::Drums));
+        let sampler = matches!(playing, Some(loupe_engine::Instrument::Sampler(_)));
         items.push(container(text("Plays notes with").size(11.5).color(self.palette.text_dim)).padding([6, 10]).into());
         items.push(self.item(if synth { "Loupe Synth ✓" } else { "Loupe Synth" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::default()))));
-        items.push(self.item(if synth { "Loupe Drums" } else { "Loupe Drums ✓" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::Drums))));
+        items.push(self.item(if drums { "Loupe Drums ✓" } else { "Loupe Drums" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::Drums))));
+        items.push(self.item(if sampler { "Loupe Sampler ✓" } else { "Loupe Sampler" }, if sampler { "Settings" } else { "" }, Some(Message::OpenSampler(track))));
         self.menu(items)
     }
 

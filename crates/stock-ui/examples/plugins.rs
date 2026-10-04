@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length, Subscription, Task, Theme};
-use loupe_stock::{Chorus, Gate, Meter, Transient, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
-use loupe_stock_ui::{Change, ChorusEditor, GateEditor, MeterEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock::{Chorus, Gate, Meter, Multiband, Transient, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
+use loupe_stock_ui::{Change, ChorusEditor, GateEditor, MeterEditor, MultibandEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 const RATE: f32 = 48_000.0;
 const BPM: f32 = 120.0;
 const FRAMES_PER_TICK: usize = 768;
-const TABS: [&str; 11] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter"];
+const TABS: [&str; 12] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband"];
 
 struct Beat {
     clock: u64,
@@ -61,6 +61,7 @@ struct Preview {
     transient: Transient,
     gate: Gate,
     meter: Meter,
+    multiband: Multiband,
     eq_editor: EqEditor,
     compressor_editor: CompressorEditor,
     limiter_editor: LimiterEditor,
@@ -72,6 +73,7 @@ struct Preview {
     transient_editor: TransientEditor,
     gate_editor: GateEditor,
     meter_editor: MeterEditor,
+    multiband_editor: MultibandEditor,
     look: Look,
 }
 
@@ -97,7 +99,8 @@ impl Preview {
         let mut transient = Transient::new();
         let mut gate = Gate::new();
         let mut meter = Meter::new();
-        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser, &mut saturation, &mut chorus, &mut transient, &mut gate, &mut meter] {
+        let mut multiband = Multiband::new();
+        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser, &mut saturation, &mut chorus, &mut transient, &mut gate, &mut meter, &mut multiband] {
             effect.prepare(RATE);
             effect.set_tempo(BPM);
         }
@@ -116,6 +119,7 @@ impl Preview {
             transient_editor: TransientEditor::new(Some(transient.history()), look),
             gate_editor: GateEditor::new(Some(gate.history()), look),
             meter_editor: MeterEditor::new(Some(meter.readings()), look),
+            multiband_editor: MultibandEditor::new(Some(multiband.history()), look),
             eq,
             compressor,
             limiter,
@@ -127,6 +131,7 @@ impl Preview {
             transient,
             gate,
             meter,
+            multiband,
             look,
         };
         (preview, Task::none())
@@ -144,7 +149,8 @@ impl Preview {
             7 => &mut self.chorus,
             8 => &mut self.transient,
             9 => &mut self.gate,
-            _ => &mut self.meter,
+            10 => &mut self.meter,
+            _ => &mut self.multiband,
         }
     }
 
@@ -167,7 +173,8 @@ impl Preview {
                     7 => self.chorus_editor.update(change),
                     8 => self.transient_editor.update(change),
                     9 => self.gate_editor.update(change),
-                    _ => self.meter_editor.update(change),
+                    10 => self.meter_editor.update(change),
+                    _ => self.multiband_editor.update(change),
                 };
                 for (index, value) in changes {
                     self.effect().set(index, value);
@@ -184,6 +191,7 @@ impl Preview {
                     8 => self.transient_editor.tick(),
                     9 => self.gate_editor.tick(),
                     10 => self.meter_editor.tick(),
+                    11 => self.multiband_editor.tick(),
                     _ => {}
                 }
             }
@@ -224,7 +232,8 @@ impl Preview {
             7 => self.chorus_editor.view().map(Message::Knob),
             8 => self.transient_editor.view().map(Message::Knob),
             9 => self.gate_editor.view().map(Message::Knob),
-            _ => self.meter_editor.view().map(Message::Knob),
+            10 => self.meter_editor.view().map(Message::Knob),
+            _ => self.multiband_editor.view().map(Message::Knob),
         };
         column![bar, body].into()
     }
