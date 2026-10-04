@@ -2207,6 +2207,12 @@ impl App {
                 continue;
             }
             clip.id.hash(&mut hasher);
+            clip.start.hash(&mut hasher);
+            clip.offset.hash(&mut hasher);
+            clip.len.hash(&mut hasher);
+            clip.stretch.to_bits().hash(&mut hasher);
+            clip.source.path.hash(&mut hasher);
+            self.project.bpm.to_bits().hash(&mut hasher);
             for fx in &clip.fx {
                 fx.path.hash(&mut hasher);
                 fx.index.hash(&mut hasher);

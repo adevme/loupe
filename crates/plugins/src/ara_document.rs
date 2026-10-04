@@ -519,6 +519,10 @@ impl Document {
         }
     }
 
+    pub fn controller(&self) -> Ref {
+        self.controller
+    }
+
     pub fn archive_id(&self) -> String {
         unsafe {
             let id = (*self.factory).document_archive_id;

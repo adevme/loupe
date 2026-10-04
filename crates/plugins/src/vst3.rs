@@ -140,6 +140,9 @@ use vst3::Steinberg::Vst::{
 };
 use vst3::Steinberg::{kResultOk, IPluginBaseTrait};
 
+use crate::ara_document::{pack, unpack, Document};
+use crate::wire::Region;
+
 pub struct Effect {
     processor: ComPtr<IAudioProcessor>,
     component: ComPtr<IComponent>,
@@ -151,11 +154,18 @@ pub struct Effect {
     pub side_bus: bool,
     turns: vst3::ComWrapper<crate::changes::Turns>,
     ids: Vec<u32>,
+    ara: Option<Document>,
+    context: vst3::Steinberg::Vst::ProcessContext,
+    rate: f64,
     _library: Library,
 }
 
 impl Effect {
     pub fn start(library: Library, index: usize, rate: f64, block: usize) -> Result<Self, String> {
+        Self::start_on(library, index, rate, block, None)
+    }
+
+    pub fn start_on(library: Library, index: usize, rate: f64, block: usize, region: Option<&Region>) -> Result<Self, String> {
         let classes = library.classes();
         let class = classes.get(index).ok_or("that plugin has no such part")?;
         let component: ComPtr<IComponent> = unsafe { library.make(&class.id) }?;
@@ -170,6 +180,10 @@ impl Effect {
                 return Err("the plugin would not start up".into());
             }
             component.setIoMode(IoModes_::kAdvanced as i32);
+            let ara = match region {
+                Some(region) => join_ara(&component, region)?,
+                None => None,
+            };
             let processor: ComPtr<IAudioProcessor> = component.cast().ok_or("that plugin does not process audio")?;
             let mut setup = vst3::Steinberg::Vst::ProcessSetup {
                 processMode: ProcessModes_::kRealtime as i32,
@@ -201,24 +215,101 @@ impl Effect {
                 side_bus: ins > 1,
                 turns: crate::changes::Turns::empty(),
                 ids: Vec::new(),
+                ara,
+                context: std::mem::zeroed(),
+                rate,
                 _library: library,
             })
         }
     }
 
-    pub fn editor(&self) -> Result<crate::editor::Editor, String> {
+    pub fn editor(&mut self) -> Result<crate::editor::Editor, String> {
         use vst3::Steinberg::Vst::IEditController;
-        unsafe {
+        if let Some(document) = self.ara.as_mut() {
+            document.start_reading();
+        }
+        let made = unsafe {
             let mut cid = [0i8; 16];
-            if self.component.getControllerClassId(&mut cid) == kResultOk {
-                let id = cid.map(|c| c as u8);
-                if let Ok(controller) = self._library.make::<IEditController>(&id) {
-                    return crate::editor::Editor::from(controller);
+            let separate = if self.component.getControllerClassId(&mut cid) == kResultOk {
+                self._library.make::<IEditController>(&cid.map(|c| c as u8)).ok()
+            } else {
+                None
+            };
+            match separate {
+                Some(controller) if self.ara.is_some() => {
+                    let settings = self.settings().unwrap_or_default();
+                    let context = self
+                        .us
+                        .as_com_ref::<vst3::Steinberg::FUnknown>()
+                        .map(|found| found.as_ptr())
+                        .unwrap_or(std::ptr::null_mut());
+                    crate::editor::Editor::joined(controller, &self.component, &settings, context)
+                }
+                Some(controller) => crate::editor::Editor::from(controller),
+                None => {
+                    let controller: ComPtr<IEditController> = self.component.cast().ok_or("this plugin has no window")?;
+                    crate::editor::Editor::from(controller)
                 }
             }
-            let controller: ComPtr<IEditController> = self.component.cast().ok_or("this plugin has no window")?;
-            crate::editor::Editor::from(controller)
+        }?;
+        if let Some(document) = self.ara.as_ref() {
+            document.select();
         }
+        Ok(made)
+    }
+
+    pub fn is_ara(&self) -> bool {
+        self.ara.is_some()
+    }
+
+    pub fn idle(&self) {
+        if let Some(document) = self.ara.as_ref() {
+            document.idle();
+        }
+    }
+
+    pub fn place(&mut self, region: &Region) -> Result<(), String> {
+        let Some(mut document) = self.ara.take() else {
+            return Err("this plugin is not following a clip".into());
+        };
+        let placed = if document.same_audio(region) {
+            document.place(region);
+            Ok(())
+        } else {
+            match crate::ara_audio::Samples::read(Path::new(&region.file)) {
+                Ok(samples) => {
+                    self.pause();
+                    let swapped = unsafe { document.swap_audio(region, samples) };
+                    self.resume();
+                    swapped
+                }
+                Err(why) => Err(format!("ARA needs the clip's audio file: {why}")),
+            }
+        };
+        self.ara = Some(document);
+        placed
+    }
+
+    fn pause(&self) {
+        unsafe {
+            self.processor.setProcessing(0);
+            self.component.setActive(0);
+        }
+    }
+
+    fn resume(&self) {
+        unsafe {
+            self.component.setActive(1);
+            self.processor.setProcessing(1);
+        }
+    }
+
+    pub fn process_at(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]], at: i64) {
+        if let Some(document) = self.ara.as_mut() {
+            document.start_reading();
+            self.context = playing_at(at, self.rate, document.placed().tempo);
+        }
+        self.process_with(audio, side);
     }
 
     pub fn latency(&self) -> usize {
@@ -270,6 +361,35 @@ impl Effect {
     }
 
     pub fn save(&self) -> Result<Vec<u8>, String> {
+        let settings = self.settings()?;
+        match self.ara.as_ref() {
+            Some(document) => Ok(pack(&settings, &document.archive_id(), &document.store()?)),
+            None => Ok(settings),
+        }
+    }
+
+    pub fn restore(&mut self, state: &[u8]) -> Result<(), String> {
+        let Some(unpacked) = unpack(state) else {
+            let settled = self.take_settings(state);
+            self.begin_reading();
+            return settled;
+        };
+        let restored = match self.ara.as_mut() {
+            Some(document) => document.restore(unpacked.archive_id, unpacked.archive),
+            None => Ok(()),
+        };
+        let settled = self.take_settings(unpacked.settings);
+        self.begin_reading();
+        restored.and(settled)
+    }
+
+    fn begin_reading(&mut self) {
+        if let Some(document) = self.ara.as_mut() {
+            document.start_reading();
+        }
+    }
+
+    pub fn settings(&self) -> Result<Vec<u8>, String> {
         let wrapper = crate::stream::Bytes::empty();
         let stream = wrapper.as_com_ref::<vst3::Steinberg::IBStream>().ok_or("no stream")?;
         unsafe {
@@ -280,7 +400,7 @@ impl Effect {
         Ok(wrapper.taken())
     }
 
-    pub fn restore(&mut self, state: &[u8]) -> Result<(), String> {
+    pub fn take_settings(&mut self, state: &[u8]) -> Result<(), String> {
         if state.is_empty() {
             return Ok(());
         }
@@ -338,7 +458,7 @@ impl Effect {
                 outputParameterChanges: std::ptr::null_mut(),
                 inputEvents: std::ptr::null_mut(),
                 outputEvents: std::ptr::null_mut(),
-                processContext: std::ptr::null_mut(),
+                processContext: if self.ara.is_some() { &mut self.context } else { std::ptr::null_mut() },
             };
             self.processor.process(&mut data);
         }
@@ -357,5 +477,66 @@ impl Drop for Effect {
             self.component.setActive(0);
             self.component.terminate();
         }
+    }
+}
+
+unsafe fn join_ara(component: &ComPtr<IComponent>, region: &Region) -> Result<Option<Document>, String> {
+    use crate::ara::{ask_for, let_go, EntryPoint2Vtbl, EntryPointVtbl, EVERY_ROLE};
+    let unknown = component.as_ptr() as *mut vst3::Steinberg::FUnknown;
+    let Some(entry) = ask_for::<EntryPointVtbl>(unknown, &crate::ara::IPlugInEntryPoint) else {
+        return Ok(None);
+    };
+    let factory = ((*(*entry).vtbl).get_factory)(entry as *mut std::ffi::c_void);
+    let mut document = match Document::open(factory, region) {
+        Ok(document) => document,
+        Err(why) => {
+            let_go(entry);
+            return Err(why);
+        }
+    };
+    let extension = match ask_for::<EntryPoint2Vtbl>(unknown, &crate::ara::IPlugInEntryPoint2) {
+        Some(second) => {
+            let bound = ((*(*second).vtbl).bind_to_document_controller_with_roles)(
+                second as *mut std::ffi::c_void,
+                document.controller(),
+                EVERY_ROLE,
+                EVERY_ROLE,
+            );
+            let_go(second);
+            bound
+        }
+        None => ((*(*entry).vtbl).bind_to_document_controller)(entry as *mut std::ffi::c_void, document.controller()),
+    };
+    let_go(entry);
+    document.attach(extension)?;
+    Ok(Some(document))
+}
+
+fn playing_at(at: i64, rate: f64, tempo: f64) -> vst3::Steinberg::Vst::ProcessContext {
+    use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{kPlaying, kProjectTimeMusicValid, kTempoValid, kTimeSigValid};
+    let mut context: vst3::Steinberg::Vst::ProcessContext = unsafe { std::mem::zeroed() };
+    context.state = (kPlaying | kTempoValid | kTimeSigValid | kProjectTimeMusicValid) as u32;
+    context.sampleRate = rate;
+    context.projectTimeSamples = at;
+    context.continousTimeSamples = at;
+    context.tempo = tempo;
+    context.projectTimeMusic = if rate > 0.0 { at as f64 / rate * tempo / 60.0 } else { 0.0 };
+    context.timeSigNumerator = 4;
+    context.timeSigDenominator = 4;
+    context
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ara_plugin_is_told_where_the_song_is() {
+        let context = playing_at(96_000, 48_000.0, 120.0);
+        assert_eq!(context.projectTimeSamples, 96_000);
+        assert_eq!(context.projectTimeMusic, 4.0);
+        assert_eq!(context.tempo, 120.0);
+        assert_eq!(context.state & 2, 2);
+        assert_eq!((context.timeSigNumerator, context.timeSigDenominator), (4, 4));
     }
 }

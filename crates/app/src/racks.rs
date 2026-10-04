@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use loupe_engine::{Chains, ClipId, Project, TrackId};
+use loupe_engine::{Chains, Clip, ClipId, Project, TrackId};
 use loupe_plugins::rack::{Rack, Wanted};
+use loupe_plugins::wire::Region;
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_stock::{History, Readings, Scopes};
 
@@ -118,6 +119,7 @@ impl Racks {
                     .clips
                     .entry(clip.id)
                     .or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
+                troubles.extend(rack.follow_region(region_of(project, clip)));
                 troubles.extend(rack.reconcile(&want));
             }
         }
@@ -129,6 +131,10 @@ impl Racks {
         // Runs on the thread that draws, so this is where a waiting window may open.
         for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()) {
             let _ = rack.open_waiting();
+        }
+        for rack in self.clips.values_mut() {
+            let region = rack.region().cloned();
+            let _ = rack.follow_region(region);
         }
         let mut found: Vec<(Spot, Peek)> = Vec::new();
         for (id, rack) in self.chains.iter_mut() {
@@ -220,6 +226,18 @@ impl Chains for Racks {
         self.scratch.clear();
         self.scratch.extend_from_slice(audio);
         rack.process(&mut self.scratch);
+        let shared = self.scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+    }
+
+    fn process_clip_at(&mut self, clip: ClipId, audio: &mut [[f32; 2]], at: loupe_engine::Frames) {
+        let Some(rack) = self.clips.get_mut(&clip) else { return };
+        if rack.is_empty() {
+            return;
+        }
+        self.scratch.clear();
+        self.scratch.extend_from_slice(audio);
+        rack.process_at(&mut self.scratch, at as i64);
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }
@@ -325,5 +343,76 @@ impl Chains for Racks {
         rack.process(&mut self.scratch);
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
+    }
+}
+
+fn region_of(project: &Project, clip: &Clip) -> Option<Region> {
+    if clip.notes.is_some() || clip.source.path.as_os_str().is_empty() || project.rate == 0 {
+        return None;
+    }
+    let rate = project.rate as f64;
+    let stretch = if clip.stretch > 0.0 { clip.stretch } else { 1.0 };
+    Some(Region {
+        file: clip.source.path.to_string_lossy().into_owned(),
+        name: clip.source.name.clone(),
+        start: clip.start as f64 / rate,
+        offset: clip.offset as f64 / rate / stretch,
+        length: clip.len as f64 / rate,
+        stretch,
+        tempo: project.bpm,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loupe_engine::{Command, Outcome, Source};
+
+    fn project_with_clip(path: &str) -> (Project, ClipId) {
+        let mut project = Project::new(48_000);
+        project.bpm = 90.0;
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!("no track") };
+        let mut source = Source::from_frames("lead", vec![[0.0; 2]; 480_000]);
+        source.path = PathBuf::from(path);
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source: Arc::new(source), start: 96_000 }) else {
+            panic!("no clip")
+        };
+        (project, clip)
+    }
+
+    fn clip_in(project: &Project, id: ClipId) -> &Clip {
+        project.tracks.iter().flat_map(|track| track.clips.iter()).find(|clip| clip.id == id).expect("the clip is there")
+    }
+
+    #[test]
+    fn a_clip_becomes_a_region_in_seconds() {
+        let (project, id) = project_with_clip("C:\\Songs\\lead.wav");
+        let region = region_of(&project, clip_in(&project, id)).expect("an audio clip has a region");
+        assert_eq!(region.file, "C:\\Songs\\lead.wav");
+        assert_eq!(region.name, "lead");
+        assert_eq!(region.start, 2.0);
+        assert_eq!(region.offset, 0.0);
+        assert_eq!(region.length, 10.0);
+        assert_eq!(region.stretch, 1.0);
+        assert_eq!(region.tempo, 90.0);
+    }
+
+    #[test]
+    fn a_trimmed_and_stretched_clip_reads_its_audio_from_the_right_place() {
+        let (project, id) = project_with_clip("lead.wav");
+        let mut clip = clip_in(&project, id).clone();
+        clip.offset = 96_000;
+        clip.len = 48_000;
+        clip.stretch = 2.0;
+        let region = region_of(&project, &clip).expect("it has a region");
+        assert_eq!(region.offset, 1.0);
+        assert_eq!(region.length, 1.0);
+        assert_eq!(region.stretch, 2.0);
+    }
+
+    #[test]
+    fn audio_without_a_file_has_no_region() {
+        let (project, id) = project_with_clip("");
+        assert_eq!(region_of(&project, clip_in(&project, id)), None);
     }
 }

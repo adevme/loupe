@@ -1,4 +1,6 @@
-use vst3::Steinberg::Vst::{IComponentHandler, IComponentHandlerTrait, IEditController, IEditControllerTrait};
+use vst3::Steinberg::Vst::{
+    IComponent, IComponentHandler, IComponentHandlerTrait, IConnectionPoint, IConnectionPointTrait, IEditController, IEditControllerTrait,
+};
 use vst3::Steinberg::{kResultOk, IPlugView, IPlugViewTrait, IPluginBaseTrait, ViewRect};
 use vst3::{Class, ComPtr, ComWrapper};
 
@@ -30,6 +32,7 @@ pub struct Editor {
     view: ComPtr<IPlugView>,
     _controller: ComPtr<IEditController>,
     _handler: ComWrapper<Quiet>,
+    links: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
 }
 
 impl Editor {
@@ -38,13 +41,56 @@ impl Editor {
             if controller.initialize(std::ptr::null_mut()) != kResultOk {
                 return Err("the plugin's window would not start up".into());
             }
+        }
+        Self::viewed(controller, None)
+    }
+
+    pub fn joined(
+        controller: ComPtr<IEditController>,
+        component: &ComPtr<IComponent>,
+        settings: &[u8],
+        context: *mut vst3::Steinberg::FUnknown,
+    ) -> Result<Self, String> {
+        unsafe {
+            if controller.initialize(context) != kResultOk {
+                return Err("the plugin's window would not start up".into());
+            }
+            let links = match (component.cast::<IConnectionPoint>(), controller.cast::<IConnectionPoint>()) {
+                (Some(one), Some(other)) => {
+                    one.connect(other.as_ptr());
+                    other.connect(one.as_ptr());
+                    Some((one, other))
+                }
+                _ => None,
+            };
+            if !settings.is_empty() {
+                let wrapper = crate::stream::Bytes::holding(settings.to_vec());
+                if let Some(stream) = wrapper.as_com_ref::<vst3::Steinberg::IBStream>() {
+                    controller.setComponentState(stream.as_ptr());
+                }
+            }
+            Self::viewed(controller, links)
+        }
+    }
+
+    fn viewed(
+        controller: ComPtr<IEditController>,
+        links: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
+    ) -> Result<Self, String> {
+        unsafe {
             let handler = ComWrapper::new(Quiet);
             if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
                 controller.setComponentHandler(reference.as_ptr());
             }
             let raw = controller.createView(b"editor\0".as_ptr() as *const i8);
-            let view = ComPtr::from_raw(raw).ok_or("this plugin has no window")?;
-            Ok(Self { view, _controller: controller, _handler: handler })
+            let Some(view) = ComPtr::from_raw(raw) else {
+                if let Some((one, other)) = links {
+                    one.disconnect(other.as_ptr());
+                    other.disconnect(one.as_ptr());
+                }
+                return Err("this plugin has no window".into());
+            };
+            Ok(Self { view, _controller: controller, _handler: handler, links })
         }
     }
 
@@ -93,6 +139,10 @@ impl Drop for Editor {
     fn drop(&mut self) {
         unsafe {
             self.view.removed();
+            if let Some((one, other)) = self.links.take() {
+                one.disconnect(other.as_ptr());
+                other.disconnect(one.as_ptr());
+            }
         }
     }
 }

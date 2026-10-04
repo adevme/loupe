@@ -51,6 +51,11 @@ pub trait Chains: Send {
         let _ = (clip, audio);
     }
 
+    fn process_clip_at(&mut self, clip: ClipId, audio: &mut [[f32; 2]], at: Frames) {
+        let _ = at;
+        self.process_clip(clip, audio);
+    }
+
     fn clip_latency(&self, clip: ClipId) -> usize {
         let _ = clip;
         0
@@ -356,7 +361,7 @@ fn lay_clips(
         }
         if own {
             if let Some(racks) = chains.as_deref_mut() {
-                racks.process_clip(clip.id, apart);
+                racks.process_clip_at(clip.id, apart, pos);
             }
             for (into, from) in out.iter_mut().zip(apart.iter()) {
                 into[0] += from[0];
@@ -602,6 +607,48 @@ mod tests {
         assert_eq!(out[50], [100.0, -100.0], "the clip with a chain was not doubled");
         assert_eq!(out[350], [50.0, -50.0], "the clip without a chain changed");
         let _ = plain;
+    }
+
+    struct Placer {
+        latency: usize,
+        heard: Vec<Frames>,
+    }
+
+    impl Chains for Placer {
+        fn process(&mut self, _track: TrackId, _audio: &mut [[f32; 2]]) {}
+
+        fn process_clip_at(&mut self, _clip: ClipId, _audio: &mut [[f32; 2]], at: Frames) {
+            self.heard.push(at);
+        }
+
+        fn clip_latency(&self, _clip: ClipId) -> usize {
+            self.latency
+        }
+    }
+
+    #[test]
+    fn a_clip_chain_is_told_where_in_the_song_each_block_starts() {
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        let placed = clip(&mut p, one, counting(1000), 100);
+        let fx = crate::model::Fx {
+            path: std::path::PathBuf::from("melodyne.vst3"),
+            index: 0,
+            name: "Melodyne".into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: false,
+        };
+        p.apply(Command::AddClipFx { clip: placed, fx }).unwrap();
+        let mut racks = Placer { latency: 0, heard: Vec::new() };
+        let mut out = vec![[0.0; 2]; 256];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, Some(&mut racks));
+        mix_tracks_metered(&p, 256, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(racks.heard, vec![0, 256]);
+        let mut late = Placer { latency: 64, heard: Vec::new() };
+        mix_tracks_metered(&p, 512, &mut out, None, None, &mut scratch, Some(&mut late));
+        assert_eq!(late.heard, vec![576]);
     }
 
     struct Ducker {
