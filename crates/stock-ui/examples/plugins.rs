@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length, Subscription, Task, Theme};
-use loupe_stock::{Compressor, Delay, Effect, Equalizer, Limiter, Reverb};
-use loupe_stock_ui::{Change, CompressorEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock::{Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
+use loupe_stock_ui::{Change, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 const RATE: f32 = 48_000.0;
 const BPM: f32 = 120.0;
 const FRAMES_PER_TICK: usize = 768;
-const TABS: [&str; 5] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb"];
+const TABS: [&str; 7] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation"];
 
 struct Beat {
     clock: u64,
@@ -55,11 +55,15 @@ struct Preview {
     limiter: Limiter,
     delay: Delay,
     reverb: Reverb,
+    deesser: Deesser,
+    saturation: Saturation,
     eq_editor: EqEditor,
     compressor_editor: CompressorEditor,
     limiter_editor: LimiterEditor,
     delay_editor: DelayEditor,
     reverb_editor: ReverbEditor,
+    deesser_editor: DeesserEditor,
+    saturation_editor: SaturationEditor,
     look: Look,
 }
 
@@ -79,7 +83,9 @@ impl Preview {
         let mut limiter = Limiter::new();
         let mut delay = Delay::new();
         let mut reverb = Reverb::new();
-        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb] {
+        let mut deesser = Deesser::new();
+        let mut saturation = Saturation::new();
+        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser, &mut saturation] {
             effect.prepare(RATE);
             effect.set_tempo(BPM);
         }
@@ -92,11 +98,15 @@ impl Preview {
             limiter_editor: LimiterEditor::new(Some(limiter.history()), look),
             delay_editor: DelayEditor::new(BPM, look),
             reverb_editor: ReverbEditor::new(look),
+            deesser_editor: DeesserEditor::new(Some(deesser.history()), look),
+            saturation_editor: SaturationEditor::new(look),
             eq,
             compressor,
             limiter,
             delay,
             reverb,
+            deesser,
+            saturation,
             look,
         };
         (preview, Task::none())
@@ -108,7 +118,9 @@ impl Preview {
             1 => &mut self.compressor,
             2 => &mut self.limiter,
             3 => &mut self.delay,
-            _ => &mut self.reverb,
+            4 => &mut self.reverb,
+            5 => &mut self.deesser,
+            _ => &mut self.saturation,
         }
     }
 
@@ -125,7 +137,9 @@ impl Preview {
                     1 => self.compressor_editor.update(change),
                     2 => self.limiter_editor.update(change),
                     3 => self.delay_editor.update(change),
-                    _ => self.reverb_editor.update(change),
+                    4 => self.reverb_editor.update(change),
+                    5 => self.deesser_editor.update(change),
+                    _ => self.saturation_editor.update(change),
                 };
                 for (index, value) in changes {
                     self.effect().set(index, value);
@@ -138,6 +152,7 @@ impl Preview {
                     0 => self.eq_editor.tick(),
                     1 => self.compressor_editor.tick(),
                     2 => self.limiter_editor.tick(),
+                    5 => self.deesser_editor.tick(),
                     _ => {}
                 }
             }
@@ -172,7 +187,9 @@ impl Preview {
             1 => self.compressor_editor.view().map(Message::Knob),
             2 => self.limiter_editor.view().map(Message::Knob),
             3 => self.delay_editor.view().map(Message::Knob),
-            _ => self.reverb_editor.view().map(Message::Knob),
+            4 => self.reverb_editor.view().map(Message::Knob),
+            5 => self.deesser_editor.view().map(Message::Knob),
+            _ => self.saturation_editor.view().map(Message::Knob),
         };
         column![bar, body].into()
     }
