@@ -69,6 +69,8 @@ mod real {
         fn GetClientRect(window: *mut c_void, rect: *mut [i32; 4]) -> i32;
         fn LoadCursorW(instance: Handle, name: *const u16) -> Handle;
         fn MoveWindow(window: Handle, x: i32, y: i32, width: i32, height: i32, repaint: i32) -> i32;
+        fn SetWindowPos(window: Handle, after: Handle, x: i32, y: i32, width: i32, height: i32, how: u32) -> i32;
+        fn SetForegroundWindow(window: Handle) -> i32;
         fn SendMessageW(window: Handle, what: u32, first: usize, second: isize) -> isize;
         fn GetWindowTextW(window: Handle, text: *mut u16, most: i32) -> i32;
         fn GetWindowTextLengthW(window: Handle) -> i32;
@@ -99,6 +101,10 @@ mod real {
     const DROP_DOWN_LIST: u32 = 0x0003;
     const SCROLLS_SIDEWAYS: u32 = 0x0080;
     const SHOW: i32 = 5;
+    const TOP: Handle = std::ptr::null_mut();
+    const KEEP_SIZE: u32 = 0x0001;
+    const KEEP_PLACE: u32 = 0x0002;
+    const AND_SHOW: u32 = 0x0040;
     const REMOVE: u32 = 1;
     const CLOSE: u32 = 0x0010;
     const SIZE: u32 = 0x0005;
@@ -279,6 +285,11 @@ mod real {
         pub fn show(&self) {
             unsafe {
                 ShowWindow(self.handle, SHOW);
+                // The plugin window belongs to the host, which is not the program the
+                // user is clicking in. Windows leaves another program's window where it
+                // was in the stack, which with Loupe filling the screen means behind it.
+                SetWindowPos(self.handle, TOP, 0, 0, 0, 0, KEEP_PLACE | KEEP_SIZE | AND_SHOW);
+                SetForegroundWindow(self.handle);
             }
         }
 

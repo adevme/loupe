@@ -127,6 +127,22 @@ impl Sandbox {
         self.lost
     }
 
+    /// Lets the host put its plugin window in front. Windows only allows the program
+    /// the user is working in to do that, and it is Loupe the user clicked in, so
+    /// Loupe has to hand that right over before asking for the window.
+    pub fn may_come_forward(&self) {
+        #[cfg(windows)]
+        {
+            #[link(name = "user32")]
+            extern "system" {
+                fn AllowSetForegroundWindow(process: u32) -> i32;
+            }
+            unsafe {
+                AllowSetForegroundWindow(self.child.id());
+            }
+        }
+    }
+
     pub fn alive(&mut self) -> bool {
         !self.lost && matches!(self.child.try_wait(), Ok(None))
     }

@@ -274,6 +274,9 @@ impl Rack {
                 return Ok(());
             }
         }
+        if let Some(host) = self.slots.get(slot).and_then(|found| found.host.as_ref()) {
+            host.may_come_forward();
+        }
         self.tell(slot, Ask::Show)
     }
 
