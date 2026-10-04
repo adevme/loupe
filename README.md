@@ -26,7 +26,9 @@ version goes out.
 
 Loupe is free software under the [GNU General Public License, version 2](LICENSE)
 or any later version. It includes [Rubber Band](https://breakfastquay.com/rubberband/)
-for time stretching, which is under the same licence.
+for time stretching, which is under the same licence, and [LAME](https://lame.sourceforge.io/)
+for writing MP3s, which is under the Lesser GPL. Both are in `vendor/`, each with its
+own licence beside it.
 
 ### ASIO
 
