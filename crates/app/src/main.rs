@@ -551,6 +551,7 @@ impl App {
         engine.set_metronome(settings.metronome);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
+        loupe_plugins::presets::keep_in(settings::presets_folder(settings.folder.as_deref()));
         let (usage_now, _) = usage::Usage::begin(&settings);
         let mut app = Self {
             palette: loaded.palette,
@@ -2291,6 +2292,7 @@ impl App {
         };
         self.folder = chosen;
         let made = settings::make_folders(self.folder.as_deref());
+        loupe_plugins::presets::keep_in(settings::presets_folder(self.folder.as_deref()));
         self.problem = saved.and(made).err().map(|why| format!("Could not set the Loupe folder: {why}"));
     }
 

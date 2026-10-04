@@ -37,7 +37,11 @@ impl Sandbox {
         if !host.is_file() {
             return Err(format!("Loupe cannot find its plugin host at {}. Install Loupe again to put it back.", host.display()));
         }
-        let mut child = Command::new(host)
+        let mut command = Command::new(host);
+        if let Some(root) = crate::presets::root() {
+            command.env(crate::presets::FOLDER_VARIABLE, root);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(if std::env::var_os("LOUPE_HOST_NOISE").is_some() { Stdio::inherit() } else { Stdio::null() })

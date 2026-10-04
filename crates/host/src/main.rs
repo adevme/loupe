@@ -182,7 +182,9 @@ fn main() {
     let mut was_sized = (0, 0);
     'living: loop {
         if let Some((made, pane)) = editor.as_ref() {
-            pane.pump();
+            for asked in pane.pump() {
+                use_preset(asked, open.as_mut(), pane, &loaded_name);
+            }
             // The plugin is not told when the frame is dragged, so watch the size and
             // hand it on. Without this it keeps drawing at its old size in a bigger hole.
             let now = pane.inside();
@@ -318,12 +320,38 @@ fn show(
     // A fresh window starts at the plugin's own size, so forget the last one's.
 
     let pane = window::Window::open(title, width, height, made.can_resize())?;
+    if let Some(folder) = preset_folder(name) {
+        pane.presets(&loupe_plugins::presets::list(&folder), None);
+    }
     made.attach(pane.inner(), kind)?;
     pane.show();
     *editor = Some((made, pane));
     Ok(())
 }
 
+
+fn preset_folder(plugin: &str) -> Option<PathBuf> {
+    let root = std::env::var_os(loupe_plugins::presets::FOLDER_VARIABLE)?;
+    Some(loupe_plugins::presets::folder_for(Path::new(&root), plugin))
+}
+
+fn use_preset(asked: window::Asked, open: Option<&mut Open>, pane: &window::Window, plugin: &str) {
+    let (Some(effect), Some(folder)) = (open, preset_folder(plugin)) else { return };
+    match asked {
+        window::Asked::Load(name) => {
+            if let Ok(state) = loupe_plugins::presets::load(&folder, &name) {
+                let _ = effect.restore(&state);
+            }
+        }
+        window::Asked::Save(name) => {
+            let saved = effect.save().and_then(|state| loupe_plugins::presets::save(&folder, &name, &state));
+            if let Ok(name) = saved {
+                pane.presets(&loupe_plugins::presets::list(&folder), Some(&name));
+                pane.clear_name();
+            }
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn au_names() -> Result<Vec<String>, String> {

@@ -96,6 +96,7 @@ pub const HOME_FOLDER: &str = "Loupe";
 const PROJECTS: &str = "Projects";
 const TEMPLATES: &str = "Templates";
 const CHAINS: &str = "Chains";
+const PRESETS: &str = "Presets";
 
 pub fn home_folder(chosen: Option<&Path>) -> PathBuf {
     chosen.map(Path::to_path_buf).unwrap_or_else(documents).join(HOME_FOLDER)
@@ -111,6 +112,10 @@ pub fn templates_folder(chosen: Option<&Path>) -> PathBuf {
 
 pub fn chains_folder(chosen: Option<&Path>) -> PathBuf {
     home_folder(chosen).join(CHAINS)
+}
+
+pub fn presets_folder(chosen: Option<&Path>) -> PathBuf {
+    home_folder(chosen).join(PRESETS)
 }
 
 pub fn make_folders(chosen: Option<&Path>) -> Result<(), String> {
