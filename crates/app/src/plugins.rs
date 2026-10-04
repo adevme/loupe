@@ -61,7 +61,7 @@ impl App {
                 .align_y(iced::Alignment::Center),
             );
         }
-        let add = button(text("+ FX").size(10.5))
+        let adder = button(text("+ FX").size(10.5))
             .padding([1, 4])
             .width(Length::Fill)
             .style(move |_, status| palette.ghost(status))
@@ -79,7 +79,7 @@ impl App {
             .on_exit(Message::Hint(None))
         };
         let rec_label = if taking > 0 { format!("Rec {taking}") } else { "Rec".to_string() };
-        let add = row![tab("Mix".to_string(), false, MIX_HINT), tab(rec_label, true, REC_HINT), add].spacing(2);
+        let add = row![tab("Mix".to_string(), false, MIX_HINT), tab(rec_label, true, REC_HINT), adder].spacing(2);
         column![scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(4).scroller_width(4))), add]
             .spacing(3)
             .width(Length::Fill)

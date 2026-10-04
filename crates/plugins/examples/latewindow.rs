@@ -11,6 +11,7 @@ fn main() {
         name: "test".into(),
         bypassed: false,
         state: Vec::new(),
+        record: false,
     }];
     let troubles = rack.reconcile(&want);
     println!("reconcile said {troubles:?}, still opening: {}", rack.still_opening());

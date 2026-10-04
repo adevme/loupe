@@ -66,6 +66,7 @@ impl App {
             self.playing = true;
         }
         self.recording = Some(Recording { from: self.playhead, tracks, note_tracks, taped: Vec::new(), counted_in });
+        self.listen_if_armed();
         Task::none()
     }
 
@@ -74,6 +75,7 @@ impl App {
             return Task::none();
         };
         let stopped_at = self.engine.position();
+        self.engine.hear_on(&[]);
         self.engine.tape_keys(false);
         let began = self.input.as_ref().and_then(Input::take_began).map(|at| self.engine.position_at(at));
         self.engine.stop();

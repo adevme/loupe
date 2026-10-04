@@ -2234,7 +2234,10 @@ impl App {
             self.input_level = 0.0;
             return;
         }
-        self.engine.hear_on(if self.hear_input { &heard } else { &[] });
+        // You only hear yourself while the tape is rolling. Armed and stopped, or
+        // armed and playing back, your microphone stays out of the mix.
+        let rolling = self.recording.is_some();
+        self.engine.hear_on(if self.hear_input && rolling { &heard } else { &[] });
         if self.input.is_some() {
             return;
         }
@@ -2660,11 +2663,10 @@ impl App {
             text(self.keyboards_found()).size(12).color(palette.text_dim),
             self.midi_picker(),
             text("Hear yourself").size(13).font(palette.medium),
-            text("Armed tracks play what the input hears, through their Rec plugins. Use headphones, or speakers will howl.").size(12).color(palette.text_dim),
-            button(text(if self.hear_input { "On" } else { "Off" }).size(12.5))
-                .padding([4, 12])
-                .style(move |_, status| palette.toggled(self.hear_input, status))
-                .on_press(Message::HearInputToggled),
+            text("While a take is recording, armed tracks play what the input hears, through their Rec plugins. Use headphones, or speakers will howl.").size(12).color(palette.text_dim),
+            iced::widget::checkbox("Hear yourself while recording", self.hear_input)
+                .on_toggle(|_| Message::HearInputToggled)
+                .text_size(13),
             text("Count in").size(13).font(palette.medium),
             text("Bars of clicks before recording starts, when Loupe is stopped. The take begins where the playhead was.").size(12).color(palette.text_dim),
             pick_list(COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).text_size(13).padding([5, 10]).width(160),

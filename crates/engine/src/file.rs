@@ -817,6 +817,43 @@ mod routing_round_trip {
     }
 
     #[test]
+    fn rec_plugins_and_master_plugins_keep_themselves_to_themselves() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let fx = |name: &str, record| crate::model::Fx {
+            path: PathBuf::from("one.vst3"),
+            index: 0,
+            name: name.to_string(),
+            bypassed: false,
+            state: vec![4, 5, 6],
+            record,
+        };
+        p.apply(Command::AddFx { track, fx: fx("Heard while recording", true) }).unwrap();
+        p.apply(Command::AddFx { track, fx: fx("In the mix", false) }).unwrap();
+        p.apply(Command::AddMasterFx(fx("Over the whole mix", false))).unwrap();
+        p.apply(Command::SetPrintTakes { track, on: true }).unwrap();
+
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+
+        let track = &back.tracks[0];
+        assert!(track.print_takes, "the track forgot it prints its takes");
+        assert_eq!(track.fx.len(), 2);
+        assert!(track.fx[0].record, "the Rec plugin came back as a mix plugin");
+        assert!(!track.fx[1].record, "a mix plugin came back as a Rec plugin");
+        assert_eq!(track.fx[0].state, vec![4, 5, 6]);
+
+        assert_eq!(back.master_fx.len(), 1, "the master plugin went missing");
+        assert_eq!(back.master_fx[0].name, "Over the whole mix");
+        assert!(!back.master_fx[0].record, "a master plugin is never a Rec plugin");
+        assert_eq!(back.master_fx[0].state, vec![4, 5, 6]);
+
+        // The master plugin must not have landed on the track, nor the track's on the master.
+        assert!(track.fx.iter().all(|fx| fx.name != "Over the whole mix"));
+        assert!(back.master_fx.iter().all(|fx| fx.name != "In the mix"));
+    }
+
+    #[test]
     fn a_master_plugin_knob_can_be_automated_and_comes_back() {
         let mut p = Project::new(48_000);
         let fx = crate::model::Fx {
