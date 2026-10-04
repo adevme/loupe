@@ -573,12 +573,12 @@ impl Palette {
     }
 
     pub fn glint(&self) -> f32 {
-        if self.is_light() { 0.5 } else { 0.055 }
+        if self.is_light() { 0.3 } else { 0.03 }
     }
 
     pub fn sheen(&self, base: Color) -> Background {
         let top = mix(base, Color::WHITE, self.glint());
-        let bottom = mix(base, Color::BLACK, self.shade() * 0.15);
+        let bottom = mix(base, Color::BLACK, self.shade() * 0.08);
         iced::gradient::Linear::new(std::f32::consts::PI).add_stop(0.0, top).add_stop(1.0, bottom).into()
     }
 
@@ -591,7 +591,7 @@ impl Palette {
     }
 
     pub fn top_bar(&self) -> container::Style {
-        container::Style { background: Some(self.sheen(self.panel)), ..Default::default() }
+        container::Style { background: Some(iced::gradient::Linear::new(std::f32::consts::PI).add_stop(0.0, mix(self.panel, Color::WHITE, self.glint() * 0.5)).add_stop(1.0, self.panel).into()), ..Default::default() }
     }
 
     pub fn shadow_below(&self, strength: f32) -> container::Style {

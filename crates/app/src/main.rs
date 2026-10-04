@@ -2597,7 +2597,7 @@ impl App {
         if let Some(banner) = self.safe_banner() {
             song = song.push(banner).push(rule(palette));
         }
-        let lid = container(Space::new(Length::Fill, 9)).style(move |_| palette.shadow_below(1.3));
+        let lid = container(Space::new(Length::Fill, 6)).style(move |_| palette.shadow_below(0.4));
         song = song.push(stack![middle.height(Length::Fill), lid]);
         if self.mixer_open {
             song = song.push(rule(palette)).push(self.mixer());
