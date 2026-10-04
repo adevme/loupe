@@ -8,6 +8,9 @@ use mlua::{Lua, LuaOptions, StdLib, Table, Value, Variadic};
 
 const LONGEST_RUN: Duration = Duration::from_secs(5);
 const CHECK_EVERY: u32 = 10_000;
+/// A script that keeps growing a table would eat the machine long before the five
+/// seconds are up, so Lua gets a ceiling of its own.
+const MOST_MEMORY: usize = 256 * 1024 * 1024;
 const HIGHEST_KEY: i64 = 127;
 
 pub const FUNCTIONS: [(&str, &str); 57] = [
@@ -93,6 +96,7 @@ pub struct Wishes {
 pub struct Ran {
     pub changed: bool,
     pub wishes: Wishes,
+    pub took: Duration,
 }
 
 struct Host<'a> {
@@ -172,8 +176,12 @@ pub fn shortcut_of(source: &str) -> Option<String> {
     })
 }
 
+/// A script holds the project while it runs, so this blocks until it is done. That
+/// is the point: the script edits the song, and nothing else may touch it meanwhile.
+/// The time limit and the memory ceiling are what keep that wait short.
 pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Result<Ran, String> {
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::new()).map_err(|why| why.to_string())?;
+    lua.set_memory_limit(MOST_MEMORY).map_err(|why| why.to_string())?;
     let started = Instant::now();
     lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(CHECK_EVERY), move |_, _| {
         if started.elapsed() > LONGEST_RUN {
@@ -502,7 +510,7 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Resu
     });
     let host = host.into_inner();
     match result {
-        Ok(()) => Ok(Ran { changed: host.changed, wishes: host.wishes }),
+        Ok(()) => Ok(Ran { changed: host.changed, wishes: host.wishes, took: started.elapsed() }),
         Err(why) => Err(tidy_error(&why)),
     }
 }
@@ -617,6 +625,13 @@ mod tests {
         let stuck = ran("while true do end", &mut project).unwrap_err();
         assert!(stuck.contains("more than 5 seconds"), "{stuck}");
         assert!(started.elapsed() < Duration::from_secs(8));
+    }
+
+    #[test]
+    fn a_script_cannot_eat_the_machine() {
+        let mut project = song();
+        let greedy = ran("local t = {} while true do t[#t + 1] = string.rep('x', 4096) end", &mut project).unwrap_err();
+        assert!(greedy.to_lowercase().contains("memory"), "{greedy}");
     }
 
     #[test]

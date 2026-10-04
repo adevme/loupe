@@ -10,8 +10,8 @@ const MENU_WIDTH: f32 = 220.0;
 const TALLEST_MENU: f32 = 290.0;
 const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_LEFT: f32 = 14.0;
-const HELP_MENU_LEFT: f32 = 72.0;
-const SCRIPTS_MENU_LEFT: f32 = 128.0;
+const SCRIPTS_MENU_LEFT: f32 = 72.0;
+const HELP_MENU_LEFT: f32 = 148.0;
 const MENU_OVERLAPS_BAR: f32 = 8.0;
 pub const ENTRY_ID: &str = "overlay-entry";
 

@@ -193,7 +193,10 @@ impl App {
             self.cache.clear();
         }
         let printed = wishes.printed.iter().rev().take(MOST_PRINTED).rev().cloned().collect::<Vec<_>>().join("  ·  ");
-        self.notice = (!printed.is_empty()).then_some(printed);
+        self.notice = Some(match printed.is_empty() {
+            true => format!("{name} finished in {} ms.", ran.took.as_millis()),
+            false => printed,
+        });
         let playing = match wishes.play {
             Some(play) if play != self.playing => self.handle(Message::TogglePlay),
             _ => Task::none(),

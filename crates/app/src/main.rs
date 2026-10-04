@@ -2426,7 +2426,7 @@ impl App {
             (BarItem::Settings, icon_button(palette, "settings", Some(Message::OpenSettings))),
             (BarItem::Import, import.into()),
         ];
-        let mut bar = row![file, help, scripts, Space::with_width(6)].spacing(8).align_y(Alignment::Center);
+        let mut bar = row![file, scripts, help, Space::with_width(6)].spacing(8).align_y(Alignment::Center);
         for item in palette.top_bar_items() {
             let piece = match item {
                 BarItem::Gap => Some(horizontal_space().into()),
