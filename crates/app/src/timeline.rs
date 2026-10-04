@@ -2088,10 +2088,10 @@ fn raised_fill(p: &Palette, base: Color, top: f32, height: f32) -> canvas::Fill 
 }
 
 fn sheen_fill(p: &Palette, top: f32, height: f32) -> canvas::Fill {
-    let light = if p.is_light() { 0.28 } else { 0.05 };
+    let light = if p.is_light() { 0.28 } else { 0.08 };
     canvas::gradient::Linear::new(Point::new(0.0, top), Point::new(0.0, top + height))
         .add_stop(0.0, theme::alpha(Color::WHITE, light))
-        .add_stop(0.45, theme::alpha(Color::WHITE, 0.0))
-        .add_stop(1.0, theme::alpha(Color::BLACK, p.shade() * 0.35))
+        .add_stop(0.6, theme::alpha(Color::WHITE, 0.0))
+        .add_stop(1.0, theme::alpha(Color::WHITE, 0.0))
         .into()
 }
