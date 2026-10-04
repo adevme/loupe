@@ -239,6 +239,7 @@ impl Rack {
     }
 
     pub fn open_waiting(&mut self) -> Vec<String> {
+        self.take_arrivals();
         let waiting: Vec<usize> = self
             .slots
             .iter()
@@ -249,7 +250,7 @@ impl Rack {
         let mut troubles = Vec::new();
         for slot in waiting {
             self.slots[slot].wanted_open = false;
-            if let Err(why) = self.tell(slot, Ask::Show) {
+            if let Err(why) = self.show(slot) {
                 troubles.push(why);
             }
         }
@@ -257,6 +258,7 @@ impl Rack {
     }
 
     pub fn show(&mut self, slot: usize) -> Result<(), String> {
+        self.take_arrivals();
         if let Some(found) = self.slots.get_mut(slot) {
             if found.on_its_way() {
                 found.wanted_open = true;
@@ -772,6 +774,22 @@ mod fallen_tests {
         play_until_settled(&mut rack);
         let fallen = rack.take_fallen();
         assert_eq!(fallen.iter().map(|fell| fell.name.as_str()).collect::<Vec<_>>(), vec!["Crashy Reverb"]);
+    }
+
+    #[test]
+    fn a_window_asked_for_while_the_plugin_loads_opens_without_the_song_playing() {
+        let script = host("stopped", "read ask\nprintf 'loaded\\t2\\t2\\t0\\n'\nwhile read ask; do printf 'trouble\\tno window on this host\\n'; done\n");
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
+        rack.reconcile(&[wanted("Tuner")]);
+        assert!(rack.show(0).is_ok(), "the window is wanted as soon as the plugin is there");
+        let gave_up = std::time::Instant::now();
+        let mut troubles = Vec::new();
+        while troubles.is_empty() {
+            assert!(gave_up.elapsed() < std::time::Duration::from_secs(10), "the window was never asked for");
+            troubles = rack.open_waiting();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(troubles, vec!["no window on this host".to_string()]);
     }
 
     #[test]
