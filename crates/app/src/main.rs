@@ -266,6 +266,7 @@ pub enum Message {
     StretchClip { clip: ClipId, start: Frames, len: Frames },
     Stretched { source: Arc<Source>, stretch: f64, made: Option<Arc<Source>> },
     ToggleSnap,
+    MidiInputToggled(String),
     AudioDriverChosen(audio_settings::Driver),
     AudioOutputChosen(String),
     AudioRateChosen(audio_settings::Rate),
@@ -375,7 +376,6 @@ pub enum Overlay {
     Matrix,
     Recover,
     Roll(ClipId),
-    Versions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -420,6 +420,7 @@ struct App {
     writing: Option<loupe_engine::Writer>,
     knob_names: HashMap<(u64, usize, usize, bool), String>,
     hint: Option<&'static str>,
+    reading: Option<String>,
     found: Vec<loupe_plugins::Found>,
     scanning: bool,
     plugin_filter: String,
@@ -496,6 +497,8 @@ struct App {
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
     snap: bool,
+    midi_chosen: Vec<String>,
+    midi_around: Vec<String>,
     stretches: stretching::Stretches,
     modifiers: keyboard::Modifiers,
     audio: loupe_engine::Device,
@@ -607,6 +610,8 @@ impl App {
             copied_clips: None,
             scripts: Vec::new(),
             snap: settings.snap,
+            midi_chosen: settings.midi_inputs.clone().unwrap_or_default(),
+            midi_around: loupe_engine::MidiKeys::around(),
             stretches: stretching::Stretches::default(),
             modifiers: keyboard::Modifiers::default(),
             audio: settings.audio.clone(),
@@ -622,6 +627,7 @@ impl App {
             found: Vec::new(),
             scanning: true,
             hint: None,
+            reading: None,
             plugin_filter: String::new(),
             plugin_highlight: 0,
             plugin_uses: plugins::Uses::load(),
@@ -849,6 +855,7 @@ impl App {
             Message::MoveClip { clip, track, start } => self.move_clips(clip, track, start),
             Message::DragEnd => {
                 self.run = None;
+                self.reading = None;
                 self.stop_writing();
             }
             Message::Split => self.split(),
@@ -918,7 +925,10 @@ impl App {
             }
             Message::ModifiersChanged(modifiers) => self.modifiers = modifiers,
             Message::TrackPan(track, pan) => {
-                self.edit(Some(Run::Pan(track)), Command::SetTrackPan { track, pan: pan.clamp(-1.0, 1.0) });
+                let pan = pan.clamp(-1.0, 1.0);
+                self.edit(Some(Run::Pan(track)), Command::SetTrackPan { track, pan });
+                let name = self.project.track(track).map(|found| found.name.clone()).unwrap_or_default();
+                self.reading = Some(format!("{name}  pan {}", mixer::pan_text(pan)));
             }
             Message::ToggleSolo(track) => self.toggle_solo(track),
             Message::ToggleMute(track) => {
@@ -1157,6 +1167,8 @@ impl App {
             }
             Message::TrackGain(track, db) => {
                 let gain = mixer::gain_from_db(db);
+                let name = self.project.track(track).map(|found| found.name.clone()).unwrap_or_default();
+                self.reading = Some(format!("{name}  {db:+.1} dB"));
                 let target = loupe_engine::Target::TrackGain(track);
                 match self.writing_to(target) {
                     Some(mode) => self.write_point(target, gain, mode),
@@ -1175,6 +1187,7 @@ impl App {
             Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
+            Message::MidiInputToggled(port) => self.toggle_midi_input(port),
             Message::ToggleSnap => {
                 self.snap = !self.snap;
                 if let Err(why) = settings::save("snap", if self.snap { "on" } else { "off" }) {
@@ -1255,6 +1268,7 @@ impl App {
                 return unfocus();
             }
             Message::MasterPercent(percent) => {
+                self.reading = Some(format!("Master  {percent:.0}%"));
                 let target = loupe_engine::Target::MasterGain;
                 match self.writing_to(target) {
                     Some(mode) => self.write_point(target, percent / 100.0, mode),
@@ -1631,7 +1645,7 @@ impl App {
             }
             Message::Recover => return self.recover(),
             Message::SkipRecovery => self.skip_recovery(),
-            Message::OpenVersions => self.overlay = Overlay::Versions,
+            Message::OpenVersions => self.overlay = Overlay::About,
             Message::UseVersion(version) => return self.switch_version(version),
             Message::CheckForUpdates => return self.check_for_updates(),
             Message::UpdateChecked(result) => {
@@ -2508,6 +2522,7 @@ impl App {
             pick_list(inputs, Some(current_input), Message::InputChosen).text_size(13).padding([5, 10]).width(Length::Fill),
             text("MIDI keyboards").size(13).font(palette.medium),
             text(self.keyboards_found()).size(12).color(palette.text_dim),
+            self.midi_picker(),
             text("Count in").size(13).font(palette.medium),
             text("Bars of clicks before recording starts, when Loupe is stopped. The take begins where the playhead was.").size(12).color(palette.text_dim),
             pick_list(COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).text_size(13).padding([5, 10]).width(160),
@@ -2563,6 +2578,8 @@ impl App {
         } else if self.loading > 0 {
             let what = if self.loading == 1 { "1 file".into() } else { format!("{} files", self.loading) };
             text(format!("Loading {what}…")).size(12).color(palette.text_dim).into()
+        } else if let Some(reading) = &self.reading {
+            text(reading.as_str()).size(12).font(palette.mono).color(palette.text).into()
         } else {
             text(self.hint.unwrap_or_default()).size(12).color(palette.text_dim).into()
         };

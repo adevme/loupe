@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn the_first_run_says_nothing_until_the_notice_has_been_seen() {
-        let fresh = settings::Settings {
+        let fresh = settings::Settings { midi_inputs: None,
             theme: None,
             scale: 1.0,
             mixer_height: None,

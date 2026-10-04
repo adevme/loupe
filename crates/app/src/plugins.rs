@@ -8,7 +8,9 @@ use loupe_plugins::Found;
 use crate::{App, Message};
 
 pub const FILTER_ID: &str = "plugin-filter";
-const NAME_LENGTH: usize = 9;
+const NAME_LENGTH: usize = 20;
+const DOT: f32 = 9.0;
+const SLOT_HINT: &str = "Click to open it, drag to reorder, right click to remove, middle click for its knobs";
 
 pub fn find_plugins() -> Vec<Found> {
     let mut found = newest_shells(loupe_plugins::everything());
@@ -28,31 +30,31 @@ impl App {
             let on = !fx.bypassed;
             let dragged = self.fx_drag.map(|(held, from, _)| held == track && from == slot).unwrap_or(false);
             let landing = self.fx_drag.map(|(held, _, over)| held == track && over == slot).unwrap_or(false);
+            // The strip is narrow, so the name gets the whole row. Everything else is
+            // the dot on the left, or a click of the right button.
+            let dot = button(Space::new(DOT, DOT))
+                .padding(0)
+                .style(move |_, status| palette.toggled(!on, status))
+                .on_press(Message::BypassPlugin(track, slot));
             let name = container(text(short).size(10.5).wrapping(iced::widget::text::Wrapping::None))
                 .padding(iced::Padding { top: 1.0, right: 3.0, bottom: 1.0, left: 3.0 })
                 .width(Length::Fill)
                 .style(move |_| crate::plugins::slot_look(palette, on, dragged, landing));
             rows = rows.push(
                 row![
+                    dot,
                     mouse_area(name)
                         .on_press(Message::FxGrab(track, slot))
                         .on_move(move |_| Message::FxOver(slot))
                         .on_release(Message::FxDrop)
+                        .on_right_press(Message::RemovePlugin(track, slot))
+                        .on_middle_press(Message::OpenKnobs(crate::stockwin::Spot::Track(track), slot))
+                        .on_enter(Message::Hint(Some(SLOT_HINT)))
+                        .on_exit(Message::Hint(None))
                         .interaction(iced::mouse::Interaction::Grab),
-                    button(text("b").size(10.5))
-                        .padding([1, 3])
-                        .style(move |_, status| palette.toggled(!on, status))
-                        .on_press(Message::BypassPlugin(track, slot)),
-                    button(text("a").size(10.5))
-                        .padding([1, 3])
-                        .style(move |_, status| palette.ghost(status))
-                        .on_press(Message::OpenKnobs(crate::stockwin::Spot::Track(track), slot)),
-                    button(text("x").size(10.5))
-                        .padding([1, 4])
-                        .style(move |_, status| palette.ghost(status))
-                        .on_press(Message::RemovePlugin(track, slot)),
                 ]
-                .spacing(2),
+                .spacing(3)
+                .align_y(iced::Alignment::Center),
             );
         }
         let add = button(text("+ FX").size(10.5))
@@ -164,11 +166,11 @@ mod tests {
 
     #[test]
     fn a_long_name_loses_the_maker_not_the_model() {
-        assert_eq!(shorten("FabFilter Pro-Q 4"), "Pro-Q 4");
-        assert_eq!(shorten("FabFilter Saturn 2"), "Saturn 2");
+        // The slot now has the whole strip width, so most names arrive whole.
+        assert_eq!(shorten("FabFilter Pro-Q 4"), "FabFilter Pro-Q 4");
         assert_eq!(shorten("Loupe EQ"), "Loupe EQ");
-        assert_eq!(shorten("Valhalla Supermassive"), "Supermas\u{2026}");
-        assert_eq!(shorten("Pro-Q 4"), "Pro-Q 4");
+        assert_eq!(shorten("Valhalla Supermassive"), "Supermassive");
+        assert_eq!(shorten("Auburn Sounds Graillon 3"), "Sounds Graillon 3");
     }
 }
 
