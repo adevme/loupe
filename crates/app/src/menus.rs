@@ -182,6 +182,8 @@ impl App {
         }
         items.push(self.item("Routing…", "", Some(Message::OpenRouting(track))));
         items.push(self.item("New note clip", "", Some(Message::NewNotesClip(track))));
+        let keys = self.project.track(track).is_some_and(|t| t.records_notes);
+        items.push(self.item(if keys { "Record notes from keys ✓" } else { "Record notes from keys" }, "", Some(Message::ToggleRecordsNotes(track))));
         let playing = self.project.track(track).map(|t| t.instrument);
         let synth = matches!(playing, Some(loupe_engine::Instrument::Synth(_)));
         items.push(self.item(if synth { "Instrument: Loupe Synth ✓" } else { "Instrument: Loupe Synth" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::default()))));

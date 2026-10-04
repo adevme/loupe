@@ -38,6 +38,7 @@ pub struct SavedTrack {
     pub muted: bool,
     pub pan: f32,
     pub solo: bool,
+    pub records_notes: bool,
     pub colour: Option<[u8; 3]>,
     pub height: Option<f32>,
     pub clips: Vec<SavedClip>,
@@ -119,6 +120,7 @@ impl SavedProject {
                     muted: track.muted,
                     pan: track.pan,
                     solo: track.solo,
+                    records_notes: track.records_notes,
                     colour: track.colour,
                     height: height_of(track.id),
                     parent: track.parent.and_then(|id| project.tracks.iter().position(|t| t.id == id)),
@@ -184,8 +186,8 @@ impl SavedProject {
             let height = track.height.map_or("-".to_string(), |h| h.to_string());
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} colour={colour} height={height} parent={parent} collapsed={} instrument={} name={}\n",
-                track.gain, track.muted as u8, track.pan, track.solo as u8, track.collapsed as u8, instrument_text(&track.instrument), track.name
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, instrument_text(&track.instrument), track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -275,6 +277,7 @@ impl SavedProject {
                         muted: fields.get("muted") == Some(&"1"),
                         pan: number_in(&fields, "pan").filter(|pan| (-1.0..=1.0).contains(pan)).unwrap_or(0.0),
                         solo: fields.get("solo") == Some(&"1"),
+                        records_notes: fields.get("keys") == Some(&"1"),
                         colour: fields.get("colour").and_then(|value| colour_from(value)),
                         height: number_in(&fields, "height"),
                         clips: Vec::new(),
@@ -414,6 +417,7 @@ impl SavedProject {
             let _ = project.apply(Command::SetTrackMuted { track, muted: saved.muted });
             let _ = project.apply(Command::SetTrackPan { track, pan: saved.pan });
             let _ = project.apply(Command::SetTrackSolo { track, solo: saved.solo });
+            let _ = project.apply(Command::SetRecordsNotes { track, on: saved.records_notes });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
             let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
             if let Some(height) = saved.height {

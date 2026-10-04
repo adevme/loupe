@@ -126,6 +126,7 @@ pub struct Track {
     pub muted: bool,
     pub pan: f32,
     pub solo: bool,
+    pub records_notes: bool,
     pub colour: Option<[u8; 3]>,
     pub clips: Vec<Clip>,
     pub parent: Option<TrackId>,
@@ -159,6 +160,7 @@ pub enum Command {
     SetTrackMuted { track: TrackId, muted: bool },
     SetTrackPan { track: TrackId, pan: f32 },
     SetTrackSolo { track: TrackId, solo: bool },
+    SetRecordsNotes { track: TrackId, on: bool },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
     PasteClip { track: TrackId, clip: Clip },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
@@ -302,7 +304,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -362,6 +364,11 @@ impl Project {
                     return Err(CommandError::InvalidValue);
                 }
                 self.tracks[t].pan = pan;
+                Ok(Outcome::Done)
+            }
+            Command::SetRecordsNotes { track, on } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].records_notes = on;
                 Ok(Outcome::Done)
             }
             Command::SetTrackSolo { track, solo } => {

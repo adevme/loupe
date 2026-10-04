@@ -215,6 +215,7 @@ pub enum Message {
     SkipRecovery,
     NewNotesClip(TrackId),
     UseInstrument(TrackId, Instrument),
+    ToggleRecordsNotes(TrackId),
     RollPlaced { clip: ClipId, notes: Vec<Note>, key: u8, chosen: Vec<Note> },
     RollEdit { clip: ClipId, notes: Vec<Note>, chosen: Option<Vec<Note>> },
     RollChoose(Vec<Note>),
@@ -738,6 +739,9 @@ impl App {
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
             Message::Tick => {
+                if let Some(recording) = self.recording.as_mut() {
+                    recording.taped.extend(self.engine.taped_keys());
+                }
                 self.keep_writing();
                 if let Some(window) = self.stock.as_mut() {
                     window.tick();
@@ -944,6 +948,13 @@ impl App {
                 }
             }
             Message::NewNotesClip(track) => self.new_notes_clip(track),
+            Message::ToggleRecordsNotes(track) => {
+                self.overlay = Overlay::None;
+                if let Some(on) = self.project.track(track).map(|t| !t.records_notes) {
+                    self.edit(None, Command::SetRecordsNotes { track, on });
+                    self.listen_if_armed();
+                }
+            }
             Message::UseInstrument(track, instrument) => {
                 self.overlay = Overlay::None;
                 self.edit(None, Command::SetInstrument { track, instrument });
@@ -1981,7 +1992,8 @@ impl App {
     }
 
     pub(crate) fn listen_if_armed(&mut self) {
-        if self.armed.is_empty() {
+        let wants_audio = self.project.tracks.iter().any(|track| self.armed.contains(&track.id) && !track.records_notes);
+        if !wants_audio {
             self.input = None;
             self.input_level = 0.0;
             return;

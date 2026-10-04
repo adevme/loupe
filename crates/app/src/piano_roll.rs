@@ -747,7 +747,12 @@ impl App {
         let start = self.playhead / bar.max(1) * bar;
         let name = self.project.track(track).map_or("Notes".to_string(), |t| t.name.clone());
         let made = loupe_engine::Command::AddNotesClip { track, name, start, len: bar * 4, notes: Vec::new() };
-        if let Some(loupe_engine::Outcome::Clip(clip)) = self.edit(None, made) {
+        let added = self.transact(None, |project| {
+            project.apply(loupe_engine::Command::SetRecordsNotes { track, on: true })?;
+            project.apply(made)
+        });
+        self.listen_if_armed();
+        if let Some(loupe_engine::Outcome::Clip(clip)) = added {
             self.choose([clip]);
             self.open_roll(clip);
         }
@@ -785,7 +790,13 @@ impl App {
     pub(crate) fn aim_keys(&mut self) {
         let target = match self.overlay {
             crate::Overlay::Roll(clip) => self.project.track_of(clip).map(|track| track.id),
-            _ => self.project.tracks.iter().map(|track| track.id).find(|track| self.armed.contains(track)),
+            _ => self
+                .project
+                .tracks
+                .iter()
+                .filter(|track| self.armed.contains(&track.id))
+                .min_by_key(|track| !track.records_notes)
+                .map(|track| track.id),
         };
         if target != self.keys_aimed_at {
             self.keys_aimed_at = target;
