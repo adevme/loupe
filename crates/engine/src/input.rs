@@ -11,17 +11,19 @@ use cpal::{FromSample, SizedSample};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::clock;
+use crate::model::InputChannels;
 use crate::wav;
 
 const PRACTICE_SWELL_SECONDS: f32 = 3.0;
 const PRACTICE_LOUDEST: f32 = 1.2;
 const PRACTICE_RATE: u32 = 48_000;
 const PRACTICE_TONE_HZ: f32 = 220.0;
-const TAKE_QUEUE: usize = 1 << 19;
+pub const PRACTICE_INPUTS: u16 = 4;
+pub const MOST_INPUTS: usize = 64;
+const TAKE_QUEUE_FRAMES: usize = 1 << 17;
 const TAKE_SETTLES_FOR: Duration = Duration::from_millis(30);
 const KEEPER_RESTS_FOR: Duration = Duration::from_millis(15);
-const TAKE_CHANNELS: u16 = 1;
-const EAR_QUEUE: usize = 1 << 14;
+const EAR_QUEUE_FRAMES: usize = 1 << 14;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputChoice {
@@ -38,42 +40,63 @@ pub struct Take {
     pub lost: u64,
 }
 
-#[derive(Default)]
 struct Heard {
-    peak: AtomicU32,
+    peaks: [AtomicU32; MOST_INPUTS],
     taking: AtomicBool,
     began: AtomicU64,
     lost: AtomicU64,
 }
 
+impl Default for Heard {
+    fn default() -> Self {
+        Self {
+            peaks: std::array::from_fn(|_| AtomicU32::new(0)),
+            taking: AtomicBool::new(false),
+            began: AtomicU64::new(0),
+            lost: AtomicU64::new(0),
+        }
+    }
+}
+
 struct Tap {
     heard: Arc<Heard>,
+    width: usize,
     queue: Producer<f32>,
     ear: Option<Producer<f32>>,
     was_taking: bool,
 }
 
 impl Tap {
-    fn hear(&mut self, samples: impl Iterator<Item = f32>, first_at: Instant) {
+    fn hear<Frame: Iterator<Item = f32>>(&mut self, frames: impl Iterator<Item = Frame>, first_at: Instant) {
         let taking = self.heard.taking.load(Ordering::Acquire);
         if taking && !self.was_taking {
             self.heard.began.store(clock::nanos(first_at).max(1), Ordering::Release);
         }
         self.was_taking = taking;
-        let mut loudest = 0.0f32;
+        let width = self.width;
+        let mut loudest = [0.0f32; MOST_INPUTS];
         let mut lost = 0;
-        for sample in samples {
-            if sample.is_finite() {
-                loudest = loudest.max(sample.abs());
-            }
-            if taking && self.queue.push(sample).is_err() {
+        for frame in frames {
+            let keep = taking && self.queue.slots() >= width;
+            if taking && !keep {
                 lost += 1;
             }
-            if let Some(ear) = self.ear.as_mut() {
-                let _ = ear.push(sample);
+            let mut ear = self.ear.as_mut().filter(|ear| ear.slots() >= width);
+            for (channel, sample) in frame.chain(std::iter::repeat(0.0)).take(width).enumerate() {
+                if sample.is_finite() {
+                    loudest[channel] = loudest[channel].max(sample.abs());
+                }
+                if keep {
+                    let _ = self.queue.push(sample);
+                }
+                if let Some(ear) = ear.as_mut() {
+                    let _ = ear.push(sample);
+                }
             }
         }
-        note(&self.heard.peak, loudest);
+        for (peak, heard) in self.heard.peaks.iter().zip(&loudest[..width]) {
+            note(peak, *heard);
+        }
         if lost > 0 {
             self.heard.lost.fetch_add(lost, Ordering::Relaxed);
         }
@@ -81,13 +104,21 @@ impl Tap {
 }
 
 enum Order {
-    Begin(PathBuf, mpsc::Sender<Result<(), String>>),
-    Finish(mpsc::Sender<Result<Take, String>>),
+    Begin(Vec<(PathBuf, InputChannels)>, mpsc::Sender<Result<(), String>>),
+    Finish(mpsc::Sender<Result<Vec<Take>, String>>),
+}
+
+struct Opened {
+    rate: u32,
+    width: usize,
+    queue: Consumer<f32>,
+    ear: Consumer<f32>,
 }
 
 pub struct Input {
     heard: Arc<Heard>,
     rate: u32,
+    width: usize,
     ear: Option<Consumer<f32>>,
     orders: Option<mpsc::Sender<Order>>,
     quit: Arc<AtomicBool>,
@@ -102,49 +133,62 @@ pub fn input_devices() -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub fn input_count(choice: &InputChoice) -> Option<u16> {
+    if *choice == InputChoice::Practice {
+        return Some(PRACTICE_INPUTS);
+    }
+    let channels = find_device(choice).ok()?.default_input_config().ok()?.channels();
+    Some(channels.clamp(1, MOST_INPUTS as u16))
+}
+
 impl Input {
     pub fn open(choice: InputChoice) -> Result<Self, String> {
         clock::start();
         let heard = Arc::new(Heard::default());
         let quit = Arc::new(AtomicBool::new(false));
-        let (queue_in, queue_out) = RingBuffer::new(TAKE_QUEUE);
-        let (ear_in, ear_out) = RingBuffer::new(EAR_QUEUE);
-        let tap = Tap { heard: heard.clone(), queue: queue_in, ear: Some(ear_in), was_taking: false };
         let (opened_tx, opened_rx) = mpsc::channel();
         let host = thread::Builder::new()
             .name("loupe-input".into())
             .spawn({
                 let quit = quit.clone();
-                move || listen(choice, tap, quit, opened_tx)
+                let heard = heard.clone();
+                move || listen(choice, heard, quit, opened_tx)
             })
             .map_err(|why| why.to_string())?;
-        let rate = opened_rx.recv().map_err(|_| "the input thread stopped".to_string())??;
+        let Opened { rate, width, queue, ear } = opened_rx.recv().map_err(|_| "the input thread stopped".to_string())??;
         let (orders, orders_rx) = mpsc::channel();
         let keeper = thread::Builder::new()
             .name("loupe-takes".into())
             .spawn({
                 let heard = heard.clone();
-                move || keep_takes(queue_out, heard, rate, orders_rx)
+                move || keep_takes(queue, width, heard, rate, orders_rx)
             })
             .map_err(|why| why.to_string())?;
-        Ok(Self { heard, rate, ear: Some(ear_out), orders: Some(orders), quit, host: Some(host), keeper: Some(keeper) })
+        Ok(Self { heard, rate, width, ear: Some(ear), orders: Some(orders), quit, host: Some(host), keeper: Some(keeper) })
     }
 
     pub fn rate(&self) -> u32 {
         self.rate
     }
 
-    pub(crate) fn take_ear(&mut self) -> Option<Consumer<f32>> {
-        self.ear.take()
+    pub fn inputs(&self) -> u16 {
+        self.width as u16
     }
 
-    pub fn take_peak(&self) -> f32 {
-        f32::from_bits(self.heard.peak.swap(0, Ordering::Relaxed))
+    pub(crate) fn take_ear(&mut self) -> Option<(Consumer<f32>, usize)> {
+        self.ear.take().map(|ear| (ear, self.width))
     }
 
-    pub fn begin_take(&self, path: &Path) -> Result<(), String> {
+    pub fn take_peaks(&self) -> Vec<f32> {
+        self.heard.peaks[..self.width].iter().map(|peak| f32::from_bits(peak.swap(0, Ordering::Relaxed))).collect()
+    }
+
+    pub fn begin_takes(&self, takes: &[(PathBuf, InputChannels)]) -> Result<(), String> {
+        if let Some((_, missing)) = takes.iter().find(|(_, channels)| !channels.fits(self.inputs())) {
+            return Err(format!("{} is not there: the input has {} channels", missing.name(), self.width));
+        }
         let (reply, answer) = mpsc::channel();
-        self.order(Order::Begin(path.to_path_buf(), reply))?;
+        self.order(Order::Begin(takes.to_vec(), reply))?;
         answer.recv().map_err(|_| "the take keeper stopped".to_string())?
     }
 
@@ -155,7 +199,7 @@ impl Input {
         }
     }
 
-    pub fn finish_take(&self) -> Result<Take, String> {
+    pub fn finish_takes(&self) -> Result<Vec<Take>, String> {
         let (reply, answer) = mpsc::channel();
         self.order(Order::Finish(reply))?;
         answer.recv().map_err(|_| "the take keeper stopped".to_string())?
@@ -186,52 +230,87 @@ fn note(peak: &AtomicU32, heard: f32) {
 
 struct TakeFile {
     path: PathBuf,
+    channels: InputChannels,
     out: BufWriter<File>,
     frames: u64,
     rate: u32,
 }
 
 impl TakeFile {
-    fn create(path: &Path, rate: u32) -> io::Result<Self> {
+    fn create(path: &Path, channels: InputChannels, rate: u32) -> io::Result<Self> {
         if let Some(folder) = path.parent() {
             fs::create_dir_all(folder)?;
         }
         let mut out = BufWriter::new(File::create(path)?);
-        out.write_all(&wav::float_header(TAKE_CHANNELS, rate, 0))?;
-        Ok(Self { path: path.to_path_buf(), out, frames: 0, rate })
+        out.write_all(&wav::float_header(channels.width(), rate, 0))?;
+        Ok(Self { path: path.to_path_buf(), channels, out, frames: 0, rate })
     }
 
-    fn drain(&mut self, queue: &mut Consumer<f32>) -> io::Result<()> {
-        let room = wav::most_frames(TAKE_CHANNELS);
-        while let Ok(sample) = queue.pop() {
-            if self.frames < room {
-                self.out.write_all(&sample.to_le_bytes())?;
-                self.frames += 1;
-            }
+    fn keep(&mut self, frame: &[f32]) -> io::Result<()> {
+        if self.frames >= wav::most_frames(self.channels.width()) {
+            return Ok(());
         }
+        let first = self.channels.first() as usize;
+        for sample in &frame[first..first + self.channels.width() as usize] {
+            self.out.write_all(&sample.to_le_bytes())?;
+        }
+        self.frames += 1;
         Ok(())
     }
 
     fn close(mut self, lost: u64) -> io::Result<Take> {
         self.out.seek(SeekFrom::Start(0))?;
-        self.out.write_all(&wav::float_header(TAKE_CHANNELS, self.rate, self.frames as u32))?;
+        self.out.write_all(&wav::float_header(self.channels.width(), self.rate, self.frames as u32))?;
         self.out.flush()?;
         Ok(Take { path: self.path, frames: self.frames, rate: self.rate, lost })
     }
 }
 
-fn keep_takes(mut queue: Consumer<f32>, heard: Arc<Heard>, rate: u32, orders: mpsc::Receiver<Order>) {
-    let mut open: Option<TakeFile> = None;
+fn named(path: &Path, why: io::Error) -> String {
+    format!("{}: {why}", path.display())
+}
+
+fn drain(files: &mut [TakeFile], queue: &mut Consumer<f32>, width: usize, waiting: &mut Vec<f32>) -> Result<(), String> {
+    let whole = queue.slots() / width * width;
+    let Ok(chunk) = queue.read_chunk(whole) else {
+        return Ok(());
+    };
+    let (front, back) = chunk.as_slices();
+    waiting.clear();
+    waiting.extend_from_slice(front);
+    waiting.extend_from_slice(back);
+    chunk.commit_all();
+    for frame in waiting.chunks_exact(width) {
+        for file in files.iter_mut() {
+            file.keep(frame).map_err(|why| named(&file.path, why))?;
+        }
+    }
+    Ok(())
+}
+
+fn close_all(files: Vec<TakeFile>, lost: u64) -> Result<Vec<Take>, String> {
+    files
+        .into_iter()
+        .map(|file| {
+            let path = file.path.clone();
+            file.close(lost).map_err(|why| named(&path, why))
+        })
+        .collect()
+}
+
+fn keep_takes(mut queue: Consumer<f32>, width: usize, heard: Arc<Heard>, rate: u32, orders: mpsc::Receiver<Order>) {
+    let mut open: Vec<TakeFile> = Vec::new();
     let mut trouble: Option<String> = None;
-    let named = |path: &Path, why: io::Error| format!("{}: {why}", path.display());
+    let mut waiting = Vec::new();
     loop {
         match orders.recv_timeout(KEEPER_RESTS_FOR) {
-            Ok(Order::Begin(path, reply)) => {
+            Ok(Order::Begin(takes, reply)) => {
                 heard.taking.store(false, Ordering::Release);
                 while queue.pop().is_ok() {}
-                let made = TakeFile::create(&path, rate).map_err(|why| named(&path, why));
-                let _ = reply.send(made.map(|file| {
-                    open = Some(file);
+                let made: Result<Vec<TakeFile>, String> =
+                    takes.iter().map(|(path, channels)| TakeFile::create(path, *channels, rate).map_err(|why| named(path, why))).collect();
+                let _ = reply.send(made.map(|files| {
+                    open = files;
                     trouble = None;
                     heard.began.store(0, Ordering::Release);
                     heard.lost.store(0, Ordering::Relaxed);
@@ -242,54 +321,59 @@ fn keep_takes(mut queue: Consumer<f32>, heard: Arc<Heard>, rate: u32, orders: mp
                 heard.taking.store(false, Ordering::Release);
                 thread::sleep(TAKE_SETTLES_FOR);
                 let lost = heard.lost.load(Ordering::Relaxed);
-                let finished = match (open.take(), trouble.take()) {
-                    (None, _) => Err("nothing was being recorded".to_string()),
-                    (Some(file), Some(why)) => {
-                        let _ = file.close(lost);
+                let mut files = std::mem::take(&mut open);
+                let finished = match (files.is_empty(), trouble.take()) {
+                    (true, _) => Err("nothing was being recorded".to_string()),
+                    (false, Some(why)) => {
+                        let _ = close_all(files, lost);
                         Err(why)
                     }
-                    (Some(mut file), None) => {
-                        let path = file.path.clone();
-                        file.drain(&mut queue).and_then(|_| file.close(lost)).map_err(|why| named(&path, why))
-                    }
+                    (false, None) => drain(&mut files, &mut queue, width, &mut waiting).and_then(|_| close_all(files, lost)),
                 };
                 let _ = reply.send(finished);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 heard.taking.store(false, Ordering::Release);
-                if let Some(mut file) = open.take() {
-                    let _ = file.drain(&mut queue).and_then(|_| file.close(0));
-                }
+                let mut files = std::mem::take(&mut open);
+                let _ = drain(&mut files, &mut queue, width, &mut waiting);
+                let _ = close_all(files, 0);
                 return;
             }
         }
-        if let Some(file) = &mut open {
-            if let Err(why) = file.drain(&mut queue) {
+        if !open.is_empty() && trouble.is_none() {
+            if let Err(why) = drain(&mut open, &mut queue, width, &mut waiting) {
                 heard.taking.store(false, Ordering::Release);
-                trouble.get_or_insert(named(&file.path, why));
+                trouble = Some(why);
             }
         }
     }
 }
 
-fn listen(choice: InputChoice, mut tap: Tap, quit: Arc<AtomicBool>, opened: mpsc::Sender<Result<u32, String>>) {
+fn tap_for(heard: Arc<Heard>, rate: u32, width: usize) -> (Tap, Opened) {
+    let (queue_in, queue) = RingBuffer::new(TAKE_QUEUE_FRAMES * width);
+    let (ear_in, ear) = RingBuffer::new(EAR_QUEUE_FRAMES * width);
+    (Tap { heard, width, queue: queue_in, ear: Some(ear_in), was_taking: false }, Opened { rate, width, queue, ear })
+}
+
+fn listen(choice: InputChoice, heard: Arc<Heard>, quit: Arc<AtomicBool>, opened: mpsc::Sender<Result<Opened, String>>) {
     if choice == InputChoice::Practice {
-        let _ = opened.send(Ok(PRACTICE_RATE));
+        let (mut tap, ends) = tap_for(heard, PRACTICE_RATE, PRACTICE_INPUTS as usize);
+        let _ = opened.send(Ok(ends));
         let began = Instant::now();
         let mut made: u64 = 0;
         while !quit.load(Ordering::Relaxed) {
             let due = (began.elapsed().as_secs_f64() * PRACTICE_RATE as f64) as u64;
             let first_at = began + Duration::from_secs_f64(made as f64 / PRACTICE_RATE as f64);
-            tap.hear((made..due).map(practice_sample), first_at);
+            tap.hear((made..due).map(|frame| (0..PRACTICE_INPUTS).map(move |channel| practice_sample(frame, channel))), first_at);
             made = due;
             thread::park_timeout(Duration::from_millis(10));
         }
         return;
     }
-    match open_device(&choice, tap) {
-        Ok((stream, rate)) => {
-            let _ = opened.send(Ok(rate));
+    match open_device(&choice, heard) {
+        Ok((stream, ends)) => {
+            let _ = opened.send(Ok(ends));
             while !quit.load(Ordering::Relaxed) {
                 thread::park_timeout(Duration::from_millis(200));
             }
@@ -301,27 +385,36 @@ fn listen(choice: InputChoice, mut tap: Tap, quit: Arc<AtomicBool>, opened: mpsc
     }
 }
 
-fn practice_sample(frame: u64) -> f32 {
+fn practice_sample(frame: u64, channel: u16) -> f32 {
     let seconds = frame as f32 / PRACTICE_RATE as f32;
     let phase = (seconds / PRACTICE_SWELL_SECONDS).fract();
     let swell = (1.0 - (phase * 2.0 - 1.0).abs()) * PRACTICE_LOUDEST;
     let turn = (frame % PRACTICE_RATE as u64) as f32 / PRACTICE_RATE as f32;
-    swell * (turn * PRACTICE_TONE_HZ * std::f32::consts::TAU).sin()
+    swell * (turn * practice_tone(channel) * std::f32::consts::TAU).sin()
 }
 
-fn open_device(choice: &InputChoice, tap: Tap) -> Result<(cpal::Stream, u32), String> {
+fn practice_tone(channel: u16) -> f32 {
+    PRACTICE_TONE_HZ * (channel + 1) as f32
+}
+
+fn find_device(choice: &InputChoice) -> Result<cpal::Device, String> {
     let host = crate::devices::host();
-    let device = match choice {
+    match choice {
         InputChoice::Named(wanted) => host
             .input_devices()
             .map_err(|why| why.to_string())?
             .find(|device| device.name().is_ok_and(|name| &name == wanted))
-            .ok_or_else(|| format!("the input \"{wanted}\" is not connected"))?,
-        _ => host.default_input_device().ok_or("no recording input found")?,
-    };
+            .ok_or_else(|| format!("the input \"{wanted}\" is not connected")),
+        _ => host.default_input_device().ok_or_else(|| "no recording input found".to_string()),
+    }
+}
+
+fn open_device(choice: &InputChoice, heard: Arc<Heard>) -> Result<(cpal::Stream, Opened), String> {
+    let device = find_device(choice)?;
     let supported = device.default_input_config().map_err(|why| why.to_string())?;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
+    let (tap, ends) = tap_for(heard, config.sample_rate.0, (config.channels as usize).clamp(1, MOST_INPUTS));
     let stream = match format {
         cpal::SampleFormat::F32 => stream::<f32>(&device, &config, tap),
         cpal::SampleFormat::I16 => stream::<i16>(&device, &config, tap),
@@ -331,7 +424,7 @@ fn open_device(choice: &InputChoice, tap: Tap) -> Result<(cpal::Stream, u32), St
     }
     .map_err(|why| why.to_string())?;
     stream.play().map_err(|why| why.to_string())?;
-    Ok((stream, config.sample_rate.0))
+    Ok((stream, ends))
 }
 
 fn stream<T>(device: &cpal::Device, config: &cpal::StreamConfig, mut tap: Tap) -> Result<cpal::Stream, cpal::BuildStreamError>
@@ -346,7 +439,7 @@ where
             let stamp = info.timestamp();
             let delay = stamp.callback.duration_since(&stamp.capture).unwrap_or_default();
             let first_at = Instant::now().checked_sub(delay).unwrap_or_else(clock::start);
-            tap.hear(heard.chunks(channels).map(|frame| f32::from_sample_(frame[0])), first_at);
+            tap.hear(heard.chunks(channels).map(|frame| frame.iter().map(|sample| f32::from_sample_(*sample))), first_at);
         },
         |why| eprintln!("loupe: recording input error: {why}"),
         None,
@@ -362,14 +455,25 @@ mod tests {
         std::env::temp_dir().join(format!("loupe-take-{}-{name}", std::process::id())).join("Audio").join("take.wav")
     }
 
+    fn tone_of(frames: &[[f32; 2]], side: usize) -> f32 {
+        let turns = frames.windows(2).filter(|pair| (pair[0][side] < 0.0) != (pair[1][side] < 0.0)).count();
+        turns as f32 / 2.0 / (frames.len() as f32 / PRACTICE_RATE as f32)
+    }
+
+    fn near(heard: f32, tone: f32) -> bool {
+        (heard - tone).abs() < tone * 0.1
+    }
+
     #[test]
     fn the_practice_input_reports_a_level_that_moves() {
         let input = Input::open(InputChoice::Practice).unwrap();
+        assert_eq!(input.inputs(), PRACTICE_INPUTS);
         thread::sleep(Duration::from_millis(120));
-        let first = input.take_peak();
-        assert!(first > 0.0 && first <= PRACTICE_LOUDEST);
+        let first = input.take_peaks();
+        assert_eq!(first.len(), PRACTICE_INPUTS as usize);
+        assert!(first.iter().all(|peak| *peak > 0.0 && *peak <= PRACTICE_LOUDEST));
         thread::sleep(Duration::from_millis(400));
-        assert!(input.take_peak() > first, "the level keeps rising in the first half of the swell");
+        assert!(input.take_peaks()[1] > first[1], "the level keeps rising in the first half of the swell");
     }
 
     #[test]
@@ -386,15 +490,31 @@ mod tests {
     fn nothing_is_queued_until_a_take_begins_and_overflow_is_counted() {
         let heard = Arc::new(Heard::default());
         let (queue, mut kept) = RingBuffer::new(4);
-        let mut tap = Tap { heard: heard.clone(), queue, ear: None, was_taking: false };
-        tap.hear([0.5, 0.5].into_iter(), Instant::now());
+        let mut tap = Tap { heard: heard.clone(), width: 1, queue, ear: None, was_taking: false };
+        tap.hear([0.5, 0.5].into_iter().map(std::iter::once), Instant::now());
         assert!(kept.pop().is_err());
         assert_eq!(heard.began.load(Ordering::Relaxed), 0);
         heard.taking.store(true, Ordering::Relaxed);
-        tap.hear([0.1, 0.2, 0.3, 0.4, 0.5, 0.6].into_iter(), Instant::now());
+        tap.hear([0.1, 0.2, 0.3, 0.4, 0.5, 0.6].into_iter().map(std::iter::once), Instant::now());
         assert_ne!(heard.began.load(Ordering::Relaxed), 0);
         assert_eq!(std::iter::from_fn(|| kept.pop().ok()).collect::<Vec<_>>(), [0.1, 0.2, 0.3, 0.4]);
         assert_eq!(heard.lost.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn every_channel_is_queued_whole_frames_at_a_time_with_its_own_level() {
+        let heard = Arc::new(Heard::default());
+        let (queue, mut kept) = RingBuffer::new(5);
+        let (ear, mut heard_back) = RingBuffer::new(8);
+        let mut tap = Tap { heard: heard.clone(), width: 2, queue, ear: Some(ear), was_taking: false };
+        heard.taking.store(true, Ordering::Relaxed);
+        let frames = [vec![0.1, -0.9], vec![0.2, 0.3], vec![0.4]];
+        tap.hear(frames.iter().map(|frame| frame.iter().copied()), Instant::now());
+        assert_eq!(std::iter::from_fn(|| kept.pop().ok()).collect::<Vec<_>>(), [0.1, -0.9, 0.2, 0.3], "half a frame is never queued");
+        assert_eq!(heard.lost.load(Ordering::Relaxed), 1, "lost counts frames");
+        assert_eq!(std::iter::from_fn(|| heard_back.pop().ok()).collect::<Vec<_>>(), [0.1, -0.9, 0.2, 0.3, 0.4, 0.0]);
+        let peaks: Vec<f32> = heard.peaks[..2].iter().map(|peak| f32::from_bits(peak.load(Ordering::Relaxed))).collect();
+        assert_eq!(peaks, [0.4, 0.9]);
     }
 
     #[test]
@@ -403,34 +523,72 @@ mod tests {
         let input = Input::open(InputChoice::Practice).unwrap();
         assert_eq!(input.take_began(), None);
         let asked = Instant::now();
-        input.begin_take(&file).unwrap();
+        input.begin_takes(&[(file.clone(), InputChannels::Mono(0))]).unwrap();
         thread::sleep(Duration::from_millis(500));
-        let take = input.finish_take().unwrap();
+        let takes = input.finish_takes().unwrap();
         let ran = asked.elapsed().as_secs_f64();
         let began = input.take_began().expect("the first sample has a time");
         assert!(began >= asked - Duration::from_millis(20) && began <= asked + Duration::from_millis(60));
-        assert_eq!((take.rate, take.lost), (PRACTICE_RATE, 0));
+        let take = &takes[0];
+        assert_eq!((takes.len(), take.rate, take.lost), (1, PRACTICE_RATE, 0));
         let seconds = take.frames as f64 / take.rate as f64;
         assert!(seconds > 0.45 && seconds <= ran, "about half a second, got {seconds}");
         let read = Source::load(&take.path, PRACTICE_RATE).unwrap();
         assert_eq!(read.frames.len() as u64, take.frames);
         assert!(read.frames.iter().any(|frame| frame[0].abs() > 0.01), "the take is not silence");
         assert!(read.frames.iter().all(|frame| frame[0] == frame[1]), "one input lands in the middle");
-        assert!(input.finish_take().is_err(), "there is no take left to finish");
+        assert!(near(tone_of(&read.frames, 0), practice_tone(0)), "input 1 is recorded");
+        assert!(input.finish_takes().is_err(), "there is no take left to finish");
         fs::remove_dir_all(file.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn each_take_records_its_own_inputs_at_the_same_time() {
+        let folder = scratch("several");
+        let folder = folder.parent().unwrap();
+        let second = folder.join("Vocal (take 1).wav");
+        let pair = folder.join("Keys (take 1).wav");
+        let first = folder.join("Guitar (take 1).wav");
+        let input = Input::open(InputChoice::Practice).unwrap();
+        let wanted = [(second.clone(), InputChannels::Mono(1)), (pair.clone(), InputChannels::Stereo(2)), (first.clone(), InputChannels::Mono(0))];
+        input.begin_takes(&wanted).unwrap();
+        thread::sleep(Duration::from_millis(400));
+        let takes = input.finish_takes().unwrap();
+        assert_eq!(takes.iter().map(|take| take.path.clone()).collect::<Vec<_>>(), [second.clone(), pair.clone(), first.clone()]);
+        assert!(takes.iter().all(|take| take.frames == takes[0].frames && take.frames > 0), "every take is as long as the others");
+        let vocal = Source::load(&second, PRACTICE_RATE).unwrap();
+        assert!(vocal.frames.iter().all(|frame| frame[0] == frame[1]), "one input lands in the middle");
+        assert!(near(tone_of(&vocal.frames, 0), practice_tone(1)), "input 2 landed on the vocal, heard {}", tone_of(&vocal.frames, 0));
+        let keys = Source::load(&pair, PRACTICE_RATE).unwrap();
+        assert!(keys.frames.iter().any(|frame| frame[0] != frame[1]), "the pair stays stereo");
+        assert!(near(tone_of(&keys.frames, 0), practice_tone(2)), "input 3 is on the left");
+        assert!(near(tone_of(&keys.frames, 1), practice_tone(3)), "input 4 is on the right");
+        let guitar = Source::load(&first, PRACTICE_RATE).unwrap();
+        assert!(near(tone_of(&guitar.frames, 0), practice_tone(0)), "input 1 landed on the guitar");
+        fs::remove_dir_all(folder.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_input_the_device_does_not_have_is_refused() {
+        let file = scratch("missing");
+        let input = Input::open(InputChoice::Practice).unwrap();
+        let why = input.begin_takes(&[(file.clone(), InputChannels::Stereo(4))]).unwrap_err();
+        assert!(why.contains("Inputs 5+6"), "{why}");
+        assert!(!file.exists());
+        assert_eq!(input_count(&InputChoice::Practice), Some(PRACTICE_INPUTS));
     }
 
     #[test]
     fn a_second_take_starts_clean() {
         let file = scratch("second");
         let input = Input::open(InputChoice::Practice).unwrap();
-        input.begin_take(&file).unwrap();
+        input.begin_takes(&[(file.clone(), InputChannels::Mono(0))]).unwrap();
         thread::sleep(Duration::from_millis(300));
-        let first = input.finish_take().unwrap();
+        let first = input.finish_takes().unwrap().remove(0);
         thread::sleep(Duration::from_millis(200));
-        input.begin_take(&file).unwrap();
+        input.begin_takes(&[(file.clone(), InputChannels::Stereo(0))]).unwrap();
         thread::sleep(Duration::from_millis(100));
-        let second = input.finish_take().unwrap();
+        let second = input.finish_takes().unwrap().remove(0);
         assert!(second.frames < first.frames, "nothing from between the takes is kept");
         fs::remove_dir_all(file.parent().unwrap().parent().unwrap()).unwrap();
     }
@@ -439,11 +597,12 @@ mod tests {
     fn closing_the_input_mid_take_still_leaves_a_readable_file() {
         let file = scratch("dropped");
         let input = Input::open(InputChoice::Practice).unwrap();
-        input.begin_take(&file).unwrap();
+        input.begin_takes(&[(file.clone(), InputChannels::Stereo(0))]).unwrap();
         thread::sleep(Duration::from_millis(200));
         drop(input);
         let read = Source::load(&file, PRACTICE_RATE).unwrap();
         assert!(read.frames.len() > 4_000);
+        assert!(read.frames.iter().any(|frame| frame[0] != frame[1]));
         fs::remove_dir_all(file.parent().unwrap().parent().unwrap()).unwrap();
     }
 }

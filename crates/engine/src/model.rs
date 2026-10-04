@@ -130,6 +130,90 @@ pub struct Fx {
     pub record: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputChannels {
+    Mono(u16),
+    Stereo(u16),
+}
+
+impl Default for InputChannels {
+    fn default() -> Self {
+        InputChannels::Mono(0)
+    }
+}
+
+impl InputChannels {
+    pub fn first(self) -> u16 {
+        match self {
+            InputChannels::Mono(first) | InputChannels::Stereo(first) => first,
+        }
+    }
+
+    pub fn width(self) -> u16 {
+        match self {
+            InputChannels::Mono(_) => 1,
+            InputChannels::Stereo(_) => 2,
+        }
+    }
+
+    pub fn fits(self, inputs: u16) -> bool {
+        self.first() as u32 + self.width() as u32 <= inputs as u32
+    }
+
+    pub fn is_valid(self) -> bool {
+        match self {
+            InputChannels::Mono(_) => true,
+            InputChannels::Stereo(first) => first % 2 == 0,
+        }
+    }
+
+    pub fn name(self) -> String {
+        match self {
+            InputChannels::Mono(first) => format!("Input {}", first as u32 + 1),
+            InputChannels::Stereo(first) => format!("Inputs {}+{}", first as u32 + 1, first as u32 + 2),
+        }
+    }
+
+    pub fn text(self) -> String {
+        match self {
+            InputChannels::Mono(first) => (first as u32 + 1).to_string(),
+            InputChannels::Stereo(first) => format!("{}+{}", first as u32 + 1, first as u32 + 2),
+        }
+    }
+
+    pub fn from_text(text: &str) -> Option<Self> {
+        let number = |part: &str| part.parse::<u32>().ok().filter(|n| (1..=u16::MAX as u32).contains(n)).map(|n| (n - 1) as u16);
+        let chosen = match text.split_once('+') {
+            Some((left, right)) => {
+                let first = number(left)?;
+                (number(right)? as u32 == first as u32 + 1).then_some(InputChannels::Stereo(first))?
+            }
+            None => InputChannels::Mono(number(text)?),
+        };
+        chosen.is_valid().then_some(chosen)
+    }
+
+    pub fn every(inputs: u16) -> Vec<Self> {
+        let mono = (0..inputs).map(InputChannels::Mono);
+        let stereo = (0..inputs.saturating_sub(1)).step_by(2).map(InputChannels::Stereo);
+        mono.chain(stereo).collect()
+    }
+
+    pub fn heard(self, frame: &[f32]) -> [f32; 2] {
+        let at = |channel: u32| frame.get(channel as usize).copied().unwrap_or(0.0);
+        let first = self.first() as u32;
+        match self {
+            InputChannels::Mono(_) => [at(first); 2],
+            InputChannels::Stereo(_) => [at(first), at(first + 1)],
+        }
+    }
+
+    pub fn level(self, peaks: &[f32]) -> f32 {
+        let first = self.first() as usize;
+        peaks.iter().skip(first).take(self.width() as usize).fold(0.0, |loudest, peak| loudest.max(*peak))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Track {
     pub id: TrackId,
@@ -148,6 +232,7 @@ pub struct Track {
     pub instrument: Instrument,
     pub sample: Option<Arc<Source>>,
     pub print_takes: bool,
+    pub input: InputChannels,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +263,7 @@ pub enum Command {
     SetTrackSolo { track: TrackId, solo: bool },
     SetRecordsNotes { track: TrackId, on: bool },
     SetPrintTakes { track: TrackId, on: bool },
+    SetTrackInput { track: TrackId, input: InputChannels },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
     PasteClip { track: TrackId, clip: Clip },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
@@ -334,7 +420,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None, print_takes: false });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None, print_takes: false, input: InputChannels::default() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -404,6 +490,14 @@ impl Project {
             Command::SetPrintTakes { track, on } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].print_takes = on;
+                Ok(Outcome::Done)
+            }
+            Command::SetTrackInput { track, input } => {
+                let t = self.track_index(track)?;
+                if !input.is_valid() {
+                    return Err(CommandError::InvalidValue);
+                }
+                self.tracks[t].input = input;
                 Ok(Outcome::Done)
             }
             Command::SetTrackSolo { track, solo } => {
@@ -987,6 +1081,37 @@ mod tests {
             panic!("no clip")
         };
         (p, track, clip)
+    }
+
+    #[test]
+    fn inputs_are_offered_one_by_one_then_in_pairs_and_read_back_from_their_text() {
+        assert_eq!(
+            InputChannels::every(5),
+            [
+                InputChannels::Mono(0),
+                InputChannels::Mono(1),
+                InputChannels::Mono(2),
+                InputChannels::Mono(3),
+                InputChannels::Mono(4),
+                InputChannels::Stereo(0),
+                InputChannels::Stereo(2),
+            ]
+        );
+        assert_eq!(InputChannels::every(1), [InputChannels::Mono(0)]);
+        for choice in InputChannels::every(8) {
+            assert_eq!(InputChannels::from_text(&choice.text()), Some(choice));
+        }
+        assert_eq!(InputChannels::Stereo(2).name(), "Inputs 3+4");
+        assert_eq!(InputChannels::Mono(1).name(), "Input 2");
+        for bad in ["0", "", "x", "2+3", "1+3", "3+2", "70000"] {
+            assert_eq!(InputChannels::from_text(bad), None, "{bad}");
+        }
+        assert!(InputChannels::Stereo(2).fits(4) && !InputChannels::Stereo(2).fits(3));
+        assert_eq!(InputChannels::Stereo(2).level(&[0.9, 0.1, 0.3, 0.5]), 0.5);
+        assert_eq!(InputChannels::Mono(5).level(&[0.9]), 0.0);
+        assert_eq!(InputChannels::Stereo(0).heard(&[0.1, 0.2, 0.3]), [0.1, 0.2]);
+        assert_eq!(InputChannels::Mono(2).heard(&[0.1, 0.2, 0.3]), [0.3, 0.3]);
+        assert_eq!(InputChannels::Mono(4).heard(&[0.1]), [0.0, 0.0]);
     }
 
     #[test]

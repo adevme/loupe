@@ -56,7 +56,7 @@ use iced::widget::{
 };
 use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
 use loupe_engine::{
-    Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChoice, Instrument, Note, Outcome,
+    Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChannels, InputChoice, Instrument, Note, Outcome,
     Output, Device, Project, Source, TrackId,
 };
 
@@ -242,6 +242,8 @@ pub enum Message {
     UseInstrument(TrackId, Instrument),
     ToggleRecordsNotes(TrackId),
     TogglePrintTakes(TrackId),
+    StartInputs(TrackId),
+    UseInput(TrackId, InputChannels),
     UseTake(ClipId, usize),
     Comp { track: TrackId, take: usize, from: Frames, to: Frames },
     ShowChain(TrackId, bool),
@@ -400,6 +402,7 @@ pub enum Overlay {
     TrackMenu { track: TrackId, at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
+    Inputs { track: TrackId, at: Point, inputs: u16 },
     ConfirmDiscard(Pending),
     TemplateName,
     SaveName,
@@ -442,7 +445,7 @@ struct App {
     armed: HashSet<TrackId>,
     recording: Option<recording::Recording>,
     input: Option<Input>,
-    input_level: f32,
+    input_levels: Vec<f32>,
     track_levels: [f32; loupe_engine::METERS],
     master_level: f32,
     input_name: Option<String>,
@@ -580,7 +583,7 @@ impl App {
             armed: HashSet::new(),
             recording: None,
             input: None,
-            input_level: 0.0,
+            input_levels: Vec::new(),
             track_levels: [0.0; loupe_engine::METERS],
             master_level: 0.0,
             input_name: settings.input.clone(),
@@ -865,7 +868,11 @@ impl App {
                     self.copied = None;
                 }
                 if let Some(input) = &self.input {
-                    self.input_level = input.take_peak().max(self.input_level * METER_FALL_PER_TICK);
+                    let peaks = input.take_peaks();
+                    self.input_levels.resize(peaks.len(), 0.0);
+                    for (shown, now) in self.input_levels.iter_mut().zip(peaks) {
+                        *shown = now.max(*shown * METER_FALL_PER_TICK);
+                    }
                 }
                 let (tracks, master) = self.engine.levels();
                 for (shown, now) in self.track_levels.iter_mut().zip(tracks) {
@@ -1099,6 +1106,16 @@ impl App {
                 if let Some(on) = self.project.track(track).map(|t| !t.print_takes) {
                     self.edit(None, Command::SetPrintTakes { track, on });
                 }
+            }
+            Message::StartInputs(track) => {
+                if let Overlay::TrackMenu { at, .. } = &self.overlay {
+                    let inputs = self.input.as_ref().map(Input::inputs).or_else(|| loupe_engine::input_count(&self.input_choice())).unwrap_or(0);
+                    self.overlay = Overlay::Inputs { track, at: *at, inputs };
+                }
+            }
+            Message::UseInput(track, input) => {
+                self.overlay = Overlay::None;
+                self.edit(None, Command::SetTrackInput { track, input });
             }
             Message::ShowChain(track, record) => {
                 if record {
@@ -2319,13 +2336,21 @@ impl App {
         self.changed();
     }
 
+    fn input_choice(&self) -> InputChoice {
+        match (self.practice_input, &self.input_name) {
+            (true, _) => InputChoice::Practice,
+            (false, Some(name)) => InputChoice::Named(name.clone()),
+            (false, None) => InputChoice::SystemDefault,
+        }
+    }
+
     pub(crate) fn listen_if_armed(&mut self) {
         let heard: Vec<TrackId> = self.project.tracks.iter().filter(|track| self.armed.contains(&track.id) && !track.records_notes).map(|track| track.id).collect();
         if heard.is_empty() {
             self.engine.hear_on(&[]);
             self.engine.stop_hearing();
             self.input = None;
-            self.input_level = 0.0;
+            self.input_levels.clear();
             return;
         }
         // You only hear yourself while the tape is rolling. Armed and stopped, or
@@ -2335,12 +2360,7 @@ impl App {
         if self.input.is_some() {
             return;
         }
-        let choice = match (self.practice_input, &self.input_name) {
-            (true, _) => InputChoice::Practice,
-            (false, Some(name)) => InputChoice::Named(name.clone()),
-            (false, None) => InputChoice::SystemDefault,
-        };
-        match Input::open(choice) {
+        match Input::open(self.input_choice()) {
             Ok(mut input) => {
                 self.engine.hear(&mut input);
                 self.input = Some(input);
@@ -2507,7 +2527,7 @@ impl App {
             snap: self.snap,
             armed: &self.armed,
             recording_from: self.recording.as_ref().map(|recording| recording.from),
-            input_level: self.input_level,
+            input_levels: &self.input_levels,
             opening: self.opening.is_some(),
             width: self.canvas_width(),
             cache: &self.cache,

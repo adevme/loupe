@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::instrument::{Instrument, Note, Sampler, Synth, Wave};
-use crate::model::{Clip, ClipId, Command, Edge, Fade, Frames, Outcome, Project, TrackId};
+use crate::model::{Clip, ClipId, Command, Edge, Fade, Frames, InputChannels, Outcome, Project, TrackId};
 use crate::source::Source;
 
 const HEADER: &str = "loupe project 1";
@@ -50,6 +50,7 @@ pub struct SavedTrack {
     pub instrument: Instrument,
     pub sample: Option<usize>,
     pub print_takes: bool,
+    pub input: InputChannels,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -146,6 +147,7 @@ impl SavedProject {
                     instrument: track.instrument,
                     sample: track.sample.as_ref().and_then(|sample| project.sources.iter().position(|kept| Arc::ptr_eq(kept, sample))),
                     print_takes: track.print_takes,
+                    input: track.input,
                     sends: track
                         .sends
                         .iter()
@@ -217,8 +219,8 @@ impl SavedProject {
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             let sample = track.sample.map_or("-".to_string(), |s| s.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} sample={sample} print={} name={}\n",
-                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, instrument_text(&track.instrument), track.print_takes as u8, track.name
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} sample={sample} print={} input={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, instrument_text(&track.instrument), track.print_takes as u8, track.input.text(), track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -320,6 +322,7 @@ impl SavedProject {
                         instrument: fields.get("instrument").and_then(|text| instrument_from(text)).unwrap_or_default(),
                         sample: fields.get("sample").and_then(|text| text.parse::<usize>().ok()),
                         print_takes: fields.get("print") == Some(&"1"),
+                        input: fields.get("input").and_then(|text| InputChannels::from_text(text)).unwrap_or_default(),
                     });
                 }
                 "send" => {
@@ -471,6 +474,7 @@ impl SavedProject {
             let _ = project.apply(Command::SetTrackSolo { track, solo: saved.solo });
             let _ = project.apply(Command::SetRecordsNotes { track, on: saved.records_notes });
             let _ = project.apply(Command::SetPrintTakes { track, on: saved.print_takes });
+            let _ = project.apply(Command::SetTrackInput { track, input: saved.input });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
             let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
             if let Some(sample) = saved.sample.and_then(|index| sources.get(index)) {
@@ -809,6 +813,30 @@ mod routing_round_trip {
         for (was, now) in p.tracks[0].clips.iter().zip(&back.tracks[0].clips) {
             assert_eq!((now.offset, now.take, &now.takes), (was.offset, was.take, &was.takes));
         }
+    }
+
+    #[test]
+    fn each_track_keeps_the_input_it_records_from() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(guitar)) = p.apply(Command::AddTrack { name: "Guitar".into() }) else { panic!() };
+        let Ok(Outcome::Track(vocal)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let Ok(Outcome::Track(keys)) = p.apply(Command::AddTrack { name: "Keys".into() }) else { panic!() };
+        p.apply(Command::SetTrackInput { track: vocal, input: InputChannels::Mono(1) }).unwrap();
+        p.apply(Command::SetTrackInput { track: keys, input: InputChannels::Stereo(2) }).unwrap();
+        assert_eq!(p.apply(Command::SetTrackInput { track: keys, input: InputChannels::Stereo(1) }), Err(crate::model::CommandError::InvalidValue));
+        assert_eq!(p.track(guitar).unwrap().input, InputChannels::Mono(0));
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        assert!(text.contains(" input=2 ") && text.contains(" input=3+4 "));
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        let inputs: Vec<InputChannels> = back.tracks.iter().map(|track| track.input).collect();
+        assert_eq!(inputs, [InputChannels::Mono(0), InputChannels::Mono(1), InputChannels::Stereo(2)]);
+        let older = text.replace(" input=1 ", " ").replace(" input=2 ", " ").replace(" input=3+4 ", " ");
+        assert!(!older.contains("input="));
+        let (old, _) = SavedProject::parse(&older).unwrap().build(&[], 48_000);
+        assert!(old.tracks.iter().all(|track| track.input == InputChannels::Mono(0)), "songs from before record from input 1");
+        let odd = text.replace(" input=3+4 ", " input=2+3 ");
+        let (odd, _) = SavedProject::parse(&odd).unwrap().build(&[], 48_000);
+        assert_eq!(odd.tracks[2].input, InputChannels::Mono(0), "a pair that is not a pair falls back to input 1");
     }
 
     #[test]

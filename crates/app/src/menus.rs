@@ -1,12 +1,14 @@
 use iced::widget::{
-    button, center, column, container, horizontal_space, mouse_area, opaque, row, text, text_input, Space,
+    button, center, column, container, horizontal_space, mouse_area, opaque, row, scrollable, text, text_input, Space,
 };
 use iced::{Alignment, Color, Element, Length, Point};
-use loupe_engine::TrackId;
+use loupe_engine::{InputChannels, TrackId};
 
 use crate::{rule, App, Message, Overlay, Screen};
 
 const MENU_WIDTH: f32 = 220.0;
+const INPUT_MENU_WIDTH: f32 = 260.0;
+const INPUT_MENU_TALLEST: f32 = 250.0;
 const TALLEST_MENU: f32 = 290.0;
 const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_LEFT: f32 = 14.0;
@@ -35,6 +37,7 @@ impl App {
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
+            Overlay::Inputs { track, at, inputs } => self.floating(*at, self.input_menu(*track, *inputs)),
             Overlay::Routing(track) => self.centred(self.routing_sheet(*track)),
             Overlay::Sampler(track) => self.centred(self.sampler_sheet(*track)),
             Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
@@ -109,7 +112,7 @@ impl App {
         container(column(items).spacing(2)).padding(6).width(width).style(move |_| palette.menu()).into()
     }
 
-    pub(crate) fn item<'a>(&self, label: &'a str, keys: &'a str, message: Option<Message>) -> Element<'a, Message> {
+    pub(crate) fn item<'a>(&self, label: impl text::IntoFragment<'a>, keys: impl text::IntoFragment<'a>, message: Option<Message>) -> Element<'a, Message> {
         let palette = self.palette;
         button(
             row![
@@ -184,6 +187,9 @@ impl App {
         items.push(self.item(if keys { "Record notes from keys ✓" } else { "Record notes from keys" }, "", Some(Message::ToggleRecordsNotes(track))));
         let printing = self.project.track(track).is_some_and(|t| t.print_takes);
         items.push(self.item(if printing { "Keep Rec plugins in takes ✓" } else { "Keep Rec plugins in takes" }, "", Some(Message::TogglePrintTakes(track))));
+        if let Some(input) = self.project.track(track).filter(|t| !t.records_notes).map(|t| t.input.name()) {
+            items.push(self.item("Record from", input, Some(Message::StartInputs(track))));
+        }
         let playing = self.project.track(track).map(|t| t.instrument);
         let synth = matches!(playing, Some(loupe_engine::Instrument::Synth(_)));
         let drums = matches!(playing, Some(loupe_engine::Instrument::Drums));
@@ -193,6 +199,25 @@ impl App {
         items.push(self.item(if drums { "Loupe Drums ✓" } else { "Loupe Drums" }, "", Some(Message::UseInstrument(track, loupe_engine::Instrument::Drums))));
         items.push(self.item(if sampler { "Loupe Sampler ✓" } else { "Loupe Sampler" }, if sampler { "Settings" } else { "" }, Some(Message::OpenSampler(track))));
         self.menu(items)
+    }
+
+    fn input_menu(&self, track: TrackId, inputs: u16) -> Element<'_, Message> {
+        let palette = self.palette;
+        let current = self.project.track(track).map(|t| t.input).unwrap_or_default();
+        let choice = |channels: InputChannels| {
+            let name = channels.name();
+            self.item(if channels == current { format!("{name} ✓") } else { name }, "", Some(Message::UseInput(track, channels)))
+        };
+        let (mono, pairs): (Vec<InputChannels>, Vec<InputChannels>) = InputChannels::every(inputs).into_iter().partition(|channels| channels.width() == 1);
+        let mut items = vec![container(text("Record from").size(12).color(palette.text_dim)).padding([4, 4]).into()];
+        if inputs == 0 {
+            items.push(container(text("No recording input found. Check Settings > Recording.").size(12.5)).padding([4, 4]).into());
+            return self.menu(items);
+        }
+        let mono = column(mono.into_iter().map(choice)).spacing(2).width(Length::Fill);
+        let pairs = column(pairs.into_iter().map(choice)).spacing(2).width(Length::Fill);
+        items.push(container(scrollable(row![mono, pairs].spacing(4))).max_height(INPUT_MENU_TALLEST).into());
+        self.menu_sized(items, INPUT_MENU_WIDTH)
     }
 
     fn entry_field<'a>(&'a self, placeholder: &'a str) -> Element<'a, Message> {
