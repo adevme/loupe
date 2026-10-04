@@ -43,6 +43,32 @@ pub fn write_frames(path: &Path, frames: &[[f32; 2]], rate: u32) -> io::Result<(
     out.flush()
 }
 
+pub const PCM_HEADER_BYTES: u32 = 44;
+const PCM: u16 = 1;
+
+pub fn most_pcm_frames(channels: u16, bits: u16) -> u64 {
+    ((u32::MAX - PCM_HEADER_BYTES) / (channels as u32 * (bits / 8) as u32)) as u64
+}
+
+pub fn pcm_header(channels: u16, rate: u32, bits: u16, frames: u32) -> Vec<u8> {
+    let block_align = channels * (bits / 8);
+    let data_bytes = frames * block_align as u32;
+    let mut header = Vec::with_capacity(PCM_HEADER_BYTES as usize);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&(PCM_HEADER_BYTES - 8 + data_bytes).to_le_bytes());
+    header.extend_from_slice(b"WAVEfmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&PCM.to_le_bytes());
+    header.extend_from_slice(&channels.to_le_bytes());
+    header.extend_from_slice(&rate.to_le_bytes());
+    header.extend_from_slice(&(rate * block_align as u32).to_le_bytes());
+    header.extend_from_slice(&block_align.to_le_bytes());
+    header.extend_from_slice(&bits.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_bytes.to_le_bytes());
+    header
+}
+
 fn word(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([bytes[at], bytes[at + 1]])
 }

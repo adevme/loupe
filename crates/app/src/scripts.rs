@@ -203,7 +203,7 @@ impl App {
         };
         let exporting = match wishes.export {
             Some(stems) => {
-                self.export_split = stems;
+                self.export.split = stems;
                 self.start_export()
             }
             None => Task::none(),

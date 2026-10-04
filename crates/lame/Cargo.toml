@@ -1,0 +1,8 @@
+[package]
+name = "loupe-lame"
+version.workspace = true
+edition = "2021"
+license = "LGPL-2.0-or-later"
+
+[build-dependencies]
+cc = "1"
