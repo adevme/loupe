@@ -1682,7 +1682,12 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let shortcuts = if self.typing_keys { keyboard::on_key_press(shortcut_while_typing) } else { keyboard::on_key_press(shortcut) };
+        // The arrows move notes in the piano roll, so they only become shortcuts while it is open.
+        let in_the_roll = matches!(self.overlay, Overlay::Roll(_));
+        let typing_keys = self.typing_keys;
+        let shortcuts = keyboard::on_key_press(if typing_keys { shortcut_while_typing } else { shortcut });
+        // The arrows move the chosen notes, so they are only shortcuts while the roll is open.
+        let roll_keys = if in_the_roll { keyboard::on_key_press(transpose_key) } else { Subscription::none() };
         let window = iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::Dropped(path)),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resized(size)),
@@ -1733,7 +1738,7 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, ticks, mixer_drag, typing, autosave, picking])
+        Subscription::batch([shortcuts, window, ticks, mixer_drag, typing, autosave, picking, roll_keys])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -2306,7 +2311,13 @@ impl App {
             .padding(0)
             .style(move |_, status| palette.toggled(typing_on, status))
             .on_press(Message::ToggleTypingKeys);
-        let record = row![record, metronome, typing_keys].spacing(8).align_y(Alignment::Center);
+        let record = row![
+            hinted(record, "Record onto every armed track. Ctrl+R does the same."),
+            hinted(metronome, "The click you record to. Ctrl+M turns it on and off."),
+            hinted(typing_keys, "Play notes with your letter keys, A to L like a keyboard. Ctrl+T turns it on and off."),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
 
         let tempo = text_input("", &self.bpm)
             .on_input(Message::BpmTyped)
@@ -2397,10 +2408,7 @@ impl App {
                 _ => pieces.iter().position(|(kind, _)| *kind == item).map(|at| pieces.swap_remove(at).1),
             };
             let piece = piece.map(|piece| match hint_for(item) {
-                Some(words) => iced::widget::mouse_area(piece)
-                    .on_enter(Message::Hint(Some(words)))
-                    .on_exit(Message::Hint(None))
-                    .into(),
+                Some(words) => hinted(piece, words),
                 None => piece,
             });
             bar = bar.push_maybe(piece);
@@ -2560,20 +2568,17 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::F6) => Some(Message::ToggleMixer),
         keyboard::Key::Named(Named::F7) => Some(Message::OpenMatrix),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
-        keyboard::Key::Named(Named::ArrowUp) => Some(Message::RollAction(piano_roll::RollAction::Transpose(if modifiers.shift() { 12 } else { 1 }))),
-        keyboard::Key::Named(Named::ArrowDown) => Some(Message::RollAction(piano_roll::RollAction::Transpose(if modifiers.shift() { -12 } else { -1 }))),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
                 ("n", false, _) => Some(Message::ToggleSnap),
-                ("r", false, _) => Some(Message::ToggleRecord),
+                ("r", _, _) => Some(Message::ToggleRecord),
                 ("p", false, _) => Some(Message::SetTool(Tool::Pencil)),
                 ("c", false, _) => Some(Message::SetTool(Tool::Razor)),
                 ("t", false, _) => Some(Message::SetTool(Tool::Mute)),
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
                 ("m", true, _) => Some(Message::ToggleMetronome),
                 ("t", true, _) => Some(Message::ToggleTypingKeys),
-                ("r", true, _) => Some(Message::ToggleRecord),
                 ("q", true, _) => Some(Message::RollAction(piano_roll::RollAction::Quantize)),
                 ("c", true, _) => Some(Message::CopyClips),
                 ("x", true, _) => Some(Message::CutClips),
@@ -2675,7 +2680,7 @@ fn hint_for(item: BarItem) -> Option<&'static str> {
     Some(match item {
         BarItem::ToStart => "Jump back to the start of the song",
         BarItem::Play => "Play or pause the song. Space does the same.",
-        BarItem::Record => "Record onto every armed track. Ctrl+R does the same.",
+        BarItem::Record => return None,
         BarItem::Position => "Where the playhead is, as bar and beat",
         BarItem::Clock => "Where the playhead is, as minutes and seconds",
         BarItem::Tempo => "The tempo of the song in beats per minute",
@@ -2686,4 +2691,19 @@ fn hint_for(item: BarItem) -> Option<&'static str> {
         BarItem::Import => "Bring audio files into the song",
         BarItem::Gap | BarItem::Space | BarItem::End => return None,
     })
+}
+
+/// Up and down move the chosen notes by a semitone, or by an octave with shift.
+fn transpose_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    let steps = match key {
+        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => 1,
+        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => -1,
+        _ => return None,
+    };
+    Some(Message::RollAction(piano_roll::RollAction::Transpose(steps * if modifiers.shift() { 12 } else { 1 })))
+}
+
+/// Wraps one thing in the top bar so the hint panel can say what it is.
+fn hinted<'a>(piece: impl Into<Element<'a, Message>>, words: &'static str) -> Element<'a, Message> {
+    iced::widget::mouse_area(piece.into()).on_enter(Message::Hint(Some(words))).on_exit(Message::Hint(None)).into()
 }
