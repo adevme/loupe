@@ -11,6 +11,7 @@ const TALLEST_MENU: f32 = 290.0;
 const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_LEFT: f32 = 14.0;
 const HELP_MENU_LEFT: f32 = 72.0;
+const SCRIPTS_MENU_LEFT: f32 = 128.0;
 const MENU_OVERLAPS_BAR: f32 = 8.0;
 pub const ENTRY_ID: &str = "overlay-entry";
 
@@ -28,6 +29,7 @@ impl App {
             Overlay::HelpMenu => self.floating(self.under_the_bar(HELP_MENU_LEFT), self.menu(vec![
                 self.item("About Loupe", "", Some(Message::OpenAbout)),
             ])),
+            Overlay::ScriptsMenu => self.floating(self.under_the_bar(SCRIPTS_MENU_LEFT), self.scripts_menu()),
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::Versions => self.centred(self.versions_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
@@ -88,12 +90,16 @@ impl App {
             .into()
     }
 
-    fn menu<'a>(&self, items: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-        let palette = self.palette;
-        container(column(items).spacing(2)).padding(6).width(MENU_WIDTH).style(move |_| palette.menu()).into()
+    pub(crate) fn menu<'a>(&self, items: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+        self.menu_sized(items, MENU_WIDTH)
     }
 
-    fn item<'a>(&self, label: &'a str, keys: &'a str, message: Option<Message>) -> Element<'a, Message> {
+    pub(crate) fn menu_sized<'a>(&self, items: Vec<Element<'a, Message>>, width: f32) -> Element<'a, Message> {
+        let palette = self.palette;
+        container(column(items).spacing(2)).padding(6).width(width).style(move |_| palette.menu()).into()
+    }
+
+    pub(crate) fn item<'a>(&self, label: &'a str, keys: &'a str, message: Option<Message>) -> Element<'a, Message> {
         let palette = self.palette;
         button(
             row![

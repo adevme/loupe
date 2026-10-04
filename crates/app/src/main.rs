@@ -23,6 +23,8 @@ mod stretching;
 mod stockwin;
 mod recording;
 mod selection;
+mod scripting;
+mod scripts;
 mod settings;
 mod spinner;
 mod theme;
@@ -155,6 +157,10 @@ pub enum Message {
     TrackMenu { track: TrackId, at: Point },
     OpenFileMenu,
     OpenHelpMenu,
+    OpenScriptsMenu,
+    RunScript(PathBuf),
+    OpenScriptsFolder,
+    ScriptKey(String, keyboard::Modifiers),
     OpenAbout,
     StartRename(TrackId),
     StartColour(TrackId),
@@ -350,6 +356,7 @@ pub enum Overlay {
     Settings,
     FileMenu,
     HelpMenu,
+    ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
     Rename { track: TrackId, at: Point },
@@ -487,6 +494,7 @@ struct App {
     metronome: bool,
     count_in_bars: u32,
     copied_clips: Option<clipboard::Copied>,
+    scripts: Vec<scripts::Script>,
     snap: bool,
     stretches: stretching::Stretches,
     modifiers: keyboard::Modifiers,
@@ -597,6 +605,7 @@ impl App {
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
             copied_clips: None,
+            scripts: Vec::new(),
             snap: settings.snap,
             stretches: stretching::Stretches::default(),
             modifiers: keyboard::Modifiers::default(),
@@ -635,6 +644,7 @@ impl App {
         if !app.lost.is_empty() {
             app.overlay = Overlay::Recover;
         }
+        app.find_scripts();
         app.keep_safe();
         app.listen_to_keyboards();
         if first_usage {
@@ -1044,6 +1054,17 @@ impl App {
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
+            Message::OpenScriptsMenu => {
+                self.find_scripts();
+                self.overlay = Overlay::ScriptsMenu;
+            }
+            Message::RunScript(path) => return self.run_script(&path),
+            Message::OpenScriptsFolder => self.open_scripts_folder(),
+            Message::ScriptKey(key, modifiers) => {
+                if self.overlay == Overlay::None && self.screen == Screen::Song {
+                    return self.script_key(&key, modifiers);
+                }
+            }
             Message::OpenAbout => self.overlay = Overlay::About,
             Message::StartRename(track) => {
                 if let (Overlay::TrackMenu { at, .. }, Some(found)) = (&self.overlay, self.project.track(track)) {
@@ -2339,6 +2360,11 @@ impl App {
         .style(move |_, status| palette.toggled(file_menu_open, status))
         .on_press(Message::OpenFileMenu);
 
+        let scripts_menu_open = self.overlay == Overlay::ScriptsMenu;
+        let scripts = button(text("Scripts").size(13).font(palette.medium))
+            .padding([6, 10])
+            .style(move |_, status| palette.toggled(scripts_menu_open, status))
+            .on_press(Message::OpenScriptsMenu);
         let help_menu_open = self.overlay == Overlay::HelpMenu;
         let help = button(text("Help").size(13).font(palette.medium))
             .padding([6, 10])
@@ -2400,7 +2426,7 @@ impl App {
             (BarItem::Settings, icon_button(palette, "settings", Some(Message::OpenSettings))),
             (BarItem::Import, import.into()),
         ];
-        let mut bar = row![file, help, Space::with_width(6)].spacing(8).align_y(Alignment::Center);
+        let mut bar = row![file, help, scripts, Space::with_width(6)].spacing(8).align_y(Alignment::Center);
         for item in palette.top_bar_items() {
             let piece = match item {
                 BarItem::Gap => Some(horizontal_space().into()),
@@ -2594,6 +2620,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("z", true, false) => Some(Message::Undo),
                 ("z", true, true) | ("y", true, _) => Some(Message::Redo),
                 ("i", true, _) => Some(Message::Import),
+                _ if modifiers.command() || modifiers.alt() => Some(Message::ScriptKey(c.to_lowercase(), modifiers)),
                 _ => None,
             }
         }

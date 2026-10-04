@@ -12,6 +12,7 @@ loupe-stock-ui = { path = "../stock-ui" }
 iced = { version = "0.13", features = ["tokio", "canvas", "advanced", "image"] }
 rfd = "0.14"
 ureq = "2"
+mlua = { version = "0.12", features = ["lua54", "vendored"] }
 sha2 = "0.10"
 iced_runtime = "0.13"
 
