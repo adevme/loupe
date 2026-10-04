@@ -14,6 +14,7 @@ mod reverb_view;
 mod saturation_view;
 mod spectrum;
 mod transient_view;
+mod tune_view;
 
 pub use chorus_view::ChorusEditor;
 pub use compressor_view::CompressorEditor;
@@ -29,3 +30,4 @@ pub use multiband_view::MultibandEditor;
 pub use reverb_view::ReverbEditor;
 pub use saturation_view::SaturationEditor;
 pub use transient_view::TransientEditor;
+pub use tune_view::TuneEditor;

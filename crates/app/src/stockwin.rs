@@ -3,7 +3,7 @@ use iced::Element;
 use loupe_engine::TrackId;
 use loupe_stock_ui::{
     Change, ChorusEditor, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, GateEditor, LimiterEditor,
-    Look, MeterEditor, MultibandEditor, ReverbEditor, SaturationEditor, TransientEditor,
+    Look, MeterEditor, MultibandEditor, ReverbEditor, SaturationEditor, TransientEditor, TuneEditor,
 };
 
 use crate::racks::Peek;
@@ -22,6 +22,7 @@ pub enum Face {
     Gate(Box<GateEditor>),
     Meter(Box<MeterEditor>),
     Multiband(Box<MultibandEditor>),
+    Tune(Box<TuneEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +55,7 @@ impl Window {
             9 => Face::Gate(Box::new(GateEditor::new(peek.history.clone(), look))),
             10 => Face::Meter(Box::new(MeterEditor::new(peek.meter.clone(), look))),
             11 => Face::Multiband(Box::new(MultibandEditor::new(peek.history.clone(), look))),
+            12 => Face::Tune(Box::new(TuneEditor::new(peek.history.clone(), look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -70,6 +72,7 @@ impl Window {
                 Face::Gate(editor) => editor.load(values),
                 Face::Meter(editor) => editor.load(values),
                 Face::Multiband(editor) => editor.load(values),
+                Face::Tune(editor) => editor.load(values),
             }
         }
         Some(Self { spot, slot, name: name.to_string(), face })
@@ -85,6 +88,7 @@ impl Window {
             Face::Gate(editor) => editor.tick(),
             Face::Meter(editor) => editor.tick(),
             Face::Multiband(editor) => editor.tick(),
+            Face::Tune(editor) => editor.tick(),
             _ => {}
         }
     }
@@ -103,6 +107,7 @@ impl Window {
             Face::Gate(editor) => editor.update(change),
             Face::Meter(editor) => editor.update(change),
             Face::Multiband(editor) => editor.update(change),
+            Face::Tune(editor) => editor.update(change),
         }
     }
 
@@ -127,6 +132,7 @@ impl Window {
             Face::Gate(editor) => editor.view().map(Message::StockTurned),
             Face::Meter(editor) => editor.view().map(Message::StockTurned),
             Face::Multiband(editor) => editor.view().map(Message::StockTurned),
+            Face::Tune(editor) => editor.view().map(Message::StockTurned),
         }
     }
 }

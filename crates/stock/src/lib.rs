@@ -14,6 +14,7 @@ mod saturation;
 mod scope;
 mod smooth;
 mod transient;
+mod tune;
 
 pub use biquad::{Coefficients, Shape};
 pub use chorus::{spread as chorus_spread, sweep as chorus_sweep, Chorus, MODES as CHORUS_MODES};
@@ -30,6 +31,7 @@ pub use reverb::{decay_seconds, Reverb};
 pub use saturation::{curve_of as saturation_curve, Saturation, STYLES as SATURATION_STYLES};
 pub use scope::Scope;
 pub use transient::Transient;
+pub use tune::{note_name as tune_note_name, Tune, KEYS as TUNE_KEYS, SCALES as TUNE_SCALES, SILENT_NOTE, STEPS as TUNE_STEPS};
 
 pub type Frame = [f32; 2];
 
@@ -42,6 +44,7 @@ pub enum Unit {
     Percent,
     Ratio,
     Width,
+    Semitones,
     Switch,
     Choice,
 }
@@ -151,7 +154,7 @@ pub trait Effect: Send {
     }
 }
 
-pub const NAMES: [&str; 12] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband"];
+pub const NAMES: [&str; 13] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband", "Loupe Tune"];
 
 pub fn make(name: &str) -> Option<Box<dyn Effect>> {
     Some(match name {
@@ -167,6 +170,7 @@ pub fn make(name: &str) -> Option<Box<dyn Effect>> {
         "Loupe Gate" => Box::new(Gate::new()),
         "Loupe Meter" => Box::new(Meter::new()),
         "Loupe Multiband" => Box::new(Multiband::new()),
+        "Loupe Tune" => Box::new(Tune::new()),
         _ => return None,
     })
 }
