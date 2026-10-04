@@ -4,7 +4,7 @@ mod window;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Reply};
+use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Region, Reply};
 use loupe_plugins::{clap, lv2, vst3};
 
 #[cfg(windows)]
@@ -54,6 +54,37 @@ impl Open {
             Open::Lv2(effect) => effect.process_with(audio, side),
             #[cfg(target_os = "macos")]
             Open::Au(effect) => effect.process(audio),
+        }
+    }
+
+    fn process_at(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]], at: Option<i64>) {
+        match (self, at) {
+            (Open::Vst3(effect), Some(at)) => effect.process_at(audio, side, at),
+            (open, _) => open.process_with(audio, side),
+        }
+    }
+
+    fn is_ara(&self) -> bool {
+        matches!(self, Open::Vst3(effect) if effect.is_ara())
+    }
+
+    fn idle(&self) {
+        if let Open::Vst3(effect) = self {
+            effect.idle();
+        }
+    }
+
+    fn place(&mut self, region: &Region) -> Result<(), String> {
+        match self {
+            Open::Vst3(effect) => effect.place(region),
+            _ => Err("only VST3 plugins can follow a clip with ARA".into()),
+        }
+    }
+
+    fn settings(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Open::Vst3(effect) => effect.settings(),
+            other => other.save(),
         }
     }
 
@@ -126,12 +157,12 @@ fn names_in(path: &Path) -> Result<Vec<String>, String> {
     }
 }
 
-fn open_one(path: &Path, index: usize, rate: f64, block: usize) -> Result<Open, String> {
+fn open_one(path: &Path, index: usize, rate: f64, block: usize, region: Option<&Region>) -> Result<Open, String> {
     match kind_of(path) {
         "clap" => clap::Library::open(path).and_then(|library| clap::Effect::start(library, index, rate, block)).map(Open::Clap),
         "lv2" => lv2::Library::open(path).and_then(|library| lv2::Effect::start(library, index, rate, block)).map(Open::Lv2),
         "au" => au_open(path, index, rate, block),
-        _ => vst3::Library::open(path).and_then(|library| vst3::Effect::start(library, index, rate, block)).map(Open::Vst3),
+        _ => vst3::Library::open(path).and_then(|library| vst3::Effect::start_on(library, index, rate, block, region)).map(Open::Vst3),
     }
 }
 
@@ -157,6 +188,7 @@ fn main() {
             let blocks = match ask {
                 Ask::Process => 1,
                 Ask::ProcessWithSide => 2,
+                Ask::ProcessAt(_) => 1,
                 _ => 0,
             };
             if sends.send(Came::Ask(ask)).is_err() {
@@ -180,6 +212,8 @@ fn main() {
     let mut editor: Option<(loupe_plugins::editor::Editor, window::Window)> = None;
     let mut loaded_name = String::new();
     let mut was_sized = (0, 0);
+    let mut region: Option<Region> = None;
+    let mut idled = std::time::Instant::now();
     'living: loop {
         if let Some((made, pane)) = editor.as_ref() {
             for asked in pane.pump() {
@@ -193,7 +227,14 @@ fn main() {
                 made.resized(now.0, now.1);
             }
         }
-        let next = if editor.is_some() {
+        if idled.elapsed() >= std::time::Duration::from_millis(30) {
+            idled = std::time::Instant::now();
+            if let Some(effect) = open.as_ref() {
+                effect.idle();
+            }
+        }
+        let ticking = editor.is_some() || open.as_ref().is_some_and(Open::is_ara);
+        let next = if ticking {
             match came.recv_timeout(std::time::Duration::from_millis(8)) {
                 Ok(next) => next,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -215,8 +256,12 @@ fn main() {
             Came::Done => break,
         };
         let reply = match ask {
-            Ask::Process | Ask::ProcessWithSide => {
+            Ask::Process | Ask::ProcessWithSide | Ask::ProcessAt(_) => {
                 let wants_side = ask == Ask::ProcessWithSide;
+                let at = match ask {
+                    Ask::ProcessAt(at) => Some(at),
+                    _ => None,
+                };
                 let mut audio = match came.recv() {
                     Ok(Came::Audio(audio)) => audio,
                     _ => break 'living,
@@ -230,7 +275,7 @@ fn main() {
                     Vec::new()
                 };
                 if let Some(effect) = open.as_mut() {
-                    effect.process_with(&mut audio, &side);
+                    effect.process_at(&mut audio, &side, at);
                 }
                 if write_block(&mut out, &audio).is_err() {
                     break;
@@ -238,7 +283,17 @@ fn main() {
                 continue;
             }
             Ask::Quit => break,
-            Ask::Show => match show(open.as_ref(), &mut editor, &loaded_name) {
+            Ask::Region(wanted) => match open.as_mut().filter(|effect| effect.is_ara()) {
+                Some(effect) => match effect.place(&wanted) {
+                    Ok(()) => Reply::Fine,
+                    Err(why) => Reply::Trouble(why),
+                },
+                None => {
+                    region = Some(wanted);
+                    Reply::Fine
+                }
+            },
+            Ask::Show => match show(open.as_mut(), &mut editor, &loaded_name) {
                 Ok(()) => Reply::Fine,
                 Err(why) => Reply::Trouble(why),
             },
@@ -256,11 +311,12 @@ fn main() {
                 editor = None;
                 // Kept for the window title, so a plugin window says which plugin it is.
                 loaded_name = names_in(&PathBuf::from(&path)).ok().and_then(|names| names.get(index).cloned()).unwrap_or_default();
-                match open_one(&PathBuf::from(&path), index, rate as f64, block) {
+                match open_one(&PathBuf::from(&path), index, rate as f64, block, region.as_ref()) {
                     Ok(effect) => {
                         let latency = effect.latency();
+                        let ara = effect.is_ara();
                         open = Some(effect);
-                        Reply::Loaded { inputs: 2, outputs: 2, latency }
+                        Reply::Loaded { inputs: 2, outputs: 2, latency, ara }
                     }
                     Err(why) => Reply::Trouble(why),
                 }
@@ -299,7 +355,7 @@ fn main() {
 }
 
 fn show(
-    open: Option<&Open>,
+    open: Option<&mut Open>,
     editor: &mut Option<(loupe_plugins::editor::Editor, window::Window)>,
     name: &str,
 ) -> Result<(), String> {
@@ -345,7 +401,7 @@ fn use_preset(asked: window::Asked, open: Option<&mut Open>, pane: &window::Wind
             }
         }
         window::Asked::Save(name) => {
-            let saved = effect.save().and_then(|state| loupe_plugins::presets::save(&folder, &name, &state));
+            let saved = effect.settings().and_then(|state| loupe_plugins::presets::save(&folder, &name, &state));
             if let Ok(name) = saved {
                 pane.presets(&loupe_plugins::presets::list(&folder), Some(&name));
                 pane.clear_name();

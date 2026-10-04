@@ -6,6 +6,8 @@ pub enum Ask {
     Load { path: String, index: usize, rate: u32, block: usize },
     Process,
     ProcessWithSide,
+    ProcessAt(i64),
+    Region(Region),
     Show,
     Hide,
     Save,
@@ -18,11 +20,50 @@ pub enum Ask {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     Classes(Vec<String>),
-    Loaded { inputs: usize, outputs: usize, latency: usize },
+    Loaded { inputs: usize, outputs: usize, latency: usize, ara: bool },
     State(Vec<u8>),
     Knobs(Vec<String>),
     Fine,
     Trouble(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Region {
+    pub file: String,
+    pub name: String,
+    pub start: f64,
+    pub offset: f64,
+    pub length: f64,
+    pub stretch: f64,
+    pub tempo: f64,
+}
+
+impl Region {
+    fn line(&self) -> String {
+        let tidy = |text: &str| text.replace(['\t', '\n'], " ");
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            tidy(&self.file),
+            tidy(&self.name),
+            self.start,
+            self.offset,
+            self.length,
+            self.stretch,
+            self.tempo
+        )
+    }
+
+    fn from_parts<'a>(parts: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
+        Some(Self {
+            file: parts.next()?.to_string(),
+            name: parts.next()?.to_string(),
+            start: parts.next()?.parse().ok()?,
+            offset: parts.next()?.parse().ok()?,
+            length: parts.next()?.parse().ok()?,
+            stretch: parts.next()?.parse().ok()?,
+            tempo: parts.next()?.parse().ok()?,
+        })
+    }
 }
 
 impl Ask {
@@ -32,6 +73,8 @@ impl Ask {
             Ask::Load { path, index, rate, block } => format!("load\t{path}\t{index}\t{rate}\t{block}"),
             Ask::Process => "process".to_string(),
             Ask::ProcessWithSide => "process2".to_string(),
+            Ask::ProcessAt(at) => format!("processat\t{at}"),
+            Ask::Region(region) => format!("region\t{}", region.line()),
             Ask::Show => "show".to_string(),
             Ask::Hide => "hide".to_string(),
             Ask::Save => "save".to_string(),
@@ -56,6 +99,8 @@ impl Ask {
             }),
             "process" => Some(Ask::Process),
             "process2" => Some(Ask::ProcessWithSide),
+            "processat" => Some(Ask::ProcessAt(parts.next()?.parse().ok()?)),
+            "region" => Some(Ask::Region(Region::from_parts(&mut parts)?)),
             "show" => Some(Ask::Show),
             "hide" => Some(Ask::Hide),
             "save" => Some(Ask::Save),
@@ -72,7 +117,7 @@ impl Reply {
     pub fn write(&self, out: &mut impl Write) -> std::io::Result<()> {
         let line = match self {
             Reply::Classes(names) => format!("classes\t{}", names.join("\x1f")),
-            Reply::Loaded { inputs, outputs, latency } => format!("loaded\t{inputs}\t{outputs}\t{latency}"),
+            Reply::Loaded { inputs, outputs, latency, ara } => format!("loaded\t{inputs}\t{outputs}\t{latency}\t{}", *ara as u8),
             Reply::State(state) => format!("state\t{}", hex_of(state)),
             Reply::Knobs(names) => format!("knobs\t{}", names.join("\x1f")),
             Reply::Fine => "fine".to_string(),
@@ -94,6 +139,7 @@ impl Reply {
                 inputs: parts.next()?.parse().ok()?,
                 outputs: parts.next()?.parse().ok()?,
                 latency: parts.next().and_then(|got| got.parse().ok()).unwrap_or(0),
+                ara: parts.next() == Some("1"),
             }),
             "state" => Some(Reply::State(bytes_of(parts.next().unwrap_or(""))?)),
             "knobs" => {
@@ -181,6 +227,17 @@ mod tests {
             Ask::Load { path: "/a/b.vst3".into(), index: 2, rate: 48_000, block: 512 },
             Ask::Process,
             Ask::ProcessWithSide,
+            Ask::ProcessAt(96_000),
+            Ask::ProcessAt(-12),
+            Ask::Region(Region {
+                file: "C:\\Songs\\lead vocal.wav".into(),
+                name: "Lead".into(),
+                start: 12.5,
+                offset: 0.125,
+                length: 3.0000000000000004,
+                stretch: 1.25,
+                tempo: 140.0,
+            }),
             Ask::Show,
             Ask::Hide,
             Ask::Save,
@@ -201,7 +258,8 @@ mod tests {
     fn every_reply_survives_the_wire() {
         let replies = [
             Reply::Classes(vec!["One".into(), "Two".into()]),
-            Reply::Loaded { inputs: 2, outputs: 2, latency: 64 },
+            Reply::Loaded { inputs: 2, outputs: 2, latency: 64, ara: false },
+            Reply::Loaded { inputs: 2, outputs: 2, latency: 0, ara: true },
             Reply::State(vec![1, 2, 3, 250]),
             Reply::Knobs(vec!["Threshold".into(), "Ratio".into()]),
             Reply::Fine,
@@ -213,5 +271,34 @@ mod tests {
             let text = String::from_utf8(written).unwrap();
             assert_eq!(Reply::read(&text), Some(reply));
         }
+    }
+}
+
+#[cfg(test)]
+mod older_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_that_says_nothing_about_ara_is_not_ara() {
+        assert_eq!(Reply::read("loaded\t2\t2\t64\n"), Some(Reply::Loaded { inputs: 2, outputs: 2, latency: 64, ara: false }));
+        assert_eq!(Reply::read("loaded\t2\t2\n"), Some(Reply::Loaded { inputs: 2, outputs: 2, latency: 0, ara: false }));
+    }
+
+    #[test]
+    fn a_tab_in_a_clip_name_does_not_break_the_line() {
+        let region = Region {
+            file: "a.wav".into(),
+            name: "two\twords".into(),
+            start: 0.0,
+            offset: 0.0,
+            length: 1.0,
+            stretch: 1.0,
+            tempo: 120.0,
+        };
+        let mut written = Vec::new();
+        Ask::Region(region.clone()).write(&mut written).unwrap();
+        let Some(Ask::Region(back)) = Ask::read(&String::from_utf8(written).unwrap()) else { panic!("it did not come back") };
+        assert_eq!(back.name, "two words");
+        assert_eq!(back.length, region.length);
     }
 }

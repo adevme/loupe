@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::sandbox::Sandbox;
-use crate::wire::{Ask, Reply};
+use crate::wire::{Ask, Region, Reply};
 
-type Opened = Result<(Sandbox, usize), (String, bool)>;
+/// What a plugin opening on its own thread hands back. The flag on the error side
+/// says whether the host died rather than refused, which is what gets reported.
+type Arrived = Result<Opened, (String, bool)>;
 
 pub struct Slot {
     pub path: PathBuf,
@@ -13,11 +15,13 @@ pub struct Slot {
     pub record: bool,
     pub trouble: Option<String>,
     pub latency: usize,
+    pub ara: bool,
+    placed: Option<Region>,
     host: Option<Sandbox>,
     built: Option<Box<dyn loupe_stock::Effect>>,
     /// A plugin being opened on a thread of its own. Starting a host and loading a
     /// plugin takes seconds, and the song cannot stop while it happens.
-    coming: Option<std::sync::mpsc::Receiver<Opened>>,
+    coming: Option<std::sync::mpsc::Receiver<Arrived>>,
     /// The window was asked for before the plugin had finished opening, so it opens
     /// as soon as there is something to open.
     wanted_open: bool,
@@ -35,6 +39,13 @@ impl Slot {
 
     pub fn built_in(&self) -> bool {
         self.built.is_some()
+    }
+
+    fn settle_in(&mut self, opened: Opened, region: Option<&Region>) {
+        self.latency = opened.latency;
+        self.ara = opened.ara;
+        self.placed = if opened.ara { region.cloned() } else { None };
+        self.host = Some(opened.host);
     }
 }
 
@@ -55,17 +66,24 @@ pub struct Fallen {
     pub why: String,
 }
 
+pub struct Opened {
+    host: Sandbox,
+    latency: usize,
+    ara: bool,
+}
+
 pub struct Rack {
     host: PathBuf,
     rate: u32,
     block: usize,
     slots: Vec<Slot>,
     fallen: Vec<Fallen>,
+    region: Option<Region>,
 }
 
 impl Rack {
     pub fn new(host: PathBuf, rate: u32, block: usize) -> Self {
-        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new() }
+        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new(), region: None }
     }
 
     pub fn has_fallen(&self) -> bool {
@@ -106,6 +124,8 @@ impl Rack {
             record: false,
             trouble: None,
             latency: 0,
+            ara: false,
+            placed: None,
             host: None,
             built: None,
             coming: None,
@@ -121,10 +141,7 @@ impl Rack {
             }
         } else {
             match self.open(&slot.path, slot.index) {
-                Ok((host, latency)) => {
-                    slot.host = Some(host);
-                    slot.latency = latency;
-                }
+                Ok(opened) => slot.settle_in(opened, self.region.as_ref()),
                 Err(why) => slot.trouble = Some(why),
             }
         }
@@ -213,9 +230,8 @@ impl Rack {
         let path = found.path.clone();
         let index = found.index;
         match self.open(&path, index) {
-            Ok((host, latency)) => {
-                self.slots[slot].host = Some(host);
-                self.slots[slot].latency = latency;
+            Ok(opened) => {
+                self.slots[slot].settle_in(opened, self.region.as_ref());
                 Ok(())
             }
             Err(why) => {
@@ -311,7 +327,7 @@ impl Rack {
     }
 
     pub fn process_takes(&mut self, audio: &mut Vec<[f32; 2]>) {
-        self.run(audio, &[], true);
+        self.run(audio, &[], true, None);
     }
 
     pub fn takes_latency(&self) -> usize {
@@ -328,12 +344,44 @@ impl Rack {
     }
 
     pub fn process_with(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) {
-        self.run(audio, side, false);
+        self.run(audio, side, false, None);
     }
 
-    fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool) {
+    pub fn process_at(&mut self, audio: &mut Vec<[f32; 2]>, at: i64) {
+        self.run(audio, &[], false, Some(at));
+    }
+
+    pub fn region(&self) -> Option<&Region> {
+        self.region.as_ref()
+    }
+
+    pub fn follow_region(&mut self, region: Option<Region>) -> Vec<String> {
         self.take_arrivals();
-        for (at, slot) in self.slots.iter_mut().enumerate() {
+        self.region = region;
+        let mut troubles = Vec::new();
+        let Some(wanted) = self.region.clone() else { return troubles };
+        for slot in self.slots.iter_mut() {
+            if !slot.ara || slot.placed.as_ref() == Some(&wanted) {
+                continue;
+            }
+            let Some(host) = slot.host.as_mut() else { continue };
+            match host.ask(Ask::Region(wanted.clone())) {
+                Ok(Reply::Fine) => slot.placed = Some(wanted.clone()),
+                Ok(Reply::Trouble(why)) => troubles.push(format!("{}: {why}", slot.name)),
+                Ok(other) => troubles.push(format!("{}: the plugin host answered out of turn: {other:?}", slot.name)),
+                Err(why) => {
+                    troubles.push(format!("{}: {why}", slot.name));
+                    slot.trouble = Some(why);
+                    slot.host = None;
+                }
+            }
+        }
+        troubles
+    }
+
+    fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool, at: Option<i64>) {
+        self.take_arrivals();
+        for (which, slot) in self.slots.iter_mut().enumerate() {
             if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
                 continue;
             }
@@ -342,12 +390,16 @@ impl Rack {
                 continue;
             }
             let Some(host) = slot.host.as_mut() else { continue };
-            if let Err(why) = host.run_with(audio, side) {
+            let ran = match at {
+                Some(at) if slot.ara => host.run_at(audio, at),
+                _ => host.run_with(audio, side),
+            };
+            if let Err(why) = ran {
                 let fell = host.gone();
                 slot.trouble = Some(why.clone());
                 slot.host = None;
                 if fell {
-                    self.fallen.push(Fallen { slot: at, name: slot.name.clone(), why });
+                    self.fallen.push(Fallen { slot: which, name: slot.name.clone(), why });
                 }
             }
         }
@@ -378,6 +430,8 @@ impl Rack {
                         record: *record,
                         trouble: None,
                         latency: 0,
+                        ara: false,
+                        placed: None,
                         host: None,
                         built: None,
                         coming: None,
@@ -403,9 +457,11 @@ impl Rack {
                         let (done, waiting) = std::sync::mpsc::channel();
                         let (host, rate, block) = (self.host.clone(), self.rate, self.block);
                         let (where_from, which, wanted_state) = (path.clone(), *index, state.clone());
+                        let region = self.region.clone();
                         std::thread::spawn(move || {
-                            let _ = done.send(open_on_a_thread(&host, &where_from, which, rate, block, &wanted_state));
+                            let _ = done.send(open_on_a_thread(&host, &where_from, which, rate, block, region.as_ref(), &wanted_state));
                         });
+                        slot.placed = self.region.clone();
                         slot.coming = Some(waiting);
                     }
                     self.slots.push(slot);
@@ -421,9 +477,9 @@ impl Rack {
         for (at, slot) in self.slots.iter_mut().enumerate() {
             let Some(waiting) = slot.coming.as_ref() else { continue };
             match waiting.try_recv() {
-                Ok(Ok((host, latency))) => {
-                    slot.latency = latency;
-                    slot.host = Some(host);
+                Ok(Ok(opened)) => {
+                    let placed = slot.placed.take();
+                    slot.settle_in(opened, placed.as_ref());
                     slot.coming = None;
                 }
                 Ok(Err((why, fell))) => {
@@ -449,19 +505,11 @@ impl Rack {
         Ok(made)
     }
 
-    fn open(&self, path: &Path, index: usize) -> Result<(Sandbox, usize), String> {
-        let mut host = Sandbox::start(&self.host)?;
-        let ask = Ask::Load {
-            path: path.to_string_lossy().to_string(),
-            index,
-            rate: self.rate,
-            block: self.block,
-        };
-        match host.ask(ask)? {
-            Reply::Loaded { latency, .. } => Ok((host, latency)),
-            Reply::Trouble(why) => Err(why),
-            other => Err(format!("the plugin host answered out of turn: {other:?}")),
-        }
+    /// Opens a plugin and waits for it. Only used where the user asked for this one
+    /// plugin and is waiting on the answer, so a host that died is just an error
+    /// shown to them rather than a crash report about something they never saw.
+    fn open(&self, path: &Path, index: usize) -> Result<Opened, String> {
+        open_on_a_thread(&self.host, path, index, self.rate, self.block, self.region.as_ref(), &[]).map_err(|(why, _)| why)
     }
 }
 
@@ -658,18 +706,27 @@ fn open_on_a_thread(
     index: usize,
     rate: u32,
     block: usize,
+    region: Option<&Region>,
     state: &[u8],
-) -> Opened {
+) -> Arrived {
     let mut sandbox = Sandbox::start(host).map_err(|why| (why, false))?;
+    if let Some(region) = region {
+        let placed = sandbox.ask(Ask::Region(region.clone())).and_then(|reply| match reply {
+            Reply::Fine => Ok(()),
+            Reply::Trouble(why) => Err(why),
+            other => Err(format!("the plugin host answered out of turn: {other:?}")),
+        });
+        placed.map_err(|why| (why, sandbox.gone()))?;
+    }
     let ask = Ask::Load { path: path.to_string_lossy().to_string(), index, rate, block };
     let loaded = sandbox.ask(ask).and_then(|reply| match reply {
-        Reply::Loaded { latency, .. } => Ok(latency),
+        Reply::Loaded { latency, ara, .. } => Ok((latency, ara)),
         Reply::Trouble(why) => Err(why),
         other => Err(format!("the plugin host answered out of turn: {other:?}")),
     });
-    let latency = loaded.map_err(|why| (why, sandbox.gone()))?;
+    let (latency, ara) = loaded.map_err(|why| (why, sandbox.gone()))?;
     settle(&mut sandbox, state).map_err(|why| (why, sandbox.gone()))?;
-    Ok((sandbox, latency))
+    Ok(Opened { host: sandbox, latency, ara })
 }
 
 #[cfg(all(test, unix))]

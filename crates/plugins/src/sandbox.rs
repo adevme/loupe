@@ -87,10 +87,18 @@ impl Sandbox {
     }
 
     pub fn run_with(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) -> Result<(), String> {
+        let ask = if side.is_empty() { Ask::Process } else { Ask::ProcessWithSide };
+        self.exchange(ask, audio, side)
+    }
+
+    pub fn run_at(&mut self, audio: &mut Vec<[f32; 2]>, at: i64) -> Result<(), String> {
+        self.exchange(Ask::ProcessAt(at), audio, &[])
+    }
+
+    fn exchange(&mut self, ask: Ask, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) -> Result<(), String> {
         if self.lost {
             return Err("the plugin host is gone".into());
         }
-        let ask = if side.is_empty() { Ask::Process } else { Ask::ProcessWithSide };
         if ask.write(&mut self.writing).is_err() || write_block(&mut self.writing, audio).is_err() {
             return Err(self.give_up("the plugin host stopped listening"));
         }

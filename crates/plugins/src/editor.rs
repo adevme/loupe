@@ -1,4 +1,6 @@
-use vst3::Steinberg::Vst::{IComponentHandler, IComponentHandlerTrait, IEditController, IEditControllerTrait};
+use vst3::Steinberg::Vst::{
+    IComponent, IComponentHandler, IComponentHandlerTrait, IConnectionPoint, IConnectionPointTrait, IEditController, IEditControllerTrait,
+};
 use vst3::Steinberg::{kResultOk, IPlugView, IPlugViewTrait, IPluginBaseTrait, ViewRect};
 use vst3::{Class, ComPtr, ComWrapper};
 
@@ -30,9 +32,63 @@ pub struct Editor {
     view: ComPtr<IPlugView>,
     _controller: ComPtr<IEditController>,
     _handler: ComWrapper<Quiet>,
+    links: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
 }
 
 impl Editor {
+    /// For a plugin that keeps its window in a controller of its own: start the
+    /// controller, show it what the processor holds, and connect the two, which is
+    /// what a plugin expects of a host before it will make its window.
+    /// # Safety
+    /// `context` must be a live host context, or null.
+    pub unsafe fn joined(
+        controller: ComPtr<IEditController>,
+        component: &ComPtr<IComponent>,
+        settings: &[u8],
+        context: *mut vst3::Steinberg::FUnknown,
+    ) -> Result<Self, String> {
+        unsafe {
+            if controller.initialize(context) != kResultOk {
+                return Err("the plugin's window would not start up".into());
+            }
+            let links = match (component.cast::<IConnectionPoint>(), controller.cast::<IConnectionPoint>()) {
+                (Some(one), Some(other)) => {
+                    one.connect(other.as_ptr());
+                    other.connect(one.as_ptr());
+                    Some((one, other))
+                }
+                _ => None,
+            };
+            if !settings.is_empty() {
+                let wrapper = crate::stream::Bytes::holding(settings.to_vec());
+                if let Some(stream) = wrapper.as_com_ref::<vst3::Steinberg::IBStream>() {
+                    controller.setComponentState(stream.as_ptr());
+                }
+            }
+            Self::viewed(controller, links)
+        }
+    }
+
+    fn viewed(
+        controller: ComPtr<IEditController>,
+        links: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
+    ) -> Result<Self, String> {
+        unsafe {
+            let handler = ComWrapper::new(Quiet);
+            if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
+                controller.setComponentHandler(reference.as_ptr());
+            }
+            let raw = controller.createView(b"editor\0".as_ptr() as *const i8);
+            let Some(view) = ComPtr::from_raw(raw) else {
+                if let Some((one, other)) = links {
+                    one.disconnect(other.as_ptr());
+                    other.disconnect(one.as_ptr());
+                }
+                return Err("this plugin has no window".into());
+            };
+            Ok(Self { view, _controller: controller, _handler: handler, links })
+        }
+    }
 
     pub fn fits(&self, kind: &[u8]) -> bool {
         unsafe { self.view.isPlatformTypeSupported(kind.as_ptr() as *const i8) == kResultOk }
@@ -82,6 +138,10 @@ impl Drop for Editor {
     fn drop(&mut self) {
         unsafe {
             self.view.removed();
+            if let Some((one, other)) = self.links.take() {
+                one.disconnect(other.as_ptr());
+                other.disconnect(one.as_ptr());
+            }
         }
     }
 }
@@ -93,49 +153,6 @@ pub fn platform_kind() -> &'static [u8] {
         b"NSView\0"
     } else {
         b"X11EmbedWindowID\0"
-    }
-}
-
-impl Editor {
-    /// For a plugin that keeps its window in a separate controller: start the
-    /// controller, hand it the processor's settings, and connect the two, which is
-    /// what a plugin expects of a host before it will make its window.
-    /// # Safety
-    /// `context` must be a live host context, or null.
-    pub unsafe fn from_pair(
-        controller: ComPtr<IEditController>,
-        component: &ComPtr<vst3::Steinberg::Vst::IComponent>,
-        context: *mut vst3::Steinberg::FUnknown,
-    ) -> Result<Self, String> {
-        use vst3::Steinberg::Vst::{IComponentTrait, IConnectionPoint, IConnectionPointTrait};
-        unsafe {
-            if controller.initialize(context) != kResultOk {
-                return Err("the plugin's window would not start up".into());
-            }
-            // What the processor currently holds, so the window opens showing it.
-            let kept = crate::stream::Bytes::empty();
-            if let Some(stream) = kept.as_com_ref::<vst3::Steinberg::IBStream>() {
-                if component.getState(stream.as_ptr()) == kResultOk {
-                    let back = crate::stream::Bytes::holding(kept.taken());
-                    if let Some(again) = back.as_com_ref::<vst3::Steinberg::IBStream>() {
-                        controller.setComponentState(again.as_ptr());
-                    }
-                }
-            }
-            let from: Option<ComPtr<IConnectionPoint>> = component.cast();
-            let to: Option<ComPtr<IConnectionPoint>> = controller.cast();
-            if let (Some(from), Some(to)) = (from, to) {
-                from.connect(to.as_ptr());
-                to.connect(from.as_ptr());
-            }
-            let handler = ComWrapper::new(Quiet);
-            if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
-                controller.setComponentHandler(reference.as_ptr());
-            }
-            let raw = controller.createView(b"editor\0".as_ptr() as *const i8);
-            let view = ComPtr::from_raw(raw).ok_or("this plugin keeps its window somewhere Loupe cannot reach it")?;
-            Ok(Self { view, _controller: controller, _handler: handler })
-        }
     }
 }
 
@@ -162,7 +179,8 @@ impl Editor {
                 raw = controller.createView(b"editor\0".as_ptr() as *const i8);
             }
             let view = ComPtr::from_raw(raw).ok_or("this plugin has no window")?;
-            Ok(Self { view, _controller: controller, _handler: handler })
+            // One object doing both jobs has nothing to connect itself to.
+            Ok(Self { view, _controller: controller, _handler: handler, links: None })
         }
     }
 }

@@ -1,4 +1,7 @@
 mod scan;
+pub mod ara;
+pub mod ara_audio;
+pub mod ara_document;
 pub mod vst3;
 pub mod sandbox;
 pub mod presets;
