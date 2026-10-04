@@ -1,14 +1,21 @@
+use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
+use loupe_stock::{Effect, Meter, SILENT_LUFS};
+
+use crate::encode::{Format, Writer};
 use crate::model::{Frames, Project, Track};
 use crate::wav;
 
 const BLOCK: usize = 16_384;
-const CHANNELS: u16 = 2;
 const STEMS_FOLDER: &str = "Stems";
 const NOT_IN_FILE_NAMES: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+const MEASURING: &str = "measuring.wav";
+const METER_STEPS_PER_SECOND: u32 = 10;
+pub const TRUE_PEAK_CEILING: f32 = -1.0;
+const LOWEST_TARGET: f32 = -60.0;
 
 pub struct ExportPlan {
     pub folder: PathBuf,
@@ -16,9 +23,113 @@ pub struct ExportPlan {
     pub split: bool,
     pub range: Option<(Frames, Frames)>,
     pub project_file: String,
+    pub format: Format,
+    pub dither: bool,
+    pub normalise: Normalise,
 }
 
-pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> Result<(), String> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Normalise {
+    Off,
+    Peak(f32),
+    Loudness(f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Levels {
+    pub loudness: f32,
+    pub true_peak: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gain {
+    pub decibels: f32,
+    pub note: Option<String>,
+}
+
+impl Gain {
+    fn unchanged(note: Option<&str>) -> Self {
+        Self { decibels: 0.0, note: note.map(str::to_string) }
+    }
+
+    fn linear(&self) -> f32 {
+        10f32.powf(self.decibels / 20.0)
+    }
+}
+
+fn signed(decibels: f32) -> String {
+    format!("{decibels:+.1} dB")
+}
+
+impl Normalise {
+    pub fn key(self) -> String {
+        match self {
+            Normalise::Off => "off".to_string(),
+            Normalise::Peak(decibels) => format!("peak {decibels}"),
+            Normalise::Loudness(lufs) => format!("lufs {lufs}"),
+        }
+    }
+
+    pub fn from_key(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if text == "off" {
+            return Some(Normalise::Off);
+        }
+        let (kind, number) = text.split_once(' ')?;
+        let target = number.trim().parse::<f32>().ok().filter(|target| (LOWEST_TARGET..=0.0).contains(target))?;
+        match kind {
+            "peak" => Some(Normalise::Peak(target)),
+            "lufs" => Some(Normalise::Loudness(target)),
+            _ => None,
+        }
+    }
+
+    pub fn gain(self, levels: Levels) -> Gain {
+        if self == Normalise::Off {
+            return Gain::unchanged(None);
+        }
+        if levels.true_peak <= SILENT_LUFS {
+            return Gain::unchanged(Some("Not normalised: the export is silent."));
+        }
+        match self {
+            Normalise::Off => Gain::unchanged(None),
+            Normalise::Peak(target) => {
+                let decibels = target - levels.true_peak;
+                Gain { decibels, note: Some(format!("Normalised to a true peak of {target} dBTP ({}).", signed(decibels))) }
+            }
+            Normalise::Loudness(target) => {
+                if levels.loudness <= SILENT_LUFS {
+                    return Gain::unchanged(Some("Not normalised: too quiet to measure its loudness."));
+                }
+                let wanted = target - levels.loudness;
+                let room = TRUE_PEAK_CEILING - levels.true_peak;
+                if wanted <= room {
+                    let note = format!("Normalised to {target} LUFS ({}), true peak {:.1} dBTP.", signed(wanted), levels.true_peak + wanted);
+                    Gain { decibels: wanted, note: Some(note) }
+                } else {
+                    let note = format!(
+                        "Reached {:.1} LUFS, not {target}: getting there would take the true peak over {TRUE_PEAK_CEILING} dBTP, so the gain stopped at {}.",
+                        levels.loudness + room,
+                        signed(room)
+                    );
+                    Gain { decibels: room, note: Some(note) }
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for Normalise {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Normalise::Off => f.write_str("Off"),
+            Normalise::Peak(decibels) => write!(f, "True peak at {decibels} dBTP"),
+            Normalise::Loudness(lufs) => write!(f, "Loudness at {lufs} LUFS integrated"),
+        }
+    }
+}
+
+pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> Result<Option<String>, String> {
     export_through(project, plan, progress, None)
 }
 
@@ -27,7 +138,7 @@ pub fn export_through(
     plan: &ExportPlan,
     progress: &dyn Fn(f32),
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let (from, to) = plan.range.unwrap_or((0, project.length()));
     if to <= from {
         return Err("there is nothing to export".into());
@@ -37,15 +148,30 @@ pub fn export_through(
 
     let stems: Vec<&Track> =
         if plan.split { project.tracks.iter().filter(|track| !track.muted).collect() } else { Vec::new() };
-    let all_frames = (to - from) * (1 + stems.len() as Frames);
+    let measuring = plan.normalise != Normalise::Off;
+    let all_frames = (to - from) * (1 + stems.len() as Frames + measuring as Frames);
     let mut written = 0;
     let mut count = |frames: Frames| {
         written += frames;
         progress(written as f32 / all_frames as f32);
     };
 
-    let mix = plan.folder.join(format!("{}.wav", plan.name));
-    write_wav(&mix, project, from, to, &mut count, chains.as_deref_mut()).map_err(|why| failed(&mix, why))?;
+    let extension = plan.format.extension();
+    let mix = plan.folder.join(format!("{}.{extension}", plan.name));
+    let gain = if measuring {
+        let held = plan.folder.join(format!("{}.{MEASURING}", plan.name));
+        let made = measure_into(&held, project, from, to, &mut count, chains.as_deref_mut()).and_then(|levels| {
+            let gain = plan.normalise.gain(levels);
+            copy_with_gain(&held, &mix, plan, project.rate, to - from, gain.linear(), &mut count)?;
+            Ok(gain)
+        });
+        let _ = fs::remove_file(&held);
+        made.map_err(|why| failed(&mix, why))?
+    } else {
+        write_file(&mix, plan.format, plan.dither, project, from, to, 1.0, &mut count, chains.as_deref_mut())
+            .map_err(|why| failed(&mix, why))?;
+        Gain::unchanged(None)
+    };
     let copy = plan.folder.join(format!("{}.lp", plan.name));
     fs::write(&copy, &plan.project_file).map_err(|why| failed(&copy, why))?;
 
@@ -57,11 +183,17 @@ pub fn export_through(
             let mut alone = project.clone();
             alone.tracks.retain(|other| other.id == track.id);
             alone.master = 1.0;
-            let file = stems_folder.join(format!("{}.wav", unused_name(&track.name, &mut used)));
-            write_wav(&file, &alone, from, to, &mut count, chains.as_deref_mut()).map_err(|why| failed(&file, why))?;
+            let file = stems_folder.join(format!("{}.{extension}", unused_name(&track.name, &mut used)));
+            write_file(&file, plan.format, plan.dither, &alone, from, to, gain.linear(), &mut count, chains.as_deref_mut())
+                .map_err(|why| failed(&file, why))?;
         }
     }
-    Ok(())
+    let mut notes: Vec<String> = gain.note.into_iter().collect();
+    let written_rate = Format::mp3_rate(project.rate);
+    if plan.format == Format::Mp3Cbr320 && written_rate != project.rate {
+        notes.push(format!("MP3 stops at 48 kHz, so it was written at {written_rate} Hz."));
+    }
+    Ok((!notes.is_empty()).then(|| notes.join(" ")))
 }
 
 pub fn render_to_wav(project: &Project, path: &Path, from: Frames, to: Frames) -> Result<(), String> {
@@ -78,7 +210,8 @@ pub fn render_to_wav_through(
     if to <= from {
         return Err("there is nothing to write".into());
     }
-    write_wav(path, project, from, to, &mut |_| {}, chains).map_err(|why| format!("{}: {why}", path.display()))
+    write_file(path, Format::WavFloat, false, project, from, to, 1.0, &mut |_| {}, chains)
+        .map_err(|why| format!("{}: {why}", path.display()))
 }
 
 pub fn next_version_folder(exports: &Path) -> PathBuf {
@@ -105,35 +238,114 @@ fn unused_name(wanted: &str, used: &mut Vec<String>) -> String {
     name
 }
 
-fn write_wav(
-    path: &Path,
+fn amplify(block: &mut [[f32; 2]], gain: f32) {
+    if gain != 1.0 {
+        for frame in block {
+            frame[0] *= gain;
+            frame[1] *= gain;
+        }
+    }
+}
+
+fn render_into(
     project: &Project,
     from: Frames,
     to: Frames,
     wrote: &mut dyn FnMut(Frames),
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
+    take: &mut dyn FnMut(&mut [[f32; 2]]) -> io::Result<()>,
 ) -> io::Result<()> {
-    let frames = to - from;
-    if frames > wav::most_frames(CHANNELS) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the song is too long for one WAV file"));
-    }
-    let mut out = BufWriter::new(File::create(path)?);
-    out.write_all(&wav::float_header(CHANNELS, project.rate, frames as u32))?;
-
     let mut block = vec![[0.0f32; 2]; BLOCK];
     let mut spare = crate::render::Mixdown::default();
     let mut pos = from;
     while pos < to {
         let count = BLOCK.min((to - pos) as usize);
         crate::render::render_through(project, pos, &mut block[..count], &mut spare, chains.as_deref_mut());
-        for frame in &block[..count] {
-            out.write_all(&frame[0].to_le_bytes())?;
-            out.write_all(&frame[1].to_le_bytes())?;
-        }
+        take(&mut block[..count])?;
         pos += count as Frames;
         wrote(count as Frames);
     }
-    out.flush()
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_file(
+    path: &Path,
+    format: Format,
+    dither: bool,
+    project: &Project,
+    from: Frames,
+    to: Frames,
+    gain: f32,
+    wrote: &mut dyn FnMut(Frames),
+    chains: Option<&mut (dyn crate::render::Chains + '_)>,
+) -> io::Result<()> {
+    let mut writer = Writer::create(path, format, project.rate, to - from, dither)?;
+    render_into(project, from, to, wrote, chains, &mut |block| {
+        amplify(block, gain);
+        writer.push(block)
+    })?;
+    writer.finish()
+}
+
+
+fn levels_of(meter: &mut Meter, rate: u32) -> Levels {
+    let mut last_step = vec![[0.0f32; 2]; (rate / METER_STEPS_PER_SECOND) as usize];
+    meter.process(&mut last_step);
+    let readings = meter.readings();
+    Levels { loudness: readings.integrated(), true_peak: readings.peak() }
+}
+
+fn measure_into(
+    held: &Path,
+    project: &Project,
+    from: Frames,
+    to: Frames,
+    wrote: &mut dyn FnMut(Frames),
+    chains: Option<&mut (dyn crate::render::Chains + '_)>,
+) -> io::Result<Levels> {
+    let mut writer = Writer::create(held, Format::WavFloat, project.rate, to - from, false)?;
+    let mut meter = Meter::new();
+    meter.prepare(project.rate as f32);
+    render_into(project, from, to, wrote, chains, &mut |block| {
+        meter.process(block);
+        writer.push(block)
+    })?;
+    writer.finish()?;
+    Ok(levels_of(&mut meter, project.rate))
+}
+
+fn copy_with_gain(
+    held: &Path,
+    path: &Path,
+    plan: &ExportPlan,
+    rate: u32,
+    frames: Frames,
+    gain: f32,
+    wrote: &mut dyn FnMut(Frames),
+) -> io::Result<()> {
+    let mut input = BufReader::new(File::open(held)?);
+    let mut header = [0u8; wav::HEADER_BYTES as usize];
+    input.read_exact(&mut header)?;
+    let mut writer = Writer::create(path, plan.format, rate, frames, plan.dither)?;
+    let mut bytes = vec![0u8; BLOCK * 8];
+    let mut block = vec![[0.0f32; 2]; BLOCK];
+    let mut left = frames;
+    while left > 0 {
+        let count = BLOCK.min(left as usize);
+        input.read_exact(&mut bytes[..count * 8])?;
+        for (frame, raw) in block.iter_mut().zip(bytes[..count * 8].chunks_exact(8)) {
+            *frame = [
+                f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                f32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+            ];
+        }
+        amplify(&mut block[..count], gain);
+        writer.push(&block[..count])?;
+        left -= count as Frames;
+        wrote(count as Frames);
+    }
+    writer.finish()
 }
 
 #[cfg(test)]
@@ -172,17 +384,51 @@ mod tests {
         out
     }
 
+    fn plan_for(folder: &Path) -> ExportPlan {
+        ExportPlan {
+            folder: folder.to_path_buf(),
+            name: "Song".into(),
+            split: false,
+            range: None,
+            project_file: String::new(),
+            format: Format::WavFloat,
+            dither: false,
+            normalise: Normalise::Off,
+        }
+    }
+
+    fn tone_song(level: f32, seconds: u32) -> Project {
+        let mut p = Project::new(48_000);
+        for (name, hz) in [("Low", 220.0f32), ("High", 1_000.0)] {
+            let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: name.into() }) else {
+                panic!("no track")
+            };
+            let frames = (0..48_000 * seconds)
+                .map(|i| {
+                    let s = level * (std::f32::consts::TAU * hz * i as f32 / 48_000.0).sin();
+                    [s, s]
+                })
+                .collect();
+            let source = Arc::new(Source::from_frames(name, frames));
+            p.apply(Command::AddClip { track, source, start: 0 }).unwrap();
+        }
+        p
+    }
+
+    fn measured(path: &Path) -> Levels {
+        let read = Source::load(path, 48_000).unwrap();
+        let mut meter = Meter::new();
+        meter.prepare(48_000.0);
+        let mut audio = read.frames;
+        meter.process(&mut audio);
+        levels_of(&mut meter, 48_000)
+    }
+
     #[test]
     fn the_exported_mix_is_exactly_what_plays() {
         let project = song();
         let folder = scratch("mix");
-        let plan = ExportPlan {
-            folder: folder.clone(),
-            name: "Song".into(),
-            split: false,
-            range: None,
-            project_file: "saved".into(),
-        };
+        let plan = ExportPlan { project_file: "saved".into(), ..plan_for(&folder) };
         export(&project, &plan, &|_| {}).unwrap();
         let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         assert_eq!(read.frames, heard(&project));
@@ -196,7 +442,7 @@ mod tests {
         let project = song();
         let folder = scratch("split");
         let plan =
-            ExportPlan { folder: folder.clone(), name: "Song".into(), split: true, range: None, project_file: String::new() };
+            ExportPlan { split: true, ..plan_for(&folder) };
         export(&project, &plan, &|_| {}).unwrap();
         let stems = folder.join(STEMS_FOLDER);
         let vox = Source::load(&stems.join("Lead vox.wav"), 48_000).unwrap();
@@ -219,7 +465,7 @@ mod tests {
         let project = song();
         let folder = scratch("progress");
         let plan =
-            ExportPlan { folder: folder.clone(), name: "Song".into(), split: true, range: None, project_file: String::new() };
+            ExportPlan { split: true, ..plan_for(&folder) };
         let seen = std::cell::RefCell::new(Vec::new());
         export(&project, &plan, &|fraction| seen.borrow_mut().push(fraction)).unwrap();
         let seen = seen.into_inner();
@@ -233,13 +479,7 @@ mod tests {
     fn a_range_exports_only_that_part() {
         let project = song();
         let folder = scratch("range");
-        let plan = ExportPlan {
-            folder: folder.clone(),
-            name: "Song".into(),
-            split: false,
-            range: Some((1500, 2500)),
-            project_file: String::new(),
-        };
+        let plan = ExportPlan { range: Some((1500, 2500)), ..plan_for(&folder) };
         export(&project, &plan, &|_| {}).unwrap();
         let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         assert_eq!(read.frames, heard(&project)[1500..2500]);
@@ -255,5 +495,119 @@ mod tests {
         fs::create_dir_all(exports.join("Vocals")).unwrap();
         assert_eq!(next_version_folder(&exports), exports.join("V8"));
         fs::remove_dir_all(exports).unwrap();
+    }
+
+    #[test]
+    fn peak_normalising_moves_the_true_peak_to_the_target() {
+        let gain = Normalise::Peak(-1.0).gain(Levels { loudness: -20.0, true_peak: -6.0 });
+        assert_eq!(gain.decibels, 5.0);
+        let gain = Normalise::Peak(-0.1).gain(Levels { loudness: -8.0, true_peak: 1.5 });
+        assert!((gain.decibels + 1.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn loudness_normalising_stops_at_the_true_peak_ceiling_and_says_so() {
+        let fits = Normalise::Loudness(-14.0).gain(Levels { loudness: -20.0, true_peak: -10.0 });
+        assert_eq!(fits.decibels, 6.0);
+        assert!(fits.note.as_deref().unwrap().starts_with("Normalised to -14 LUFS (+6.0 dB)"), "{:?}", fits.note);
+        let capped = Normalise::Loudness(-14.0).gain(Levels { loudness: -20.0, true_peak: -3.0 });
+        assert_eq!(capped.decibels, 2.0);
+        let note = capped.note.unwrap();
+        assert!(note.starts_with("Reached -18.0 LUFS, not -14"), "{note}");
+        assert!(note.contains("-1 dBTP"), "{note}");
+        let quieter = Normalise::Loudness(-14.0).gain(Levels { loudness: -9.0, true_peak: -0.2 });
+        assert_eq!(quieter.decibels, -5.0);
+    }
+
+    #[test]
+    fn silence_and_off_are_left_alone() {
+        assert_eq!(Normalise::Off.gain(Levels { loudness: -20.0, true_peak: -3.0 }), Gain { decibels: 0.0, note: None });
+        let silent = Normalise::Loudness(-14.0).gain(Levels { loudness: SILENT_LUFS, true_peak: SILENT_LUFS });
+        assert_eq!(silent.decibels, 0.0);
+        assert!(silent.note.unwrap().contains("silent"));
+    }
+
+    #[test]
+    fn normalise_settings_round_trip_and_refuse_nonsense() {
+        for choice in [Normalise::Off, Normalise::Peak(-0.1), Normalise::Peak(-1.0), Normalise::Loudness(-14.0), Normalise::Loudness(-23.0)] {
+            assert_eq!(Normalise::from_key(&choice.key()), Some(choice));
+        }
+        for bad in ["", "peak", "peak 3", "lufs -100", "lufs x", "loud -14", "peak NaN"] {
+            assert_eq!(Normalise::from_key(bad), None, "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_loudness_target_is_met_in_the_written_file() {
+        let project = tone_song(0.05, 6);
+        let folder = scratch("lufs");
+        let plan = ExportPlan { normalise: Normalise::Loudness(-14.0), format: Format::Wav24, dither: true, ..plan_for(&folder) };
+        let note = export(&project, &plan, &|_| {}).unwrap().unwrap();
+        assert!(note.starts_with("Normalised to -14 LUFS"), "{note}");
+        let levels = measured(&folder.join("Song.wav"));
+        assert!((levels.loudness + 14.0).abs() < 0.1, "{levels:?}");
+        assert!(!folder.join(format!("Song.{MEASURING}")).exists(), "the measuring file is cleaned up");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_peak_target_is_met_in_the_written_file() {
+        let project = tone_song(0.05, 3);
+        let folder = scratch("peak");
+        let plan = ExportPlan { normalise: Normalise::Peak(-1.0), format: Format::Flac16, dither: true, ..plan_for(&folder) };
+        export(&project, &plan, &|_| {}).unwrap();
+        let levels = measured(&folder.join("Song.flac"));
+        assert!((levels.true_peak + 1.0).abs() < 0.1, "{levels:?}");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_loudness_target_beyond_the_peak_ceiling_keeps_the_peak_safe() {
+        let project = tone_song(0.05, 3);
+        let folder = scratch("ceiling");
+        let plan = ExportPlan { normalise: Normalise::Loudness(0.0), ..plan_for(&folder) };
+        let note = export(&project, &plan, &|_| {}).unwrap().unwrap();
+        assert!(note.starts_with("Reached "), "{note}");
+        let levels = measured(&folder.join("Song.wav"));
+        assert!((levels.true_peak - TRUE_PEAK_CEILING).abs() < 0.1, "{levels:?}");
+        assert!(levels.loudness < -1.0, "{levels:?}");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn normalised_stems_take_the_same_gain_so_they_still_add_up_to_the_mix() {
+        let project = tone_song(0.05, 2);
+        let folder = scratch("stems");
+        let plan = ExportPlan { split: true, normalise: Normalise::Peak(-3.0), ..plan_for(&folder) };
+        export(&project, &plan, &|_| {}).unwrap();
+        let mix = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
+        let low = Source::load(&folder.join(STEMS_FOLDER).join("Low.wav"), 48_000).unwrap();
+        let high = Source::load(&folder.join(STEMS_FOLDER).join("High.wav"), 48_000).unwrap();
+        let worst = mix
+            .frames
+            .iter()
+            .zip(low.frames.iter().zip(&high.frames))
+            .map(|(m, (a, b))| (m[0] - a[0] - b[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(worst < 1e-5, "stems are {worst} away from the mix");
+        assert!(rms_of(&mix.frames) > 0.1, "the mix was turned up");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    fn rms_of(audio: &[[f32; 2]]) -> f32 {
+        (audio.iter().map(|f| f[0] * f[0]).sum::<f32>() / audio.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn stems_follow_the_chosen_format() {
+        let project = song();
+        let folder = scratch("stem-format");
+        let plan = ExportPlan { split: true, format: Format::Mp3Cbr320, ..plan_for(&folder) };
+        export(&project, &plan, &|_| {}).unwrap();
+        assert!(folder.join("Song.mp3").exists());
+        assert!(folder.join(STEMS_FOLDER).join("Beat.mp3").exists());
+        assert!(folder.join(STEMS_FOLDER).join("Lead vox.mp3").exists());
+        assert!(!folder.join("Song.wav").exists());
+        fs::remove_dir_all(folder).unwrap();
     }
 }

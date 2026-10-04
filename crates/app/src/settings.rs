@@ -33,6 +33,47 @@ pub struct Settings {
     pub snap: bool,
     pub midi_inputs: Option<Vec<String>>,
     pub audio: loupe_engine::Device,
+    pub export: ExportChoices,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExportChoices {
+    pub format: loupe_engine::Format,
+    pub dither_16: bool,
+    pub dither_24: bool,
+    pub normalise: loupe_engine::Normalise,
+    pub split: bool,
+}
+
+impl ExportChoices {
+    pub fn from_settings(value_of: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            format: value_of("export_format").and_then(|key| loupe_engine::Format::from_key(&key)).unwrap_or(loupe_engine::Format::WavFloat),
+            dither_16: value_of("export_dither_16").as_deref() != Some("off"),
+            dither_24: value_of("export_dither_24").as_deref() == Some("on"),
+            normalise: value_of("export_normalise").and_then(|key| loupe_engine::Normalise::from_key(&key)).unwrap_or(loupe_engine::Normalise::Off),
+            split: value_of("export_split").as_deref() == Some("on"),
+        }
+    }
+
+    pub fn entries(&self) -> [(&'static str, String); 5] {
+        let on_off = |on: bool| if on { "on" } else { "off" }.to_string();
+        [
+            ("export_format", self.format.key().to_string()),
+            ("export_dither_16", on_off(self.dither_16)),
+            ("export_dither_24", on_off(self.dither_24)),
+            ("export_normalise", self.normalise.key()),
+            ("export_split", on_off(self.split)),
+        ]
+    }
+
+    pub fn dither(&self) -> bool {
+        match self.format.bits() {
+            Some(16) => self.dither_16,
+            Some(_) => self.dither_24,
+            None => false,
+        }
+    }
 }
 
 impl Settings {
@@ -66,6 +107,7 @@ impl Settings {
                 rate: value_of("audio_rate").and_then(|text| text.parse().ok()).filter(|rate| loupe_engine::RATES.contains(rate)),
                 buffer: value_of("audio_buffer").and_then(|text| text.parse().ok()).filter(|size| loupe_engine::BUFFERS.contains(size)),
             },
+            export: ExportChoices::from_settings(|key| value_of(key).map(str::to_string)),
         }
     }
 }
@@ -277,5 +319,30 @@ mod tests {
             assert!(backups_kept_from(bad).is_err(), "{bad} was accepted");
         }
         assert!(typed_number("12") && typed_number("") && !typed_number("1a") && !typed_number("1234"));
+    }
+    #[test]
+    fn export_choices_start_as_float_wav_and_come_back_as_saved() {
+        let fresh = ExportChoices::from_settings(|_| None);
+        assert_eq!(fresh.format, loupe_engine::Format::WavFloat);
+        assert_eq!(fresh.normalise, loupe_engine::Normalise::Off);
+        assert!(fresh.dither_16 && !fresh.dither_24 && !fresh.split && !fresh.dither());
+        let chosen = ExportChoices {
+            format: loupe_engine::Format::Flac24,
+            dither_16: false,
+            dither_24: true,
+            normalise: loupe_engine::Normalise::Loudness(-14.0),
+            split: true,
+        };
+        let saved = chosen.entries();
+        let back = ExportChoices::from_settings(|key| saved.iter().find(|(name, _)| *name == key).map(|(_, value)| value.clone()));
+        assert_eq!(back, chosen);
+        assert!(back.dither());
+        let mp3 = ExportChoices { format: loupe_engine::Format::Mp3Cbr320, ..back };
+        assert!(!mp3.dither(), "MP3 and float are never dithered");
+        let sixteen = ExportChoices { format: loupe_engine::Format::Wav16, ..fresh };
+        assert!(sixteen.dither());
+        let junk = ExportChoices::from_settings(|_| Some("nonsense".to_string()));
+        assert_eq!(junk.format, loupe_engine::Format::WavFloat);
+        assert_eq!(junk.normalise, loupe_engine::Normalise::Off);
     }
 }

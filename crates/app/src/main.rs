@@ -330,11 +330,14 @@ pub enum Message {
     SaveElsewhere,
     OpenExport,
     ExportSplit(bool),
+    ExportFormatChosen(loupe_engine::Format),
+    ExportDither(bool),
+    ExportNormaliseChosen(loupe_engine::Normalise),
     ExportRangeOnly(bool),
     ExportElsewhere,
     ExportFolderPicked(Option<PathBuf>),
     StartExport,
-    Exported(Result<PathBuf, String>),
+    Exported(Result<(PathBuf, Option<String>), String>),
     ScaleDragged(f64),
     ScaleChosen,
     ScaleTyped(String),
@@ -488,7 +491,7 @@ struct App {
     loading: usize,
     problem: Option<String>,
     notice: Option<String>,
-    export_split: bool,
+    export: settings::ExportChoices,
     export_range_only: bool,
     export_elsewhere: Option<PathBuf>,
     exporting: bool,
@@ -594,7 +597,7 @@ impl App {
             practice_input: silent,
             problem: None,
             notice: None,
-            export_split: false,
+            export: settings.export,
             export_range_only: false,
             export_elsewhere: None,
             exporting: false,
@@ -1737,7 +1740,13 @@ impl App {
                     self.overlay = Overlay::Export;
                 }
             }
-            Message::ExportSplit(split) => self.export_split = split,
+            Message::ExportSplit(split) => self.choose_export(|choices| choices.split = split),
+            Message::ExportFormatChosen(format) => self.choose_export(|choices| choices.format = format),
+            Message::ExportDither(dither) => self.choose_export(|choices| match choices.format.bits() {
+                Some(16) => choices.dither_16 = dither,
+                _ => choices.dither_24 = dither,
+            }),
+            Message::ExportNormaliseChosen(normalise) => self.choose_export(|choices| choices.normalise = normalise),
             Message::ExportRangeOnly(range_only) => self.export_range_only = range_only,
             Message::ExportElsewhere => return self.pick_export_folder(),
             Message::ExportFolderPicked(folder) => {
@@ -1749,7 +1758,8 @@ impl App {
             Message::Exported(result) => {
                 self.exporting = false;
                 match result {
-                    Ok(folder) => self.notice = Some(format!("Exported to {}", folder.display())),
+                    Ok((folder, None)) => self.notice = Some(format!("Exported to {}", folder.display())),
+                    Ok((folder, Some(note))) => self.notice = Some(format!("Exported to {}. {note}", folder.display())),
                     Err(why) => self.problem = Some(format!("Could not export: {why}")),
                 }
             }

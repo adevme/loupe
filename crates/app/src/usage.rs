@@ -215,6 +215,7 @@ mod tests {
             hear_input: true,
             snap: true,
             audio: loupe_engine::Device::default(),
+            export: settings::ExportChoices::from_settings(|_| None),
         };
         let (usage, told) = Usage::begin(&fresh);
         assert!(told, "the notice should be shown on the first run");
