@@ -60,6 +60,8 @@ pub fn arc(centre: Point, radius: f32, from: f32, to: f32) -> Path {
 pub fn hertz(hz: f32) -> String {
     if hz >= 1000.0 {
         format!("{:.2} kHz", hz / 1000.0)
+    } else if hz < 10.0 {
+        format!("{hz:.1} Hz")
     } else {
         format!("{hz:.0} Hz")
     }
