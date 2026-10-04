@@ -3,7 +3,7 @@ use iced::Element;
 use loupe_engine::TrackId;
 use loupe_stock_ui::{
     Change, ChorusEditor, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, GateEditor, LimiterEditor,
-    Look, MeterEditor, MultibandEditor, ReverbEditor, SaturationEditor, TransientEditor, TuneEditor,
+    Look, MeterEditor, MultibandEditor, ReverbEditor, SaturationEditor, TransientEditor, TuneEditor, KeyEditor, KeyMessage,
 };
 
 use crate::racks::Peek;
@@ -23,6 +23,7 @@ pub enum Face {
     Meter(Box<MeterEditor>),
     Multiband(Box<MultibandEditor>),
     Tune(Box<TuneEditor>),
+    Key(Box<KeyEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +57,7 @@ impl Window {
             10 => Face::Meter(Box::new(MeterEditor::new(peek.meter.clone(), look))),
             11 => Face::Multiband(Box::new(MultibandEditor::new(peek.history.clone(), look))),
             12 => Face::Tune(Box::new(TuneEditor::new(peek.history.clone(), look))),
+            13 => Face::Key(Box::new(KeyEditor::new(peek.findings.clone(), look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -73,6 +75,7 @@ impl Window {
                 Face::Meter(editor) => editor.load(values),
                 Face::Multiband(editor) => editor.load(values),
                 Face::Tune(editor) => editor.load(values),
+                Face::Key(_) => {}
             }
         }
         Some(Self { spot, slot, name: name.to_string(), face })
@@ -89,6 +92,7 @@ impl Window {
             Face::Meter(editor) => editor.tick(),
             Face::Multiband(editor) => editor.tick(),
             Face::Tune(editor) => editor.tick(),
+            Face::Key(editor) => editor.tick(),
             _ => {}
         }
     }
@@ -108,6 +112,21 @@ impl Window {
             Face::Meter(editor) => editor.update(change),
             Face::Multiband(editor) => editor.update(change),
             Face::Tune(editor) => editor.update(change),
+            Face::Key(_) => Vec::new(),
+        }
+    }
+
+    pub fn told_key(&mut self, message: KeyMessage) -> Option<(Option<f32>, Option<u8>)> {
+        let Face::Key(editor) = &mut self.face else { return None };
+        let send = message == KeyMessage::Send;
+        editor.update(message);
+        send.then(|| editor.chosen())
+    }
+
+    pub fn key_editor(&mut self) -> Option<&mut KeyEditor> {
+        match &mut self.face {
+            Face::Key(editor) => Some(editor),
+            _ => None,
         }
     }
 
@@ -133,6 +152,7 @@ impl Window {
             Face::Meter(editor) => editor.view().map(Message::StockTurned),
             Face::Multiband(editor) => editor.view().map(Message::StockTurned),
             Face::Tune(editor) => editor.view().map(Message::StockTurned),
+            Face::Key(editor) => editor.view().map(Message::KeyTold),
         }
     }
 }
