@@ -1,7 +1,7 @@
 use iced::Element;
 
 use loupe_engine::TrackId;
-use loupe_stock_ui::{Change, CompressorEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock_ui::{Change, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 use crate::racks::Peek;
 use crate::{App, Message};
@@ -12,6 +12,7 @@ pub enum Face {
     Limiter(Box<LimiterEditor>),
     Delay(Box<DelayEditor>),
     Reverb(Box<ReverbEditor>),
+    Deesser(Box<DeesserEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +37,7 @@ impl Window {
             2 => Face::Limiter(Box::new(LimiterEditor::new(peek.history.clone(), look))),
             3 => Face::Delay(Box::new(DelayEditor::new(bpm, look))),
             4 => Face::Reverb(Box::new(ReverbEditor::new(look))),
+            5 => Face::Deesser(Box::new(DeesserEditor::new(peek.history.clone(), look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -45,6 +47,7 @@ impl Window {
                 Face::Limiter(editor) => editor.load(values),
                 Face::Delay(editor) => editor.load(values),
                 Face::Reverb(editor) => editor.load(values),
+                Face::Deesser(editor) => editor.load(values),
             }
         }
         Some(Self { spot, slot, name: name.to_string(), face })
@@ -55,6 +58,7 @@ impl Window {
             Face::Eq(editor) => editor.tick(),
             Face::Compressor(editor) => editor.tick(),
             Face::Limiter(editor) => editor.tick(),
+            Face::Deesser(editor) => editor.tick(),
             _ => {}
         }
     }
@@ -66,6 +70,7 @@ impl Window {
             Face::Limiter(editor) => editor.update(change),
             Face::Delay(editor) => editor.update(change),
             Face::Reverb(editor) => editor.update(change),
+            Face::Deesser(editor) => editor.update(change),
         }
     }
 
@@ -83,6 +88,7 @@ impl Window {
             Face::Limiter(editor) => editor.view().map(Message::StockTurned),
             Face::Delay(editor) => editor.view().map(Message::StockTurned),
             Face::Reverb(editor) => editor.view().map(Message::StockTurned),
+            Face::Deesser(editor) => editor.view().map(Message::StockTurned),
         }
     }
 }

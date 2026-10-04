@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length, Subscription, Task, Theme};
-use loupe_stock::{Compressor, Delay, Effect, Equalizer, Limiter, Reverb};
-use loupe_stock_ui::{Change, CompressorEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock::{Compressor, Deesser, Delay, Effect, Equalizer, Limiter, Reverb};
+use loupe_stock_ui::{Change, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
 
 const RATE: f32 = 48_000.0;
 const BPM: f32 = 120.0;
 const FRAMES_PER_TICK: usize = 768;
-const TABS: [&str; 5] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb"];
+const TABS: [&str; 6] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser"];
 
 struct Beat {
     clock: u64,
@@ -55,11 +55,13 @@ struct Preview {
     limiter: Limiter,
     delay: Delay,
     reverb: Reverb,
+    deesser: Deesser,
     eq_editor: EqEditor,
     compressor_editor: CompressorEditor,
     limiter_editor: LimiterEditor,
     delay_editor: DelayEditor,
     reverb_editor: ReverbEditor,
+    deesser_editor: DeesserEditor,
     look: Look,
 }
 
@@ -79,7 +81,8 @@ impl Preview {
         let mut limiter = Limiter::new();
         let mut delay = Delay::new();
         let mut reverb = Reverb::new();
-        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb] {
+        let mut deesser = Deesser::new();
+        for effect in [&mut eq as &mut dyn Effect, &mut compressor, &mut limiter, &mut delay, &mut reverb, &mut deesser] {
             effect.prepare(RATE);
             effect.set_tempo(BPM);
         }
@@ -92,11 +95,13 @@ impl Preview {
             limiter_editor: LimiterEditor::new(Some(limiter.history()), look),
             delay_editor: DelayEditor::new(BPM, look),
             reverb_editor: ReverbEditor::new(look),
+            deesser_editor: DeesserEditor::new(Some(deesser.history()), look),
             eq,
             compressor,
             limiter,
             delay,
             reverb,
+            deesser,
             look,
         };
         (preview, Task::none())
@@ -108,7 +113,8 @@ impl Preview {
             1 => &mut self.compressor,
             2 => &mut self.limiter,
             3 => &mut self.delay,
-            _ => &mut self.reverb,
+            4 => &mut self.reverb,
+            _ => &mut self.deesser,
         }
     }
 
@@ -125,7 +131,8 @@ impl Preview {
                     1 => self.compressor_editor.update(change),
                     2 => self.limiter_editor.update(change),
                     3 => self.delay_editor.update(change),
-                    _ => self.reverb_editor.update(change),
+                    4 => self.reverb_editor.update(change),
+                    _ => self.deesser_editor.update(change),
                 };
                 for (index, value) in changes {
                     self.effect().set(index, value);
@@ -138,6 +145,7 @@ impl Preview {
                     0 => self.eq_editor.tick(),
                     1 => self.compressor_editor.tick(),
                     2 => self.limiter_editor.tick(),
+                    5 => self.deesser_editor.tick(),
                     _ => {}
                 }
             }
@@ -172,7 +180,8 @@ impl Preview {
             1 => self.compressor_editor.view().map(Message::Knob),
             2 => self.limiter_editor.view().map(Message::Knob),
             3 => self.delay_editor.view().map(Message::Knob),
-            _ => self.reverb_editor.view().map(Message::Knob),
+            4 => self.reverb_editor.view().map(Message::Knob),
+            _ => self.deesser_editor.view().map(Message::Knob),
         };
         column![bar, body].into()
     }

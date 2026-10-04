@@ -1,5 +1,6 @@
 mod biquad;
 mod compressor;
+mod deesser;
 mod delay;
 mod eq;
 mod history;
@@ -11,6 +12,7 @@ mod smooth;
 pub use biquad::{Coefficients, Shape};
 pub use compressor::{Compressor, Curve, STYLES};
 pub use delay::{echo_seconds, Delay, NOTES};
+pub use deesser::Deesser;
 pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use scope::Scope;
@@ -133,7 +135,7 @@ pub trait Effect: Send {
     }
 }
 
-pub const NAMES: [&str; 5] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb"];
+pub const NAMES: [&str; 6] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser"];
 
 pub fn make(name: &str) -> Option<Box<dyn Effect>> {
     Some(match name {
@@ -142,6 +144,7 @@ pub fn make(name: &str) -> Option<Box<dyn Effect>> {
         "Loupe Limiter" => Box::new(Limiter::new()),
         "Loupe Delay" => Box::new(Delay::new()),
         "Loupe Reverb" => Box::new(Reverb::new()),
+        "Loupe De-esser" => Box::new(Deesser::new()),
         _ => return None,
     })
 }
