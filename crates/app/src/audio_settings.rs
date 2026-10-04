@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::fmt;
 
 use iced::futures::channel::oneshot;
-use iced::widget::{column, pick_list, row, text};
+use iced::widget::{column, row, text};
 use iced::{Element, Length, Task};
 use loupe_engine::{milliseconds, Device, Engine, Output, SavedProject};
 
 use crate::files::{read_text, Opened};
+use crate::theme;
 use crate::{settings, App, Message};
 
 pub const SYSTEM_OUTPUT: &str = "System default";
@@ -194,18 +195,18 @@ impl App {
         let dim = |words: String| text(words).size(12).color(palette.text_dim);
         column![
             label("Driver"),
-            pick_list(lists.drivers.clone(), Some(driver), Message::AudioDriverChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+            theme::picker(palette, lists.drivers.clone(), Some(driver), Message::AudioDriverChosen).width(Length::Fill),
             label("Output"),
-            pick_list(lists.outputs.clone(), Some(output), Message::AudioOutputChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+            theme::picker(palette, lists.outputs.clone(), Some(output), Message::AudioOutputChosen).width(Length::Fill),
             row![
                 column![
                     label("Sample rate"),
-                    pick_list(lists.rates.clone(), Some(Rate(self.audio.rate)), Message::AudioRateChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+                    theme::picker(palette, lists.rates.clone(), Some(Rate(self.audio.rate)), Message::AudioRateChosen).width(Length::Fill),
                 ]
                 .spacing(8),
                 column![
                     label("Buffer size"),
-                    pick_list(buffers, Some(Buffer { size: self.audio.buffer, rate }), Message::AudioBufferChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+                    theme::picker(palette, buffers, Some(Buffer { size: self.audio.buffer, rate }), Message::AudioBufferChosen).width(Length::Fill),
                 ]
                 .spacing(8),
             ]

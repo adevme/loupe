@@ -1,8 +1,9 @@
-use iced::widget::{button, checkbox, column, container, pick_list, row, scrollable, slider, text};
+use iced::widget::{button, checkbox, column, container, row, scrollable, slider, text};
 use iced::{Alignment, Element, Length};
 use loupe_engine::TrackId;
 
 use crate::clip_window::TrackChoice;
+use crate::theme;
 use crate::{rule, App, Message};
 
 impl App {
@@ -25,12 +26,10 @@ impl App {
         };
         let goes_to = row![
             text("Goes into").size(12.5).color(palette.text_dim),
-            pick_list(homes, Some(home), move |choice: TrackChoice| Message::SetTrackParent {
+            theme::picker(palette, homes, Some(home), move |choice: TrackChoice| Message::SetTrackParent {
                 track: from,
                 parent: (choice.id != TrackId(0)).then_some(choice.id),
-            })
-            .text_size(13)
-            .padding([5, 10]),
+            }),
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -108,10 +107,8 @@ impl App {
         let adder: Element<'_, Message> = if choices.is_empty() {
             text("Nothing left to send to.").size(12.5).color(palette.text_dim).into()
         } else {
-            pick_list(choices, None::<TrackChoice>, move |choice| Message::AddSend { from, to: choice.id })
+            theme::picker(palette, choices, None::<TrackChoice>, move |choice| Message::AddSend { from, to: choice.id })
                 .placeholder("Send to…")
-                .text_size(13)
-                .padding([6, 10])
                 .into()
         };
         container(

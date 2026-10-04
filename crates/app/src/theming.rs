@@ -1,4 +1,4 @@
-use iced::widget::{button, column, pick_list, row, text};
+use iced::widget::{button, column, row, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::theme::{self, Palette};
@@ -47,7 +47,7 @@ impl App {
                 .size(12)
                 .color(palette.text_dim),
             row![
-                pick_list(names, Some(current), Message::ThemeChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+                theme::picker(palette, names, Some(current), Message::ThemeChosen).width(Length::Fill),
                 button(text("Open folder").size(12.5).font(palette.medium))
                     .padding([6, 12])
                     .style(move |_, status| palette.outlined(status))

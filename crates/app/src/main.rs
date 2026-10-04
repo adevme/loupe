@@ -52,7 +52,7 @@ use iced::widget::canvas::Cache;
 use iced::advanced::widget::operation::Focusable;
 use iced::advanced::widget::{Id, Operation};
 use iced::widget::{
-    button, canvas, column, container, horizontal_space, pick_list, progress_bar, row, slider, stack, text,
+    button, canvas, column, container, horizontal_space, progress_bar, row, slider, stack, text,
     text_input, Space,
 };
 use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
@@ -2893,7 +2893,7 @@ impl App {
         let recording = column![
             text("Recording input").size(13).font(palette.medium),
             text("The device armed tracks record from.").size(12).color(palette.text_dim),
-            pick_list(inputs, Some(current_input), Message::InputChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+            theme::picker(palette, inputs, Some(current_input), Message::InputChosen).width(Length::Fill),
             text("MIDI keyboards").size(13).font(palette.medium),
             text(self.keyboards_found()).size(12).color(palette.text_dim),
             self.midi_picker(),
@@ -2904,10 +2904,10 @@ impl App {
                 .text_size(13),
             text("Count in").size(13).font(palette.medium),
             text("Bars of clicks before recording starts, when Loupe is stopped. The take begins where the playhead was.").size(12).color(palette.text_dim),
-            pick_list(COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).text_size(13).padding([5, 10]).width(160),
+            theme::picker(palette, COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).width(160),
             text("Pre-roll").size(13).font(palette.medium),
             text("With Punch on, how many bars play before the marked part, so you can catch the beat.").size(12).color(palette.text_dim),
-            pick_list(COUNT_INS, Some(CountIn(self.preroll_bars)), Message::PrerollChosen).text_size(13).padding([5, 10]).width(160),
+            theme::picker(palette, COUNT_INS, Some(CountIn(self.preroll_bars)), Message::PrerollChosen).width(160),
         ]
         .spacing(8);
 
@@ -2927,7 +2927,8 @@ impl App {
             SettingsTab::Audio => column![self.audio_settings()],
             SettingsTab::Privacy => column![self.privacy_settings(), rule(palette), self.update_settings()].spacing(16),
         };
-        let body = column![tabs, rule(palette), container(page).height(SETTINGS_PAGE_HEIGHT)].spacing(14);
+        let scrolling = iced::widget::scrollable(container(page).padding(iced::Padding::ZERO.right(6))).height(SETTINGS_PAGE_HEIGHT);
+        let body = column![tabs, rule(palette), scrolling].spacing(14);
         self.window("Settings".to_string(), body.into(), 560.0)
     }
 

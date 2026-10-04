@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use iced::widget::{button, container, slider, text_input};
+use iced::widget::overlay::menu;
+use iced::widget::{button, container, pick_list, slider, text_input};
 use iced::{font, Background, Border, Color, Font, Theme};
 
 use crate::icons;
@@ -763,6 +764,31 @@ impl Palette {
         }
     }
 
+    pub fn picker(&self, status: pick_list::Status) -> pick_list::Style {
+        let border = match status {
+            pick_list::Status::Opened => self.accent,
+            pick_list::Status::Hovered => self.hover,
+            pick_list::Status::Active => self.line,
+        };
+        pick_list::Style {
+            background: Background::Color(self.background),
+            border: Border { color: border, width: self.border_width.max(1.0), radius: self.corner.into() },
+            text_color: self.text,
+            placeholder_color: self.text_faint,
+            handle_color: self.text_dim,
+        }
+    }
+
+    pub fn picker_menu(&self) -> menu::Style {
+        menu::Style {
+            background: Background::Color(self.panel),
+            border: Border { color: self.hover, width: self.border_width.max(1.0), radius: (self.corner + 2.0).into() },
+            text_color: self.text,
+            selected_text_color: self.on_accent,
+            selected_background: Background::Color(self.accent),
+        }
+    }
+
     pub fn slider(&self, status: slider::Status) -> slider::Style {
         let handle = match status {
             slider::Status::Active => self.text,
@@ -782,6 +808,29 @@ impl Palette {
             },
         }
     }
+}
+
+pub const PICKER_TEXT_SIZE: f32 = 13.0;
+pub const PICKER_PADDING: [u16; 2] = [6, 10];
+
+pub fn picker<'a, T, L, V, Message>(
+    palette: Palette,
+    options: L,
+    selected: Option<V>,
+    on_select: impl Fn(T) -> Message + 'a,
+) -> pick_list::PickList<'a, T, L, V, Message, Theme, iced::Renderer>
+where
+    T: ToString + PartialEq + Clone + 'a,
+    L: std::borrow::Borrow<[T]> + 'a,
+    V: std::borrow::Borrow<T> + 'a,
+    Message: Clone + 'a,
+{
+    pick_list(options, selected, on_select)
+        .text_size(PICKER_TEXT_SIZE)
+        .font(palette.ui)
+        .padding(PICKER_PADDING)
+        .style(move |_: &Theme, status| palette.picker(status))
+        .menu_style(move |_: &Theme| palette.picker_menu())
 }
 
 fn lightness(color: Color) -> f32 {

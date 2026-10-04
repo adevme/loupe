@@ -2,10 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use iced::futures::channel::oneshot;
-use iced::widget::{button, checkbox, column, horizontal_space, pick_list, row, text};
+use iced::widget::{button, checkbox, column, horizontal_space, row, text};
 use iced::{Alignment, Element, Length, Task};
 use loupe_engine::{next_version_folder, ExportPlan, Format, Normalise, SavedProject};
 
+use crate::theme;
 use crate::{App, Message, Overlay};
 
 const EXPORTS_FOLDER: &str = "Exports";
@@ -80,14 +81,12 @@ impl App {
             row![
                 column![
                     label("Format"),
-                    pick_list(Format::ALL, Some(chosen.format), Message::ExportFormatChosen).text_size(13).padding([5, 10]).width(Length::Fill),
+                    theme::picker(palette, Format::ALL, Some(chosen.format), Message::ExportFormatChosen).width(Length::Fill),
                 ]
                 .spacing(8),
                 column![
                     label("Normalise"),
-                    pick_list(normalise_choices(chosen.normalise), Some(chosen.normalise), Message::ExportNormaliseChosen)
-                        .text_size(13)
-                        .padding([5, 10])
+                    theme::picker(palette, normalise_choices(chosen.normalise), Some(chosen.normalise), Message::ExportNormaliseChosen)
                         .width(Length::Fill),
                 ]
                 .spacing(8),

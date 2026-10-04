@@ -1,10 +1,11 @@
 use std::fmt;
 
-use iced::widget::{button, column, pick_list, row, text};
+use iced::widget::{button, column, row, text};
 use iced::{Alignment, Element};
 use loupe_engine::{ClipId, Frames, TrackId};
 
 use crate::mixer::Level;
+use crate::theme;
 use crate::{icon, rule, App, LoopRange, Message};
 
 const LABEL_WIDTH: f32 = 90.0;
@@ -60,9 +61,7 @@ impl App {
         let fields = column![
             row![
                 label("Track"),
-                pick_list(choices, Some(current), move |choice: TrackChoice| Message::ClipToTrack(id, choice.id))
-                    .text_size(13)
-                    .padding([5, 10]),
+                theme::picker(palette, choices, Some(current), move |choice: TrackChoice| Message::ClipToTrack(id, choice.id)),
             ]
             .align_y(Alignment::Center),
             row![
