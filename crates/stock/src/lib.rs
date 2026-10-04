@@ -10,6 +10,7 @@ mod reverb;
 mod saturation;
 mod scope;
 mod smooth;
+mod transient;
 
 pub use biquad::{Coefficients, Shape};
 pub use chorus::{spread as chorus_spread, sweep as chorus_sweep, Chorus, MODES as CHORUS_MODES};
@@ -19,6 +20,7 @@ pub use delay::{echo_seconds, Delay, NOTES};
 pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use limiter::Limiter;
+pub use transient::Transient;
 pub use reverb::{decay_seconds, Reverb};
 pub use saturation::{curve_of as saturation_curve, Saturation, STYLES as SATURATION_STYLES};
 pub use scope::Scope;
@@ -139,7 +141,7 @@ pub trait Effect: Send {
     }
 }
 
-pub const NAMES: [&str; 8] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus"];
+pub const NAMES: [&str; 9] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient"];
 
 pub fn make(name: &str) -> Option<Box<dyn Effect>> {
     Some(match name {
@@ -151,6 +153,7 @@ pub fn make(name: &str) -> Option<Box<dyn Effect>> {
         "Loupe De-esser" => Box::new(Deesser::new()),
         "Loupe Saturation" => Box::new(Saturation::new()),
         "Loupe Chorus" => Box::new(Chorus::new()),
+        "Loupe Transient" => Box::new(Transient::new()),
         _ => return None,
     })
 }

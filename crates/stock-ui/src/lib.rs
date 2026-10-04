@@ -10,6 +10,7 @@ mod look;
 mod reverb_view;
 mod saturation_view;
 mod spectrum;
+mod transient_view;
 
 pub use chorus_view::ChorusEditor;
 pub use compressor_view::CompressorEditor;
@@ -21,3 +22,4 @@ pub use limiter_view::LimiterEditor;
 pub use look::Look;
 pub use reverb_view::ReverbEditor;
 pub use saturation_view::SaturationEditor;
+pub use transient_view::TransientEditor;

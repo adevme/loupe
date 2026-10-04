@@ -68,11 +68,35 @@ pub(crate) struct Gatherer {
     loudest_in: f32,
     loudest_out: f32,
     lowest_gain: f32,
+    widest_db: f32,
 }
 
 impl Gatherer {
+    /// Empty for the next moment, keeping how many samples one moment lasts.
+    fn start_again(&mut self) {
+        self.count = 0;
+        self.loudest_in = 0.0;
+        self.loudest_out = 0.0;
+        self.lowest_gain = 1.0;
+        self.widest_db = 0.0;
+    }
+
     pub(crate) fn new(rate: f32) -> Self {
-        Self { every: ((rate / MOMENTS_PER_SECOND) as usize).max(1), count: 0, loudest_in: 0.0, loudest_out: 0.0, lowest_gain: 1.0 }
+        Self { every: ((rate / MOMENTS_PER_SECOND) as usize).max(1), count: 0, loudest_in: 0.0, loudest_out: 0.0, lowest_gain: 1.0, widest_db: 0.0 }
+    }
+
+    #[inline]
+    pub(crate) fn hear_change(&mut self, history: &History, input: f32, output: f32, change_db: f32) {
+        self.loudest_in = self.loudest_in.max(input);
+        self.loudest_out = self.loudest_out.max(output);
+        if change_db.abs() > self.widest_db.abs() {
+            self.widest_db = change_db;
+        }
+        self.count += 1;
+        if self.count >= self.every {
+            history.push(Moment { input: self.loudest_in, output: self.loudest_out, reduction: self.widest_db });
+            self.start_again();
+        }
     }
 
     #[inline]
@@ -87,7 +111,7 @@ impl Gatherer {
                 output: self.loudest_out,
                 reduction: crate::db_of(self.lowest_gain),
             });
-            *self = Self { every: self.every, ..Self::new(0.0) };
+            self.start_again();
         }
     }
 }

@@ -3,7 +3,7 @@ use iced::Element;
 use loupe_engine::TrackId;
 use loupe_stock_ui::{
     Change, ChorusEditor, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look,
-    ReverbEditor, SaturationEditor,
+    ReverbEditor, SaturationEditor, TransientEditor,
 };
 
 use crate::racks::Peek;
@@ -18,6 +18,7 @@ pub enum Face {
     Deesser(Box<DeesserEditor>),
     Saturation(Box<SaturationEditor>),
     Chorus(Box<ChorusEditor>),
+    Transient(Box<TransientEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +46,7 @@ impl Window {
             5 => Face::Deesser(Box::new(DeesserEditor::new(peek.history.clone(), look))),
             6 => Face::Saturation(Box::new(SaturationEditor::new(look))),
             7 => Face::Chorus(Box::new(ChorusEditor::new(look))),
+            8 => Face::Transient(Box::new(TransientEditor::new(peek.history.clone(), look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -57,6 +59,7 @@ impl Window {
                 Face::Deesser(editor) => editor.load(values),
                 Face::Saturation(editor) => editor.load(values),
                 Face::Chorus(editor) => editor.load(values),
+                Face::Transient(editor) => editor.load(values),
             }
         }
         Some(Self { spot, slot, name: name.to_string(), face })
@@ -68,6 +71,7 @@ impl Window {
             Face::Compressor(editor) => editor.tick(),
             Face::Limiter(editor) => editor.tick(),
             Face::Deesser(editor) => editor.tick(),
+            Face::Transient(editor) => editor.tick(),
             _ => {}
         }
     }
@@ -82,6 +86,7 @@ impl Window {
             Face::Deesser(editor) => editor.update(change),
             Face::Saturation(editor) => editor.update(change),
             Face::Chorus(editor) => editor.update(change),
+            Face::Transient(editor) => editor.update(change),
         }
     }
 
@@ -102,6 +107,7 @@ impl Window {
             Face::Deesser(editor) => editor.view().map(Message::StockTurned),
             Face::Saturation(editor) => editor.view().map(Message::StockTurned),
             Face::Chorus(editor) => editor.view().map(Message::StockTurned),
+            Face::Transient(editor) => editor.view().map(Message::StockTurned),
         }
     }
 }
