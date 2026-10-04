@@ -1625,6 +1625,7 @@ impl App {
             }
             Message::NewBlank => {
                 self.replace_project(Project::new(self.project.rate), HashMap::new());
+                self.overlay = Overlay::None;
                 self.screen = Screen::Song;
             }
             Message::NewFromTemplate(template) => return self.read_project(template, true),
@@ -2478,6 +2479,30 @@ impl App {
         iced::widget::opaque(iced::widget::center(card).style(move |_| palette.backdrop()))
     }
 
+    pub(crate) fn file_button(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let file_menu_open = self.overlay == Overlay::FileMenu;
+        button(
+            row![text("File").size(13).font(palette.medium), icon("chevron-down", 12.0)]
+                .spacing(5)
+                .align_y(Alignment::Center),
+        )
+        .padding([6, 10])
+        .style(move |_, status| palette.toggled(file_menu_open, status))
+        .on_press(Message::OpenFileMenu)
+        .into()
+    }
+
+    pub(crate) fn help_button(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let help_menu_open = self.overlay == Overlay::HelpMenu;
+        button(text("Help").size(13).font(palette.medium))
+            .padding([6, 10])
+            .style(move |_, status| palette.toggled(help_menu_open, status))
+            .on_press(Message::OpenHelpMenu)
+            .into()
+    }
+
     fn transport(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let seconds = self.playhead as f64 / self.project.rate as f64;
@@ -2530,27 +2555,13 @@ impl App {
             .width(46)
             .style(move |_, status| palette.field(status));
 
-        let file_menu_open = self.overlay == Overlay::FileMenu;
         let mixer_open = self.mixer_open;
-        let file = button(
-            row![text("File").size(13).font(palette.medium), icon("chevron-down", 12.0)]
-                .spacing(5)
-                .align_y(Alignment::Center),
-        )
-        .padding([6, 10])
-        .style(move |_, status| palette.toggled(file_menu_open, status))
-        .on_press(Message::OpenFileMenu);
 
         let scripts_menu_open = self.overlay == Overlay::ScriptsMenu;
         let scripts = button(text("Scripts").size(13).font(palette.medium))
             .padding([6, 10])
             .style(move |_, status| palette.toggled(scripts_menu_open, status))
             .on_press(Message::OpenScriptsMenu);
-        let help_menu_open = self.overlay == Overlay::HelpMenu;
-        let help = button(text("Help").size(13).font(palette.medium))
-            .padding([6, 10])
-            .style(move |_, status| palette.toggled(help_menu_open, status))
-            .on_press(Message::OpenHelpMenu);
 
         let mixer = button(container(icon("sliders-vertical", 15.0)).center(30))
             .padding(0)
@@ -2607,7 +2618,7 @@ impl App {
             (BarItem::Settings, icon_button(palette, "settings", Some(Message::OpenSettings))),
             (BarItem::Import, import.into()),
         ];
-        let mut bar = row![file, scripts, help, Space::with_width(6)].spacing(8).align_y(Alignment::Center);
+        let mut bar = row![self.file_button(), scripts, self.help_button(), Space::with_width(6)].spacing(8).align_y(Alignment::Center);
         for item in palette.top_bar_items() {
             let piece = match item {
                 BarItem::Gap => Some(horizontal_space().into()),

@@ -4,7 +4,7 @@ use iced::widget::{
 use iced::{Alignment, Color, Element, Length, Point};
 use loupe_engine::TrackId;
 
-use crate::{rule, App, Message, Overlay};
+use crate::{rule, App, Message, Overlay, Screen};
 
 const MENU_WIDTH: f32 = 220.0;
 const TALLEST_MENU: f32 = 290.0;
@@ -12,6 +12,7 @@ const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_LEFT: f32 = 14.0;
 const SCRIPTS_MENU_LEFT: f32 = 72.0;
 const HELP_MENU_LEFT: f32 = 148.0;
+const HOME_HELP_MENU_LEFT: f32 = 76.0;
 const MENU_OVERLAPS_BAR: f32 = 8.0;
 pub const ENTRY_ID: &str = "overlay-entry";
 
@@ -26,7 +27,7 @@ impl App {
             Overlay::Export => self.centred(self.export_sheet()),
             Overlay::Clip(clip) => self.centred(self.clip_sheet(*clip)),
             Overlay::FileMenu => self.floating(self.under_the_bar(FILE_MENU_LEFT), self.file_menu()),
-            Overlay::HelpMenu => self.floating(self.under_the_bar(HELP_MENU_LEFT), self.menu(vec![
+            Overlay::HelpMenu => self.floating(self.under_the_bar(self.help_menu_left()), self.menu(vec![
                 self.item("About Loupe", "", Some(Message::OpenAbout)),
             ])),
             Overlay::ScriptsMenu => self.floating(self.under_the_bar(SCRIPTS_MENU_LEFT), self.scripts_menu()),
@@ -58,6 +59,14 @@ impl App {
 
     fn under_the_bar(&self, left: f32) -> Point {
         Point::new(left, self.palette.top_bar_height - MENU_OVERLAPS_BAR)
+    }
+
+    fn help_menu_left(&self) -> f32 {
+        if self.screen == Screen::Home {
+            HOME_HELP_MENU_LEFT
+        } else {
+            HELP_MENU_LEFT
+        }
     }
 
     fn floating<'a>(&self, at: Point, menu: Element<'a, Message>) -> Element<'a, Message> {
@@ -118,6 +127,12 @@ impl App {
     }
 
     fn file_menu(&self) -> Element<'_, Message> {
+        if self.screen == Screen::Home {
+            return self.menu(vec![
+                self.item("New project", "", Some(Message::NewBlank)),
+                self.item("Open project…", "Ctrl+O", Some(Message::OpenProject)),
+            ]);
+        }
         let has_song = !self.project.tracks.is_empty();
         let mut items = vec![self.item("Open project…", "Ctrl+O", Some(Message::OpenProject))];
         if has_song {

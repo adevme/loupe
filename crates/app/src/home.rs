@@ -65,12 +65,18 @@ impl App {
         if let Some(status) = self.status() {
             page = page.push(status);
         }
-        container(container(page).width(Length::Fill).max_width(PAGE_WIDTH))
+        let bar = container(row![self.file_button(), self.help_button()].spacing(8).align_y(Alignment::Center))
+            .padding([0, 16])
+            .height(palette.top_bar_height)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .style(move |_| palette.bar());
+        let page = container(container(page).width(Length::Fill).max_width(PAGE_WIDTH))
             .style(move |_| container::Style { background: Some(palette.background.into()), ..Default::default() })
             .center_x(Length::Fill)
             .padding(iced::Padding { top: PAGE_TOP, right: PAGE_SIDE, bottom: PAGE_SIDE, left: PAGE_SIDE })
-            .height(Length::Fill)
-            .into()
+            .height(Length::Fill);
+        column![bar, rule(palette), page].into()
     }
 }
 
