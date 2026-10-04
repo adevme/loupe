@@ -16,6 +16,12 @@ build their work inside of should outlive whoever started it.
 **Make music reachable for everyone.** Not cheaper. Reachable. Someone with an
 old laptop and something to say should be able to get to the end of a song.
 
+## Branches
+
+`main` is the last release, so building it gives you the same Loupe as the
+downloads. `develop` is where the work goes, and only reaches `main` when a
+version goes out.
+
 ## Licence
 
 Loupe is free software under the [GNU General Public License, version 2](LICENSE)
