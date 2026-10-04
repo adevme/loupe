@@ -1966,6 +1966,8 @@ impl App {
             return;
         };
         if !loupe_plugins::rack::is_built_in(&fx.path) {
+            // The rack is built when the chains settle, which may not have happened yet.
+            self.follow_chains();
             if let Some(mut racks) = self.borrow_racks() {
                 if let Err(why) = racks.show(track, slot) {
                     self.problem = Some(why);
@@ -2846,6 +2848,9 @@ impl App {
             }
             return;
         }
+        // The rack is built when the chains next settle, which may not have happened
+        // yet if the plugin was only just added.
+        self.follow_chains();
         if let Some(mut racks) = self.borrow_racks() {
             if let Err(why) = racks.show_master(slot) {
                 self.problem = Some(why);
