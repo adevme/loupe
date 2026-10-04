@@ -288,7 +288,7 @@ pub struct DocumentControllerInstance {
 pub struct InterfaceConfiguration {
     pub struct_size: usize,
     pub desired_api_generation: i32,
-    pub assert_function_address: *const Option<AssertFunction>,
+    pub assert_function_address: *mut Option<AssertFunction>,
 }
 
 #[repr(C, packed)]

@@ -292,7 +292,7 @@ unsafe extern "C" fn report_assert(category: i32, _problem: *const c_void, diagn
     eprintln!("ARA assert {category}: {said}");
 }
 
-static ASSERT: Option<AssertFunction> = Some(report_assert);
+static mut ASSERT: Option<AssertFunction> = Some(report_assert);
 
 static AUDIO_ACCESS: AudioAccessControllerInterface = AudioAccessControllerInterface {
     struct_size: size_of::<AudioAccessControllerInterface>(),
@@ -375,7 +375,7 @@ impl Document {
         let configuration = InterfaceConfiguration {
             struct_size: size_of::<InterfaceConfiguration>(),
             desired_api_generation: GENERATION_2_0_FINAL.max(lowest),
-            assert_function_address: &ASSERT,
+            assert_function_address: std::ptr::addr_of_mut!(ASSERT),
         };
         let initialize = (*factory).initialize_ara_with_configuration.ok_or("the ARA plugin cannot be started")?;
         initialize(&configuration);

@@ -361,10 +361,9 @@ impl Effect {
     }
 
     pub fn save(&self) -> Result<Vec<u8>, String> {
-        let settings = self.settings()?;
         match self.ara.as_ref() {
-            Some(document) => Ok(pack(&settings, &document.archive_id(), &document.store()?)),
-            None => Ok(settings),
+            Some(document) => Ok(pack(&self.settings().unwrap_or_default(), &document.archive_id(), &document.store()?)),
+            None => self.settings(),
         }
     }
 

@@ -411,6 +411,26 @@ mod tests {
     }
 
     #[test]
+    fn melodyne_edits_on_a_clip_survive_a_save_and_open() {
+        use loupe_engine::{Fx, SavedProject};
+        use loupe_plugins::ara_document::{pack, unpack};
+        let (mut project, id) = project_with_clip("C:\\Songs\\lead.wav");
+        let archive = vec![0u8, 1, 2, 255, b'\n', b'\t', b' '];
+        let state = pack(b"melodyne window", "com.celemony.ara.audiosourcedescription.13", &archive);
+        let fx = Fx { path: PathBuf::from("C:\\VST3\\Melodyne.vst3"), index: 0, name: "Melodyne".into(), bypassed: false, state: state.clone(), record: false };
+        project.apply(Command::AddClipFx { clip: id, fx }).expect("the plugin goes on the clip");
+        let text = SavedProject::capture(&project, |_| None).to_text();
+        let sources = vec![project.sources[0].clone()];
+        let (back, _) = SavedProject::parse(&text).expect("it reads back").build(&sources, 48_000);
+        let clip = back.tracks[0].clips.first().expect("the clip came back");
+        assert_eq!(clip.fx[0].state, state);
+        let unpacked = unpack(&clip.fx[0].state).expect("the edits are still packed in");
+        assert_eq!(unpacked.settings, b"melodyne window");
+        assert_eq!(unpacked.archive, &archive[..]);
+        assert_eq!(region_of(&back, clip), region_of(&project, clip_in(&project, id)));
+    }
+
+    #[test]
     fn audio_without_a_file_has_no_region() {
         let (project, id) = project_with_clip("");
         assert_eq!(region_of(&project, clip_in(&project, id)), None);
