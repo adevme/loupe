@@ -246,6 +246,12 @@ impl Chains for Racks {
         }
     }
 
+    fn automate_master(&mut self, slot: usize, knob: usize, value: f32) {
+        if let Some(rack) = self.master.as_mut() {
+            rack.automate(slot, knob, value);
+        }
+    }
+
     fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {
         let mut out = Vec::new();
         for (id, rack) in self.clips.iter_mut() {

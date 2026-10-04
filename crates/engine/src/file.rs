@@ -545,6 +545,7 @@ impl SavedProject {
                 SavedTarget::TrackFx(track, slot, knob) => {
                     ids.get(track).map(|id| crate::envelope::Target::TrackFx { track: *id, slot, knob })
                 }
+                SavedTarget::MasterFx(slot, knob) => Some(crate::envelope::Target::MasterFx { slot, knob }),
                 SavedTarget::Clip(track, at) => clip_ids.get(&(track, at)).map(|id| crate::envelope::Target::ClipGain(*id)),
                 SavedTarget::ClipFx(track, at, slot, knob) => {
                     clip_ids.get(&(track, at)).map(|id| crate::envelope::Target::ClipFx { clip: *id, slot, knob })
@@ -783,6 +784,33 @@ mod routing_round_trip {
     }
 
     #[test]
+    fn a_master_plugin_knob_can_be_automated_and_comes_back() {
+        let mut p = Project::new(48_000);
+        let fx = crate::model::Fx {
+            path: PathBuf::from("glue.vst3"),
+            index: 0,
+            name: "Glue".into(),
+            bypassed: false,
+            state: Vec::new(),
+        };
+        p.apply(Command::AddMasterFx(fx)).unwrap();
+        let target = crate::envelope::Target::MasterFx { slot: 0, knob: 3 };
+        assert_eq!(p.range_of(target), Some((0.0, 1.0, 0.5)));
+        p.apply(Command::AddEnvelope { target }).unwrap();
+        let point = |at, value| crate::envelope::Point { at, value, shape: crate::envelope::Shape::Linear };
+        p.apply(Command::PutPoint { target, point: point(0, 0.2) }).unwrap();
+        p.apply(Command::PutPoint { target, point: point(48_000, 0.9) }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        assert!(text.contains("masterfx:0:3"));
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        let shape = back.envelope(target).expect("the master envelope came back");
+        assert_eq!(shape.value_at(0), Some(0.2));
+        assert_eq!(shape.value_at(48_000), Some(0.9));
+        // A knob on a plugin that is not there has no range, so no envelope can point at it.
+        assert_eq!(p.range_of(crate::envelope::Target::MasterFx { slot: 4, knob: 0 }), None);
+    }
+
+    #[test]
     fn a_stretched_clip_survives_a_save_and_open() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Loop".into() }) else { panic!() };
@@ -935,6 +963,7 @@ fn target_text(target: crate::envelope::Target, place: &dyn Fn(TrackId) -> usize
         Target::TrackPan(track) => format!("pan:{}", place(track)),
         Target::SendGain { from, to } => format!("send:{}:{}", place(from), place(to)),
         Target::TrackFx { track, slot, knob } => format!("trackfx:{}:{slot}:{knob}", place(track)),
+        Target::MasterFx { slot, knob } => format!("masterfx:{slot}:{knob}"),
         Target::ClipGain(clip) => {
             let (track, at) = spot(clip);
             format!("clip:{track}:{at}")
@@ -953,6 +982,7 @@ pub enum SavedTarget {
     Pan(usize),
     Send(usize, usize),
     TrackFx(usize, usize, usize),
+    MasterFx(usize, usize),
     Clip(usize, usize),
     ClipFx(usize, usize, usize, usize),
 }
@@ -967,6 +997,7 @@ fn target_from(text: &str) -> Option<SavedTarget> {
         "pan" => Some(SavedTarget::Pan(number()?)),
         "send" => Some(SavedTarget::Send(number()?, number()?)),
         "trackfx" => Some(SavedTarget::TrackFx(number()?, number()?, number()?)),
+        "masterfx" => Some(SavedTarget::MasterFx(number()?, number()?)),
         "clip" => Some(SavedTarget::Clip(number()?, number()?)),
         "clipfx" => Some(SavedTarget::ClipFx(number()?, number()?, number()?, number()?)),
         _ => None,
@@ -1000,6 +1031,7 @@ fn where_text(target: &SavedTarget) -> String {
         SavedTarget::Pan(track) => format!("pan:{track}"),
         SavedTarget::Send(from, to) => format!("send:{from}:{to}"),
         SavedTarget::TrackFx(track, slot, knob) => format!("trackfx:{track}:{slot}:{knob}"),
+        SavedTarget::MasterFx(slot, knob) => format!("masterfx:{slot}:{knob}"),
         SavedTarget::Clip(track, at) => format!("clip:{track}:{at}"),
         SavedTarget::ClipFx(track, at, slot, knob) => format!("clipfx:{track}:{at}:{slot}:{knob}"),
     }

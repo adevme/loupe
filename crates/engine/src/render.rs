@@ -68,6 +68,10 @@ pub trait Chains: Send {
         let _ = (clip, slot, knob, value);
     }
 
+    fn automate_master(&mut self, slot: usize, knob: usize, value: f32) {
+        let _ = (slot, knob, value);
+    }
+
     fn show_clip(&mut self, clip: ClipId, slot: usize) -> Result<(), String> {
         let _ = (clip, slot);
         Err("plugin windows are not wired up".into())
@@ -1126,6 +1130,7 @@ fn turn_knobs(project: &Project, at: Frames, racks: &mut (dyn Chains + '_)) {
         match shape.target {
             crate::envelope::Target::TrackFx { track, slot, knob } => racks.automate(track, slot, knob, value),
             crate::envelope::Target::ClipFx { clip, slot, knob } => racks.automate_clip(clip, slot, knob, value),
+            crate::envelope::Target::MasterFx { slot, knob } => racks.automate_master(slot, knob, value),
             _ => {}
         }
     }

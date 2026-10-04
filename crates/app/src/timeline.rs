@@ -1420,6 +1420,10 @@ impl Timeline<'_> {
                     .unwrap_or_default();
                 format!("{name}: {}", self.knob_name(track.0, slot, knob, false))
             }
+            Target::MasterFx { slot, knob } => {
+                let name = self.project.master_fx.get(slot).map(|fx| fx.name.clone()).unwrap_or_default();
+                format!("Master {name}: {}", self.knob_name(crate::MASTER_OWNER, slot, knob, false))
+            }
             Target::ClipGain(_) => "Clip gain".into(),
             Target::ClipFx { clip, slot, knob } => {
                 let name = self

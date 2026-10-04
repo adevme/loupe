@@ -62,6 +62,8 @@ const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif"
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
+/// Stands in for a track id when naming the knobs of a master plugin.
+pub const MASTER_OWNER: u64 = u64::MAX;
 const METER_FALL_PER_TICK: f32 = 0.86;
 const FADER_STEP_DB: f32 = 0.5;
 const MASTER_STEP_PERCENT: f32 = 1.0;
@@ -2136,8 +2138,8 @@ impl App {
                 let (owner, slot, on_clip) = match spot {
                     racks::Spot::Track(track, slot) => (track.0, *slot, false),
                     racks::Spot::Clip(clip, slot) => (clip.0, *slot, true),
-                    // Master knobs are not automatable yet, so they are not named here.
-                    racks::Spot::Master(_) => continue,
+                    // Master has no track id, so it uses one no track can have.
+                    racks::Spot::Master(slot) => (MASTER_OWNER, *slot, false),
                 };
                 for (knob, name) in peek.knobs.iter().enumerate() {
                     self.knob_names.insert((owner, slot, knob, on_clip), name.clone());

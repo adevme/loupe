@@ -254,14 +254,6 @@ impl App {
 impl App {
     pub(crate) fn knob_sheet(&self, spot: crate::stockwin::Spot, slot: usize) -> Element<'_, Message> {
         let palette = self.palette;
-        if spot == crate::stockwin::Spot::Master {
-            // Master plugins run, but their knobs have no envelope target yet.
-            return self.window(
-                "Automate".to_string(),
-                text("Automating master plugins is not built yet.").size(12.5).color(palette.text_dim).into(),
-                360.0,
-            );
-        }
         let (name, where_) = match spot {
             crate::stockwin::Spot::Track(track) => (
                 self.project
@@ -281,7 +273,10 @@ impl App {
                     .unwrap_or_default(),
                 crate::racks::Spot::Clip(clip, slot),
             ),
-            crate::stockwin::Spot::Master => (String::new(), crate::racks::Spot::Master(slot)),
+            crate::stockwin::Spot::Master => (
+                self.project.master_fx.get(slot).map(|fx| format!("Master {}", fx.name)).unwrap_or_default(),
+                crate::racks::Spot::Master(slot),
+            ),
         };
         let knobs = self.peek_at(where_).knobs;
         let heading = text(format!("Automate on {name}")).size(14).font(palette.semibold);
@@ -296,7 +291,7 @@ impl App {
             let target = match spot {
                 crate::stockwin::Spot::Track(track) => loupe_engine::Target::TrackFx { track, slot, knob },
                 crate::stockwin::Spot::Clip(clip) => loupe_engine::Target::ClipFx { clip, slot, knob },
-                crate::stockwin::Spot::Master => continue,
+                crate::stockwin::Spot::Master => loupe_engine::Target::MasterFx { slot, knob },
             };
             let on = self.project.envelope(target).is_some();
             list = list.push(

@@ -287,6 +287,10 @@ impl Project {
                 found.fx.get(slot)?;
                 Some((0.0, 1.0, 0.5))
             }
+            Target::MasterFx { slot, .. } => {
+                self.master_fx.get(slot)?;
+                Some((0.0, 1.0, 0.5))
+            }
         }
     }
 

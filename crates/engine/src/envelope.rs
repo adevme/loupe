@@ -7,6 +7,7 @@ pub enum Target {
     MasterGain,
     SendGain { from: TrackId, to: TrackId },
     TrackFx { track: TrackId, slot: usize, knob: usize },
+    MasterFx { slot: usize, knob: usize },
     ClipGain(ClipId),
     ClipFx { clip: ClipId, slot: usize, knob: usize },
 }
