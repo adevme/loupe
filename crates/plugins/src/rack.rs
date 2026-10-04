@@ -203,7 +203,7 @@ impl Rack {
         self.slots.iter().any(|slot| slot.on_its_way())
     }
 
-    pub fn open_waiting(&mut self) {
+    pub fn open_waiting(&mut self) -> Vec<String> {
         let waiting: Vec<usize> = self
             .slots
             .iter()
@@ -211,10 +211,14 @@ impl Rack {
             .filter(|(_, slot)| slot.wanted_open && slot.host.is_some())
             .map(|(at, _)| at)
             .collect();
+        let mut troubles = Vec::new();
         for slot in waiting {
             self.slots[slot].wanted_open = false;
-            let _ = self.tell(slot, Ask::Show);
+            if let Err(why) = self.tell(slot, Ask::Show) {
+                troubles.push(why);
+            }
         }
+        troubles
     }
 
     pub fn show(&mut self, slot: usize) -> Result<(), String> {
