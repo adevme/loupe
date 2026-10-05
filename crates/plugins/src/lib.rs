@@ -8,6 +8,7 @@ pub mod vst3;
 pub mod sandbox;
 pub mod presets;
 pub mod au;
+pub mod ceiling;
 pub mod changes;
 pub mod chrome;
 pub mod clap;

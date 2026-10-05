@@ -124,7 +124,21 @@ impl App {
             .padding([4, 8])
             .style(move |_, status| palette.ghost(status))
             .on_press(self.remove_of(spot, slot));
-        let line = row![grip, dot, open, mix, reading, drop].spacing(8).align_y(Alignment::Center);
+        let waiting_for_room: Element<'_, Message> = if self.held_back_at(spot, slot) {
+            row![
+                text("Not loaded").size(11.5).color(palette.text_dim),
+                button(text("Load").size(11.5).font(palette.medium))
+                    .padding([4, 10])
+                    .style(move |_, status| palette.outlined(status))
+                    .on_press(Message::LoadHeldBackPlugin(spot, slot)),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            Space::new(0, 0).into()
+        };
+        let line = row![grip, dot, open, waiting_for_room, mix, reading, drop].spacing(8).align_y(Alignment::Center);
         container(line)
             .padding([4, 6])
             .width(Length::Fill)

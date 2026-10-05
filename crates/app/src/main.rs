@@ -178,6 +178,7 @@ pub enum Message {
     ChainGrab(stockwin::Spot, usize),
     ChainOver(stockwin::Spot, usize),
     ChainDrop,
+    LoadHeldBackPlugin(stockwin::Spot, usize),
     OpenFileMenu,
     OpenHelpMenu,
     OpenScriptsMenu,
@@ -490,6 +491,7 @@ struct App {
     stock: Option<stockwin::Window>,
     fx_drag: Option<(TrackId, usize, usize)>,
     writing: Option<loupe_engine::Writer>,
+    held_back: std::collections::HashSet<(u64, usize, bool)>,
     knob_names: HashMap<(u64, usize, usize, bool), String>,
     hint: Option<&'static str>,
     plugins_opening: bool,
@@ -724,6 +726,7 @@ impl App {
             stock: None,
             fx_drag: None,
             writing: None,
+            held_back: std::collections::HashSet::new(),
             knob_names: HashMap::new(),
             found: Vec::new(),
             scanning: true,
@@ -1259,6 +1262,7 @@ impl App {
                 }
             }
             Message::ChainDrop => self.drop_chain(),
+            Message::LoadHeldBackPlugin(spot, slot) => self.load_held_back_plugin(spot, slot),
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
             Message::OpenScriptsMenu => {
@@ -2406,19 +2410,7 @@ impl App {
         let troubles = racks.follow(&self.project);
         self.note_plugins_for_crashes();
         self.plugins_opening = racks.still_opening();
-        self.knob_names.clear();
-        if let Ok(held) = self.peeks.lock() {
-            for (spot, peek) in held.iter() {
-                let (owner, slot, on_clip) = match spot {
-                    racks::Spot::Track(track, slot) => (track.0, *slot, false),
-                    racks::Spot::Clip(clip, slot) => (clip.0, *slot, true),
-                    racks::Spot::Master(slot) => (MASTER_OWNER, *slot, false),
-                };
-                for (knob, name) in peek.knobs.iter().enumerate() {
-                    self.knob_names.insert((owner, slot, knob, on_clip), name.clone());
-                }
-            }
-        }
+        self.read_peeks();
         if let Some(first) = troubles.first() {
             self.problem = Some(first.clone());
         }
@@ -3198,5 +3190,62 @@ impl App {
         self.plugins_opening = racks.still_opening();
         self.racks = Some(racks);
         self.hand_racks_over();
+        self.read_peeks();
+    }
+
+    fn read_peeks(&mut self) {
+        self.knob_names.clear();
+        self.held_back.clear();
+        let Ok(held) = self.peeks.lock() else { return };
+        for (spot, peek) in held.iter() {
+            let (owner, slot, on_clip) = match spot {
+                racks::Spot::Track(track, slot) => (track.0, *slot, false),
+                racks::Spot::Clip(clip, slot) => (clip.0, *slot, true),
+                racks::Spot::Master(slot) => (MASTER_OWNER, *slot, false),
+            };
+            if peek.held_back {
+                self.held_back.insert((owner, slot, on_clip));
+            }
+            for (knob, name) in peek.knobs.iter().enumerate() {
+                self.knob_names.insert((owner, slot, knob, on_clip), name.clone());
+            }
+        }
+    }
+
+    pub(crate) fn held_back_at(&self, spot: stockwin::Spot, slot: usize) -> bool {
+        let key = match spot {
+            stockwin::Spot::Track(track) => (track.0, slot, false),
+            stockwin::Spot::Clip(clip) => (clip.0, slot, true),
+            stockwin::Spot::Master => (MASTER_OWNER, slot, false),
+        };
+        self.held_back.contains(&key)
+    }
+
+    pub(crate) fn load_held_back_plugin(&mut self, spot: stockwin::Spot, slot: usize) {
+        let Some(mut racks) = self.borrow_racks() else {
+            self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
+            return;
+        };
+        let asked = match spot {
+            stockwin::Spot::Track(track) => racks.load(track, slot),
+            stockwin::Spot::Clip(clip) => racks.load_clip(clip, slot),
+            stockwin::Spot::Master => racks.load_master(slot),
+        };
+        if let Err(why) = asked {
+            self.problem = Some(why);
+        }
+        self.plugins_opening = racks.still_opening();
+        self.racks = Some(racks);
+        self.hand_racks_over();
+        self.read_peeks();
+    }
+}
+
+fn said_as(span: std::time::Duration) -> String {
+    let seconds = span.as_secs();
+    match (seconds / 60, seconds % 60) {
+        (0, seconds) => format!("{seconds}s"),
+        (minutes, _) if minutes >= 10 => format!("{minutes}m"),
+        (minutes, seconds) => format!("{minutes}m {seconds}s"),
     }
 }

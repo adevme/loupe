@@ -29,7 +29,7 @@ pub fn printed_name(take: &Path) -> PathBuf {
 }
 
 pub fn print_take(dry: &Source, take: &Path, want: &[Wanted], rate: u32, host: &Path) -> Result<Source, String> {
-    let mut rack = Rack::new(host.to_path_buf(), rate, BLOCK);
+    let mut rack = Rack::with_room_for(host.to_path_buf(), rate, BLOCK, want.len().max(1));
     let troubles = rack.reconcile(want);
     if !troubles.is_empty() {
         return Err(troubles.join(", "));

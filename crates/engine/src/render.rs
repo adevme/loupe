@@ -37,6 +37,21 @@ pub trait Chains: Send {
         Err("plugin windows are not wired up".into())
     }
 
+    fn load(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
+        let _ = (track, slot);
+        Err("plugins are not wired up".into())
+    }
+
+    fn load_clip(&mut self, clip: ClipId, slot: usize) -> Result<(), String> {
+        let _ = (clip, slot);
+        Err("plugins are not wired up".into())
+    }
+
+    fn load_master(&mut self, slot: usize) -> Result<(), String> {
+        let _ = slot;
+        Err("plugins are not wired up".into())
+    }
+
     fn tweak(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) {
         let _ = (track, slot, knob, value);
     }

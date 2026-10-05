@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::ceiling::{Ceiling, Seat};
 use crate::sandbox::Sandbox;
 use crate::wire::{Ask, Region, Reply};
 
@@ -62,24 +64,32 @@ pub struct Slot {
     pub bypassed: bool,
     pub record: bool,
     pub trouble: Option<String>,
+    pub held_back: bool,
     pub latency: usize,
     pub ara: bool,
     placed: Option<Region>,
     host: Option<Sandbox>,
     built: Option<Box<dyn loupe_stock::Effect>>,
     coming: Option<std::sync::mpsc::Receiver<Arrived>>,
+    queued: Option<Beginning>,
+    kept_state: Vec<u8>,
     wanted_open: bool,
     pub mix: f32,
     dry: Dry,
 }
 
+struct Beginning {
+    state: Vec<u8>,
+    seat: Seat,
+}
+
 impl Slot {
     pub fn working(&self) -> bool {
-        (self.host.is_some() || self.built.is_some() || self.coming.is_some()) && self.trouble.is_none()
+        (self.host.is_some() || self.built.is_some() || self.on_its_way()) && self.trouble.is_none()
     }
 
     pub fn on_its_way(&self) -> bool {
-        self.coming.is_some()
+        self.coming.is_some() || self.queued.is_some()
     }
 
     pub fn built_in(&self) -> bool {
@@ -125,11 +135,24 @@ pub struct Rack {
     slots: Vec<Slot>,
     fallen: Vec<Fallen>,
     region: Option<Region>,
+    ceiling: Arc<Ceiling>,
 }
 
 impl Rack {
     pub fn new(host: PathBuf, rate: u32, block: usize) -> Self {
-        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new(), region: None }
+        Self::sharing(host, rate, block, Ceiling::for_this_computer())
+    }
+
+    pub fn with_room_for(host: PathBuf, rate: u32, block: usize, most: usize) -> Self {
+        Self::sharing(host, rate, block, Ceiling::of(most))
+    }
+
+    pub fn sharing(host: PathBuf, rate: u32, block: usize, ceiling: Arc<Ceiling>) -> Self {
+        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new(), region: None, ceiling }
+    }
+
+    pub fn held_back(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.held_back).count()
     }
 
     pub fn has_fallen(&self) -> bool {
@@ -171,12 +194,15 @@ impl Rack {
             bypassed: false,
             record: false,
             trouble: None,
+            held_back: false,
             latency: 0,
             ara: false,
             placed: None,
             host: None,
             built: None,
             coming: None,
+            queued: None,
+            kept_state: Vec::new(),
             wanted_open: false,
         };
         if is_built_in(&slot.path) {
@@ -275,6 +301,7 @@ impl Rack {
         };
         found.host = None;
         found.trouble = None;
+        found.held_back = false;
         let path = found.path.clone();
         let index = found.index;
         match self.open(&path, index) {
@@ -494,12 +521,15 @@ impl Rack {
                         bypassed: *bypassed,
                         record: *record,
                         trouble: None,
+                        held_back: false,
                         latency: 0,
                         ara: false,
                         placed: None,
                         host: None,
                         built: None,
                         coming: None,
+                        queued: None,
+                        kept_state: Vec::new(),
                         wanted_open: false,
                     };
                     if is_built_in(path) {
@@ -515,21 +545,47 @@ impl Rack {
                             }
                         }
                     } else {
-                        let (done, waiting) = std::sync::mpsc::channel();
-                        let (host, rate, block) = (self.host.clone(), self.rate, self.block);
-                        let (where_from, which, wanted_state) = (path.clone(), *index, state.clone());
-                        let region = self.region.clone();
-                        std::thread::spawn(move || {
-                            let _ = done.send(open_on_a_thread(&host, &where_from, which, rate, block, region.as_ref(), &wanted_state));
-                        });
                         slot.placed = self.region.clone();
-                        slot.coming = Some(waiting);
+                        match self.ceiling.take_a_seat() {
+                            Some(seat) => slot.queued = Some(Beginning { state: state.clone(), seat }),
+                            None => {
+                                slot.held_back = true;
+                                slot.kept_state = state.clone();
+                                slot.trouble = Some(crate::ceiling::NO_ROOM.to_string());
+                            }
+                        }
                     }
                     self.slots.push(slot);
                 }
             }
         }
+        self.start_what_there_is_room_to_start();
         troubles
+    }
+
+    fn start_what_there_is_room_to_start(&mut self) {
+        for at in 0..self.slots.len() {
+            if self.slots[at].queued.is_none() {
+                continue;
+            }
+            let Some(opening) = self.ceiling.may_start_opening() else { return };
+            let Some(Beginning { state, seat }) = self.slots[at].queued.take() else { continue };
+            let (done, waiting) = std::sync::mpsc::channel();
+            let host = self.host.clone();
+            let order = Order {
+                path: self.slots[at].path.clone(),
+                index: self.slots[at].index,
+                rate: self.rate,
+                block: self.block,
+                region: self.slots[at].placed.clone(),
+                state,
+            };
+            std::thread::spawn(move || {
+                let _ = done.send(open_on_a_thread(&host, order, seat));
+                drop(opening);
+            });
+            self.slots[at].coming = Some(waiting);
+        }
     }
 
     fn take_arrivals(&mut self) {
@@ -555,6 +611,7 @@ impl Rack {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
         }
+        self.start_what_there_is_room_to_start();
     }
 
     fn make_built(&self, index: usize) -> Result<Box<dyn loupe_stock::Effect>, String> {
@@ -565,7 +622,30 @@ impl Rack {
     }
 
     fn open(&self, path: &Path, index: usize) -> Result<Opened, String> {
-        open_on_a_thread(&self.host, path, index, self.rate, self.block, self.region.as_ref(), &[]).map_err(|(why, _)| why)
+        let seat = self.ceiling.squeeze_in();
+        let order = Order {
+            path: path.to_path_buf(),
+            index,
+            rate: self.rate,
+            block: self.block,
+            region: self.region.clone(),
+            state: Vec::new(),
+        };
+        open_on_a_thread(&self.host, order, seat).map_err(|(why, _)| why)
+    }
+
+    pub fn load_held_back(&mut self, slot: usize) -> Result<(), String> {
+        let seat = self.ceiling.squeeze_in();
+        let found = self.slots.get_mut(slot).ok_or("there is no such slot")?;
+        if !found.held_back {
+            return Err("that plugin is not waiting for room".into());
+        }
+        let state = std::mem::take(&mut found.kept_state);
+        found.held_back = false;
+        found.trouble = None;
+        found.queued = Some(Beginning { state, seat });
+        self.take_arrivals();
+        Ok(())
     }
 }
 
@@ -754,18 +834,20 @@ mod built_in_tests {
     }
 }
 
-fn open_on_a_thread(
-    host: &Path,
-    path: &Path,
+struct Order {
+    path: PathBuf,
     index: usize,
     rate: u32,
     block: usize,
-    region: Option<&Region>,
-    state: &[u8],
-) -> Arrived {
-    let mut sandbox = Sandbox::start(host).map_err(|why| (why, false))?;
+    region: Option<Region>,
+    state: Vec<u8>,
+}
+
+fn open_on_a_thread(host: &Path, order: Order, seat: Seat) -> Arrived {
+    let Order { path, index, rate, block, region, state } = order;
+    let mut sandbox = Sandbox::start_in_a_seat(host, seat).map_err(|why| (why, false))?;
     if let Some(region) = region {
-        let placed = sandbox.ask(Ask::Region(region.clone())).and_then(|reply| match reply {
+        let placed = sandbox.ask(Ask::Region(region)).and_then(|reply| match reply {
             Reply::Fine => Ok(()),
             Reply::Trouble(why) => Err(why),
             other => Err(format!("the plugin host answered out of turn: {other:?}")),
@@ -779,7 +861,7 @@ fn open_on_a_thread(
         other => Err(format!("the plugin host answered out of turn: {other:?}")),
     });
     let (latency, ara) = loaded.map_err(|why| (why, sandbox.gone()))?;
-    settle(&mut sandbox, state).map_err(|why| (why, sandbox.gone()))?;
+    settle(&mut sandbox, &state).map_err(|why| (why, sandbox.gone()))?;
     Ok(Opened { host: sandbox, latency, ara })
 }
 
@@ -873,6 +955,47 @@ mod fallen_tests {
         play_until_settled(&mut rack);
         assert!(rack.slots()[0].trouble.is_some());
         assert!(!rack.has_fallen());
+    }
+
+    fn settle_within(rack: &mut Rack, how_long: std::time::Duration) {
+        let gave_up = std::time::Instant::now();
+        while rack.slots().iter().any(|slot| slot.on_its_way()) {
+            assert!(gave_up.elapsed() < how_long, "the plugins never settled");
+            rack.ready();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn only_as_many_plugins_as_there_is_room_for_are_loaded() {
+        let script = host("ceiling", "read ask\nprintf 'loaded\\t2\\t2\\t0\\n'\nwhile : ; do sleep 1 ; done\n");
+        let mut rack = Rack::with_room_for(script.0.clone(), 48_000, 64, 2);
+        let want: Vec<Wanted> = (0..5).map(|which| wanted(&format!("Plugin {which}"))).collect();
+        assert!(rack.reconcile(&want).is_empty());
+        settle_within(&mut rack, std::time::Duration::from_secs(20));
+        let loaded = rack.slots().iter().filter(|slot| slot.working()).count();
+        assert_eq!(loaded, 2, "the ceiling holds at two plugins");
+        assert_eq!(rack.held_back(), 3, "the other three say they are not loaded");
+        assert!(rack.slots().iter().filter(|slot| slot.held_back).all(|slot| slot.trouble.as_deref() == Some(crate::ceiling::NO_ROOM)));
+        let waiting = rack.slots().iter().position(|slot| slot.held_back).expect("one is waiting");
+        assert!(rack.load_held_back(waiting).is_ok());
+        settle_within(&mut rack, std::time::Duration::from_secs(20));
+        assert_eq!(rack.slots().iter().filter(|slot| slot.working()).count(), 3, "the one the user asked for came on");
+        assert_eq!(rack.held_back(), 2);
+        assert!(rack.load_held_back(waiting).is_err(), "it is not waiting any more");
+    }
+
+    #[test]
+    fn a_big_project_does_not_start_every_host_at_once() {
+        let script = host("stagger", "read ask\nsleep 1\nprintf 'loaded\\t2\\t2\\t0\\n'\nwhile : ; do sleep 1 ; done\n");
+        let mut rack = Rack::with_room_for(script.0.clone(), 48_000, 64, 16);
+        let want: Vec<Wanted> = (0..16).map(|which| wanted(&format!("Plugin {which}"))).collect();
+        assert!(rack.reconcile(&want).is_empty());
+        let started = rack.slots().iter().filter(|slot| slot.coming.is_some()).count();
+        assert!(started <= 8, "{started} hosts went at once");
+        assert_eq!(rack.slots().iter().filter(|slot| slot.on_its_way()).count(), 16, "the rest are waiting their turn");
+        settle_within(&mut rack, std::time::Duration::from_secs(60));
+        assert_eq!(rack.slots().iter().filter(|slot| slot.working()).count(), 16, "all of them get there in the end");
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub struct Peek {
     pub meter: Option<Arc<Readings>>,
     pub findings: Option<Arc<Findings>>,
     pub knobs: Vec<String>,
+    pub held_back: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,6 +54,7 @@ pub struct Racks {
     peeks: Peeks,
     off: PluginsOff,
     falls: Falls,
+    said_held_back: usize,
 }
 
 impl Racks {
@@ -68,7 +70,30 @@ impl Racks {
             peeks,
             off,
             falls,
+            said_held_back: 0,
         }
+    }
+
+    fn held_back(&self) -> usize {
+        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).map(Rack::held_back).sum()
+    }
+
+    fn word_about_the_ceiling(&mut self) -> Option<String> {
+        let held_back = self.held_back();
+        if held_back == self.said_held_back {
+            return None;
+        }
+        self.said_held_back = held_back;
+        if held_back == 0 {
+            return None;
+        }
+        let most = loupe_plugins::ceiling::Ceiling::for_this_computer().most();
+        let one = held_back == 1;
+        Some(format!(
+            "Loupe is running {most} plugins, as many as this computer can manage, so {held_back} {} not loaded. Open an FX chain and press Load to start {}.",
+            if one { "is" } else { "are" },
+            if one { "it" } else { "one" },
+        ))
     }
 
     fn settle(&mut self, project: &Project) -> Vec<String> {
@@ -76,6 +101,7 @@ impl Racks {
             self.chains.clear();
             self.clips.clear();
             self.master = None;
+            self.said_held_back = 0;
             self.publish();
             return Vec::new();
         }
@@ -155,6 +181,9 @@ impl Racks {
         }
         self.publish();
         self.gather();
+        if let Some(word) = self.word_about_the_ceiling() {
+            troubles.insert(0, word);
+        }
         troubles
     }
 
@@ -186,31 +215,34 @@ impl Racks {
         for (id, rack) in self.chains.iter_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
+                let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
                 let (scopes, history, meter, findings) = match rack.built_at(slot) {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
                     None => (None, None, None, None),
                 };
-                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, knobs }));
+                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, knobs, held_back }));
             }
         }
         for (id, rack) in self.clips.iter_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
+                let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
                 let (scopes, history, meter, findings) = match rack.built_at(slot) {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
                     None => (None, None, None, None),
                 };
-                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, knobs }));
+                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, knobs, held_back }));
             }
         }
         if let Some(rack) = self.master.as_mut() {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
+                let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
                 let (scopes, history, meter, findings) = match rack.built_at(slot) {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
                     None => (None, None, None, None),
                 };
-                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, knobs }));
+                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, knobs, held_back }));
             }
         }
         let Ok(mut held) = self.peeks.lock() else { return };
@@ -244,6 +276,27 @@ impl Chains for Racks {
         match self.chains.get_mut(&track) {
             Some(rack) => rack.show(slot),
             None => Err("that track has no plugins".into()),
+        }
+    }
+
+    fn load(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
+        match self.chains.get_mut(&track) {
+            Some(rack) => rack.load_held_back(slot),
+            None => Err("that track has no plugins".into()),
+        }
+    }
+
+    fn load_clip(&mut self, clip: ClipId, slot: usize) -> Result<(), String> {
+        match self.clips.get_mut(&clip) {
+            Some(rack) => rack.load_held_back(slot),
+            None => Err("that clip has no plugins".into()),
+        }
+    }
+
+    fn load_master(&mut self, slot: usize) -> Result<(), String> {
+        match self.master.as_mut() {
+            Some(rack) => rack.load_held_back(slot),
+            None => Err("the master has no plugins".into()),
         }
     }
 
