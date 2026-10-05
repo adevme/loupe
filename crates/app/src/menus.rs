@@ -175,10 +175,11 @@ impl App {
         if self.plugins_are_off() {
             items.push(self.item("Turn plugins back on", "", Some(Message::PluginsBackOn)));
         }
+        items.push(rule(self.palette));
+        items.push(self.item("Save", "Ctrl+S", Some(Message::Save)));
+        items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
+        items.push(self.item("Save as template…", "", Some(Message::SaveAsTemplate)));
         if has_song {
-            items.push(self.item("Save", "Ctrl+S", Some(Message::Save)));
-            items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
-            items.push(self.item("Save as template…", "", Some(Message::SaveAsTemplate)));
             items.push(self.item("Export…", "Ctrl+E", Some(Message::OpenExport)));
         }
         items.push(rule(self.palette));
