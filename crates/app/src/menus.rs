@@ -94,6 +94,14 @@ impl App {
             }
             let audio = if self.pool_open { "All audio ✓" } else { "All audio" };
             items.push(self.item(audio, "", Some(Message::TogglePool)));
+            let out_of_sight = self.project.tracks.iter().filter(|track| track.hidden).count();
+            if out_of_sight > 0 {
+                let how_many = match out_of_sight {
+                    1 => "Show the hidden track".to_string(),
+                    many => format!("Show all {many} hidden tracks"),
+                };
+                items.push(self.item(how_many, "", Some(Message::ShowHiddenTracks)));
+            }
             items.push(rule(self.palette));
         }
         items.push(self.item("Performance", "Ctrl+Alt+P", Some(Message::OpenPerformance)));

@@ -1233,6 +1233,21 @@ mod tests {
     }
 
     #[test]
+    fn hiding_a_track_only_hides_it() {
+        let (mut p, track, clip) = project_with_clip(1000);
+        p.apply(Command::SetTrackHidden { track, hidden: true }).unwrap();
+        let found = p.track(track).unwrap();
+        assert!(found.hidden);
+        assert!(!found.muted, "a hidden track is still heard");
+        assert_eq!(found.gain, 1.0);
+        assert_eq!(found.clips.len(), 1, "its clips are still there");
+        assert_eq!(p.clip(clip).unwrap().start, 100);
+        p.apply(Command::SetTrackHidden { track, hidden: false }).unwrap();
+        assert!(!p.track(track).unwrap().hidden);
+        assert!(p.apply(Command::SetTrackHidden { track: TrackId(999), hidden: true }).is_err());
+    }
+
+    #[test]
     fn bad_values_are_refused() {
         let (mut p, track, clip) = project_with_clip(10);
         assert!(p.apply(Command::SetClipGain { clip, gain: f32::NAN }).is_err());

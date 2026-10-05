@@ -214,6 +214,7 @@ pub enum Message {
     ToggleMasterMute,
     ToggleCollapsed(loupe_engine::TrackId),
     SetTrackHidden { track: loupe_engine::TrackId, hidden: bool },
+    ShowHiddenTracks,
     SetTrackParent { track: TrackId, parent: Option<TrackId> },
     OpenRouting(TrackId),
     OpenPlugins(TrackId),
@@ -1595,6 +1596,17 @@ impl App {
             Message::SetTrackHidden { track, hidden } => {
                 self.overlay = Overlay::None;
                 self.edit(None, Command::SetTrackHidden { track, hidden });
+                if hidden {
+                    let name = self.project.track(track).map(|found| found.name.clone()).unwrap_or_default();
+                    self.notice = Some(format!("{name} is hidden. Bring it back from the mixer, or the View menu."));
+                }
+            }
+            Message::ShowHiddenTracks => {
+                self.overlay = Overlay::None;
+                let out_of_sight: Vec<TrackId> = self.project.tracks.iter().filter(|track| track.hidden).map(|track| track.id).collect();
+                for track in out_of_sight {
+                    self.edit(None, Command::SetTrackHidden { track, hidden: false });
+                }
             }
             Message::ToggleCollapsed(track) => {
                 self.edit(None, Command::ToggleCollapsed(track));
