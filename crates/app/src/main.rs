@@ -2702,7 +2702,7 @@ impl App {
         if let Some(status) = self.status() {
             song = song.push(rule(palette)).push(status);
         }
-        stack![song, self.overlay(), self.opening_layer()].into()
+        stack![song, self.overlay(), self.opening_layer(), self.exporting_layer()].into()
     }
 
     fn opening_layer(&self) -> Element<'_, Message> {
@@ -2717,6 +2717,23 @@ impl App {
         .spacing(16)
         .align_x(Alignment::Center);
         let card = container(notice).padding([26, 40]).style(move |_| palette.sheet());
+        iced::widget::opaque(iced::widget::center(card).style(move |_| palette.backdrop()))
+    }
+
+    fn exporting_layer(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        if !self.exporting {
+            return Space::new(0, 0).into();
+        }
+        let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
+        let notice = column![
+            text("Exporting").size(15).font(palette.medium),
+            progress_bar(0.0..=1.0, done).width(300).height(8),
+            text(format!("{:.0}%", done * 100.0)).size(13).font(palette.mono).color(palette.text_dim),
+        ]
+        .spacing(14)
+        .align_x(Alignment::Center);
+        let card = container(notice).padding([28, 40]).style(move |_| palette.sheet());
         iced::widget::opaque(iced::widget::center(card).style(move |_| palette.backdrop()))
     }
 
@@ -2988,15 +3005,7 @@ impl App {
         let line: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()).or(self.theme_problem.as_ref()) {
             text(problem.as_str()).size(12).color(palette.danger).into()
         } else if self.exporting {
-            let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
-            row![
-                text("Exporting").size(12).color(palette.text_dim),
-                progress_bar(0.0..=1.0, done).width(240).height(6),
-                text(format!("{:.0}%", done * 100.0)).size(12).font(palette.mono).color(palette.text_dim),
-            ]
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .into()
+            Space::new(0, 0).into()
         } else if let Some(notice) = &self.notice {
             text(notice.as_str()).size(12).color(palette.text).into()
         } else if let (versions::UpdateState::Found(update), false) = (&self.update_state, self.update_dismissed) {
