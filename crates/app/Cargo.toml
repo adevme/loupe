@@ -22,3 +22,6 @@ winresource = "0.1"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11-dl = "2.21"
+
+[features]
+asio = ["loupe-engine/asio"]
