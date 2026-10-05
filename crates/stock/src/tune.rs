@@ -233,6 +233,10 @@ impl Effect for Tune {
         Some(self.history())
     }
 
+    fn keeps_its_own_clock(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "Loupe Tune"
     }

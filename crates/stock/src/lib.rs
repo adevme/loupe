@@ -147,6 +147,10 @@ pub trait Effect: Send {
         None
     }
 
+    fn keeps_its_own_clock(&self) -> bool {
+        false
+    }
+
     fn set_tempo(&mut self, _bpm: f32) {}
 
     fn set_by_id(&mut self, id: &str, value: f32) -> bool {

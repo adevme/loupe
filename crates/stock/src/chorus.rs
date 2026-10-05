@@ -116,6 +116,10 @@ impl Effect for Chorus {
         "Loupe Chorus"
     }
 
+    fn keeps_its_own_clock(&self) -> bool {
+        true
+    }
+
     fn params(&self) -> &'static [Param] {
         &PARAMS
     }

@@ -8,6 +8,16 @@ use crate::wire::{Ask, Region, Reply};
 const SETTLING_BLOCKS: usize = 24;
 const SETTLING_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
 const BLOCKS_BEFORE_WAITING: usize = 4;
+pub const QUIET: f32 = 1.0e-7;
+pub const QUIET_SECONDS_BEFORE_DOZING: f32 = 10.0;
+
+fn loudest(audio: &[[f32; 2]]) -> f32 {
+    audio.iter().fold(0.0f32, |top, frame| top.max(frame[0].abs()).max(frame[1].abs()))
+}
+
+fn must_stay_awake(made: &dyn loupe_stock::Effect) -> bool {
+    made.keeps_its_own_clock() || made.scopes().is_some() || made.meter().is_some() || made.findings().is_some()
+}
 
 type Arrived = Result<Opened, (String, bool)>;
 
@@ -53,6 +63,17 @@ impl Dry {
         }
     }
 
+    fn slide(&mut self, frames: usize) {
+        if self.kept.is_empty() {
+            return;
+        }
+        let room = self.kept.len();
+        for at in 0..frames {
+            self.kept[self.at] = self.spare.get(at).copied().unwrap_or([0.0; 2]);
+            self.at = (self.at + 1) % room;
+        }
+    }
+
     fn remember(&mut self, audio: &[[f32; 2]]) {
         if self.spare.len() < audio.len() {
             return;
@@ -81,14 +102,43 @@ pub struct Slot {
     wanted_open: bool,
     pub mix: f32,
     dry: Dry,
-}
-
-struct Beginning {
-    state: Vec<u8>,
-    seat: Seat,
+    always_awake: bool,
+    quiet_for: usize,
 }
 
 impl Slot {
+    fn may_doze(&self) -> bool {
+        !self.always_awake && !self.ara && !self.record
+    }
+
+    fn quiet_long_enough(&self, rate: u32) -> usize {
+        (rate as f32 * QUIET_SECONDS_BEFORE_DOZING) as usize + self.latency
+    }
+
+    fn dozes_through(&mut self, audio: &[[f32; 2]], rate: u32) -> bool {
+        if !self.may_doze() {
+            return false;
+        }
+        if loudest(audio) > QUIET {
+            self.quiet_for = 0;
+            return false;
+        }
+        self.quiet_for >= self.quiet_long_enough(rate)
+    }
+
+    fn note_what_came_out(&mut self, audio: &[[f32; 2]], rate: u32) {
+        let enough = self.quiet_long_enough(rate);
+        if loudest(audio) > QUIET {
+            self.quiet_for = 0;
+            return;
+        }
+        self.quiet_for = (self.quiet_for + audio.len()).min(enough);
+    }
+
+    pub fn dozing(&self, rate: u32) -> bool {
+        self.may_doze() && self.quiet_for >= self.quiet_long_enough(rate)
+    }
+
     pub fn working(&self) -> bool {
         (self.host.is_some() || self.built.is_some() || self.on_its_way()) && self.trouble.is_none()
     }
@@ -106,7 +156,13 @@ impl Slot {
         self.ara = opened.ara;
         self.placed = if opened.ara { region.cloned() } else { None };
         self.host = Some(opened.host);
+        self.quiet_for = 0;
     }
+}
+
+struct Beginning {
+    state: Vec<u8>,
+    seat: Seat,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -210,11 +266,14 @@ impl Rack {
             kept_state: Vec::new(),
             known: Vec::new(),
             wanted_open: false,
+            always_awake: false,
+            quiet_for: 0,
         };
         if is_built_in(&slot.path) {
             match self.make_built(slot.index) {
                 Ok(made) => {
                     slot.latency = made.latency();
+                    slot.always_awake = must_stay_awake(made.as_ref());
                     slot.built = Some(made);
                 }
                 Err(why) => slot.trouble = Some(why),
@@ -252,6 +311,7 @@ impl Rack {
 
     pub fn tweak(&mut self, slot: usize, knob: usize, value: f32) {
         let Some(found) = self.slots.get_mut(slot) else { return };
+        found.quiet_for = 0;
         if let Some(made) = found.built.as_mut() {
             made.set(knob, value);
             return;
@@ -266,6 +326,7 @@ impl Rack {
 
     pub fn automate(&mut self, slot: usize, knob: usize, value: f32) {
         let Some(found) = self.slots.get_mut(slot) else { return };
+        found.quiet_for = 0;
         if let Some(made) = found.built.as_mut() {
             let Some(param) = made.params().get(knob).copied() else { return };
             made.set(knob, param.from_position(value));
@@ -339,7 +400,12 @@ impl Rack {
     pub fn bypass(&mut self, slot: usize, bypassed: bool) {
         if let Some(found) = self.slots.get_mut(slot) {
             found.bypassed = bypassed;
+            found.quiet_for = 0;
         }
+    }
+
+    pub fn dozing(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.dozing(self.rate)).count()
     }
 
     pub fn revive(&mut self, slot: usize) -> Result<(), String> {
@@ -508,6 +574,7 @@ impl Rack {
     fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool, at: Option<i64>) {
         self.take_arrivals();
         let block = audio.len();
+        let rate = self.rate;
         for (which, slot) in self.slots.iter_mut().enumerate() {
             if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
                 continue;
@@ -517,11 +584,18 @@ impl Rack {
                 slot.dry.room_for(slot.latency, block);
                 slot.dry.remember(audio);
             }
+            if slot.dozes_through(audio, rate) {
+                if blending {
+                    slot.dry.slide(block);
+                }
+                continue;
+            }
             if let Some(made) = slot.built.as_mut() {
                 made.process(audio);
                 if blending {
                     slot.dry.blend(audio, slot.mix);
                 }
+                slot.note_what_came_out(audio, rate);
                 continue;
             }
             let Some(host) = slot.host.as_mut() else { continue };
@@ -530,8 +604,12 @@ impl Rack {
                 _ => host.run_with(audio, side),
             };
             match ran {
-                Ok(()) if blending => slot.dry.blend(audio, slot.mix),
-                Ok(()) => {}
+                Ok(()) => {
+                    if blending {
+                        slot.dry.blend(audio, slot.mix);
+                    }
+                    slot.note_what_came_out(audio, rate);
+                }
                 Err(why) => {
                     let fell = host.gone();
                     slot.trouble = Some(why.clone());
@@ -556,6 +634,7 @@ impl Rack {
                     slot.bypassed = *bypassed;
                     slot.mix = *mix;
                     slot.record = *record;
+                    slot.quiet_for = 0;
                     if let Some(made) = slot.built.as_mut() {
                         put_knobs(made.as_mut(), state);
                     } else if !state.is_empty() && *state != slot.known {
@@ -595,12 +674,15 @@ impl Rack {
                         kept_state: Vec::new(),
                         known: state.clone(),
                         wanted_open: false,
+                        always_awake: false,
+                        quiet_for: 0,
                     };
                     if is_built_in(path) {
                         match self.make_built(*index) {
                             Ok(mut made) => {
                                 put_knobs(made.as_mut(), state);
                                 slot.latency = made.latency();
+                                slot.always_awake = must_stay_awake(made.as_ref());
                                 slot.built = Some(made);
                             }
                             Err(why) => {
@@ -830,6 +912,219 @@ fn put_knobs(effect: &mut dyn loupe_stock::Effect, state: &[u8]) {
     }
     for (index, four) in state.chunks_exact(4).enumerate() {
         effect.set(index, f32::from_le_bytes([four[0], four[1], four[2], four[3]]));
+    }
+}
+
+#[cfg(test)]
+mod dozing_tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+    const BLOCK: usize = 512;
+    const REVERB: usize = 4;
+    const COMPRESSOR: usize = 1;
+    const SATURATION: usize = 6;
+    const LIMITER: usize = 2;
+    const DELAY: usize = 3;
+    const GATE: usize = 9;
+    const TRANSIENT: usize = 8;
+    const CHORUS: usize = 7;
+    const TUNE: usize = 12;
+    const METER: usize = 10;
+
+    fn rack_of(plugins: &[usize]) -> Rack {
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), RATE, BLOCK);
+        for index in plugins {
+            rack.add(Path::new(crate::BUILT_IN), *index, loupe_stock::NAMES[*index]).expect("it loads");
+        }
+        rack
+    }
+
+    fn kept_awake(plugins: &[usize]) -> Rack {
+        let mut rack = rack_of(plugins);
+        for slot in rack.slots.iter_mut() {
+            slot.always_awake = true;
+        }
+        rack
+    }
+
+    fn let_it_doze(plugins: &[usize]) -> Rack {
+        let mut rack = rack_of(plugins);
+        for slot in rack.slots.iter_mut() {
+            slot.always_awake = false;
+        }
+        rack
+    }
+
+    fn tone(frames: usize, from: usize) -> Vec<[f32; 2]> {
+        (0..frames)
+            .map(|at| {
+                let turn = (at + from) as f32 * 440.0 * std::f32::consts::TAU / RATE as f32;
+                let loud = turn.sin() * 0.5;
+                [loud, loud]
+            })
+            .collect()
+    }
+
+    fn blocks_of(song: &[[f32; 2]]) -> Vec<Vec<[f32; 2]>> {
+        song.chunks(BLOCK).map(|block| block.to_vec()).collect()
+    }
+
+    fn render(rack: &mut Rack, song: &[[f32; 2]]) -> Vec<[f32; 2]> {
+        let mut out = Vec::with_capacity(song.len());
+        for mut block in blocks_of(song) {
+            rack.process(&mut block);
+            out.extend_from_slice(&block);
+        }
+        out
+    }
+
+    fn burst_then_quiet(burst: usize, quiet: usize) -> Vec<[f32; 2]> {
+        let mut song = tone(burst, 0);
+        song.extend(std::iter::repeat_n([0.0f32; 2], quiet));
+        song
+    }
+
+    fn song_with_gaps() -> Vec<[f32; 2]> {
+        let gap = RATE as usize * (QUIET_SECONDS_BEFORE_DOZING as usize + 4);
+        let sound = RATE as usize / 2;
+        let mut song = Vec::new();
+        for round in 0..3 {
+            song.extend(tone(sound, round * sound));
+            song.extend(std::iter::repeat_n([0.0f32; 2], gap));
+        }
+        song.extend(tone(sound, 0));
+        song
+    }
+
+    fn worst_difference(one: &[[f32; 2]], two: &[[f32; 2]]) -> f32 {
+        assert_eq!(one.len(), two.len());
+        one.iter().zip(two).fold(0.0f32, |top, (here, there)| {
+            top.max((here[0] - there[0]).abs()).max((here[1] - there[1]).abs())
+        })
+    }
+
+    fn biggest_jump(audio: &[[f32; 2]]) -> f32 {
+        audio.windows(2).fold(0.0f32, |top, pair| {
+            top.max((pair[1][0] - pair[0][0]).abs()).max((pair[1][1] - pair[0][1]).abs())
+        })
+    }
+
+    fn first_loud_frame(audio: &[[f32; 2]]) -> Option<usize> {
+        audio.iter().position(|frame| frame[0].abs() > 0.01)
+    }
+
+    #[test]
+    fn a_tail_rings_out_whether_the_chain_dozes_or_not() {
+        let hold = RATE as usize * QUIET_SECONDS_BEFORE_DOZING as usize;
+        let burst = RATE as usize / 2;
+        let song = burst_then_quiet(burst, hold + RATE as usize * 8);
+        let dozing = render(&mut let_it_doze(&[REVERB]), &song);
+        let awake = render(&mut kept_awake(&[REVERB]), &song);
+        let while_it_is_awake = burst + hold;
+        assert_eq!(
+            dozing[..while_it_is_awake],
+            awake[..while_it_is_awake],
+            "the tail must be the same samples for as long as the chain is awake"
+        );
+        let apart = worst_difference(&dozing, &awake);
+        assert!(apart <= QUIET, "what is left of the tail after dozing differs by {apart}");
+        let loudest_tail = awake[burst..while_it_is_awake].iter().fold(0.0f32, |top, frame| top.max(frame[0].abs()));
+        assert!(loudest_tail > 0.01, "the reverb had no tail to compare, only {loudest_tail}");
+    }
+
+    #[test]
+    fn a_chain_that_dozes_and_wakes_is_sample_for_sample_the_same() {
+        let chain = [GATE, LIMITER, TRANSIENT];
+        let song = song_with_gaps();
+        let mut sleepy = rack_of(&chain);
+        let dozing = render(&mut sleepy, &song);
+        let awake = render(&mut kept_awake(&chain), &song);
+        assert_eq!(dozing, awake, "a chain that dozed through the gaps changed the sound");
+        assert!(first_loud_frame(&dozing).is_some(), "nothing came out at all");
+    }
+
+    #[test]
+    fn no_stock_plugin_clicks_when_it_wakes() {
+        let song = song_with_gaps();
+        for index in 0..loupe_stock::NAMES.len() {
+            let dozing = render(&mut let_it_doze(&[index]), &song);
+            let awake = render(&mut kept_awake(&[index]), &song);
+            let jumped = biggest_jump(&dozing);
+            let allowed = biggest_jump(&awake) * 1.1 + QUIET;
+            assert!(jumped <= allowed, "{} jumped {jumped} on waking, far more than the {allowed} it jumps anyway", loupe_stock::NAMES[index]);
+        }
+    }
+
+    #[test]
+    fn a_chain_dozes_through_a_long_gap_and_wakes_for_the_next_note() {
+        let mut rack = rack_of(&[COMPRESSOR, SATURATION]);
+        let quiet = RATE as usize * (QUIET_SECONDS_BEFORE_DOZING as usize + 1);
+        let mut played = tone(BLOCK, 0);
+        rack.process(&mut played);
+        assert_eq!(rack.dozing(), 0, "a chain with sound in it must not doze");
+        for _ in 0..quiet / BLOCK {
+            let mut nothing = vec![[0.0f32; 2]; BLOCK];
+            rack.process(&mut nothing);
+        }
+        assert_eq!(rack.dozing(), 2, "both plugins should be dozing by now");
+        let mut again = tone(BLOCK, 0);
+        rack.process(&mut again);
+        assert_eq!(rack.dozing(), 0, "sound must wake the whole chain at once");
+    }
+
+    #[test]
+    fn a_plugin_with_a_clock_of_its_own_is_left_awake() {
+        for index in [CHORUS, TUNE] {
+            let clocked = rack_of(&[index]);
+            assert!(clocked.slots()[0].always_awake, "{} would come back out of step", loupe_stock::NAMES[index]);
+        }
+        for index in [COMPRESSOR, LIMITER, SATURATION, GATE, TRANSIENT, DELAY, REVERB] {
+            let plain = rack_of(&[index]);
+            assert!(!plain.slots()[0].always_awake, "{} has no reason to stay awake", loupe_stock::NAMES[index]);
+        }
+    }
+
+    #[test]
+    fn a_plugin_with_latency_still_lines_up_after_dozing() {
+        let song = song_with_gaps();
+        let mut sleepy = rack_of(&[LIMITER]);
+        let latency = sleepy.latency();
+        assert!(latency > 0, "the limiter reported no latency");
+        let dozing = render(&mut sleepy, &song);
+        let awake = render(&mut kept_awake(&[LIMITER]), &song);
+        assert_eq!(dozing, awake, "dozing moved the sound of a plugin with latency");
+        let came_in = first_loud_frame(&dozing).expect("something came out");
+        assert_eq!(came_in, first_loud_frame(&awake).expect("something came out"));
+        assert!(came_in >= latency, "the limiter's own delay went missing: {came_in} < {latency}");
+    }
+
+    #[test]
+    fn a_plugin_that_shows_the_signal_is_left_awake() {
+        let watching = rack_of(&[METER]);
+        assert!(watching.slots()[0].always_awake, "the meter must keep reading");
+        let working = rack_of(&[COMPRESSOR]);
+        assert!(!working.slots()[0].always_awake);
+    }
+
+    #[test]
+    fn a_recording_plugin_never_dozes() {
+        let want = vec![Wanted {
+            mix: 1.0,
+            path: PathBuf::from(crate::BUILT_IN),
+            index: COMPRESSOR,
+            name: "Loupe Compressor".into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: true,
+        }];
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), RATE, BLOCK);
+        assert!(rack.reconcile(&want).is_empty());
+        for _ in 0..RATE as usize * 4 / BLOCK {
+            let mut nothing = vec![[0.0f32; 2]; BLOCK];
+            rack.process_takes(&mut nothing);
+        }
+        assert_eq!(rack.dozing(), 0, "a recording chain must stay ready for the next take");
     }
 }
 
