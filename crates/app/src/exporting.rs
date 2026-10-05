@@ -6,6 +6,8 @@ use iced::widget::{button, checkbox, column, horizontal_space, row, text, Space}
 use iced::{Alignment, Element, Length, Task};
 use loupe_engine::{next_version_folder, ExportPlan, Format, Normalise, SavedProject};
 
+const GROWN_ENOUGH_TO_SAY: u64 = 20;
+
 use crate::theme;
 use crate::{App, Message, Overlay};
 
@@ -195,9 +197,14 @@ impl App {
         let stop = self.stop_export.clone();
         let (done, exported) = oneshot::channel();
         std::thread::spawn(move || {
+            let shown = std::cell::Cell::new(u64::MAX);
             let report = |going: loupe_engine::Going| {
                 progress.store((going.done * crate::EXPORT_PROGRESS_STEPS as f32) as u32, Ordering::Relaxed);
-                left.store(going.left.as_secs().min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                let waiting = going.left.as_secs();
+                if waiting < shown.get() || waiting > shown.get() + GROWN_ENOUGH_TO_SAY {
+                    shown.set(waiting);
+                    left.store(waiting.min(u32::MAX as u64) as u32, Ordering::Relaxed);
+                }
                 !stop.load(Ordering::Relaxed)
             };
             let mut racks: Box<dyn loupe_engine::Chains> =

@@ -3314,9 +3314,15 @@ impl App {
 
 fn said_as(span: std::time::Duration) -> String {
     let seconds = span.as_secs();
-    match (seconds / 60, seconds % 60) {
+    let rounded = match seconds {
+        0..=14 => return "a few seconds".to_string(),
+        15..=59 => seconds.div_ceil(15) * 15,
+        60..=599 => seconds.div_ceil(30) * 30,
+        _ => seconds.div_ceil(60) * 60,
+    };
+    match (rounded / 60, rounded % 60) {
         (0, seconds) => format!("{seconds}s"),
-        (minutes, _) if minutes >= 10 => format!("{minutes}m"),
+        (minutes, 0) => format!("{minutes}m"),
         (minutes, seconds) => format!("{minutes}m {seconds}s"),
     }
 }
