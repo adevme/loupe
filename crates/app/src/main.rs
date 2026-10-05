@@ -1130,9 +1130,12 @@ impl App {
                     self.engine.silence_notes();
                     self.typing.clear();
                 }
-                if self.overlay == Overlay::None {
+                if self.overlay == Overlay::None && self.went_wrong().is_none() {
                     self.choose(None);
                 }
+                self.problem = None;
+                self.startup_problem = None;
+                self.theme_problem = None;
                 self.overlay = Overlay::None;
                 self.stock = None;
                 self.editing_level = None;
@@ -3026,11 +3029,13 @@ impl App {
         self.window("Settings".to_string(), body.into(), 560.0)
     }
 
+    pub(crate) fn went_wrong(&self) -> Option<&String> {
+        self.problem.as_ref().or(self.startup_problem.as_ref()).or(self.theme_problem.as_ref())
+    }
+
     fn status(&self) -> Option<Element<'_, Message>> {
         let palette = self.palette;
-        let line: Element<'_, Message> = if let Some(problem) = self.problem.as_ref().or(self.startup_problem.as_ref()).or(self.theme_problem.as_ref()) {
-            text(problem.as_str()).size(12).color(palette.danger).into()
-        } else if self.exporting {
+        let line: Element<'_, Message> = if self.exporting {
             Space::new(0, 0).into()
         } else if let Some(notice) = &self.notice {
             text(notice.as_str()).size(12).color(palette.text).into()

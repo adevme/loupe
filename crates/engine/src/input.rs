@@ -404,14 +404,26 @@ fn find_device(choice: &InputChoice) -> Result<cpal::Device, String> {
             .input_devices()
             .map_err(|why| why.to_string())?
             .find(|device| device.name().is_ok_and(|name| &name == wanted))
-            .ok_or_else(|| format!("the input \"{wanted}\" is not connected")),
+            .or_else(|| host.default_input_device())
+            .ok_or_else(|| format!("the input \"{wanted}\" is not connected, and there is no other recording input")),
         _ => host.default_input_device().ok_or_else(|| "no recording input found".to_string()),
     }
 }
 
+fn settings_for(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
+    if let Ok(usual) = device.default_input_config() {
+        return Ok(usual);
+    }
+    let offered = device.supported_input_configs().map_err(|why| why.to_string())?;
+    offered
+        .max_by_key(|range| (range.channels().min(MOST_INPUTS as u16), range.max_sample_rate().0))
+        .map(|range| range.with_max_sample_rate())
+        .ok_or_else(|| "the input is listed but offers no way to record from it".to_string())
+}
+
 fn open_device(choice: &InputChoice, heard: Arc<Heard>) -> Result<(cpal::Stream, Opened), String> {
     let device = find_device(choice)?;
-    let supported = device.default_input_config().map_err(|why| why.to_string())?;
+    let supported = settings_for(&device)?;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
     let (tap, ends) = tap_for(heard, config.sample_rate.0, (config.channels as usize).clamp(1, MOST_INPUTS));

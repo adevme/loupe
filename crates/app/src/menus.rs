@@ -23,7 +23,10 @@ pub const ENTRY_ID: &str = "overlay-entry";
 impl App {
     pub(crate) fn overlay(&self) -> Element<'_, Message> {
         match &self.overlay {
-            Overlay::None => Space::new(0, 0).into(),
+            Overlay::None => match self.went_wrong() {
+                Some(why) => self.centred(self.problem_sheet(why)),
+                None => Space::new(0, 0).into(),
+            },
             Overlay::Settings => self.centred(self.settings_sheet()),
             Overlay::ConfirmDiscard(_) => self.centred(self.discard_sheet()),
             Overlay::TemplateName => self.centred(self.template_sheet()),
@@ -378,6 +381,35 @@ impl App {
         .padding(20)
         .width(Length::Fill)
         .max_width(420)
+        .style(move |_| palette.sheet())
+        .into()
+    }
+
+    fn problem_sheet<'a>(&self, why: &'a str) -> Element<'a, Message> {
+        let palette = self.palette;
+        let choices = row![
+            button(text("Copy").size(13).font(palette.medium))
+                .padding([7, 14])
+                .style(move |_, status| palette.outlined(status))
+                .on_press(Message::CopyText(why.to_string())),
+            horizontal_space(),
+            button(text("OK").size(13).font(palette.medium).color(Color::WHITE))
+                .padding([7, 18])
+                .style(move |_, status| palette.solid(status))
+                .on_press(Message::CloseOverlay),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        container(
+            column![
+                text("Something went wrong").size(16).font(palette.semibold).color(palette.danger),
+                text(why).size(13).color(palette.text),
+                choices,
+            ]
+            .spacing(14),
+        )
+        .padding(20)
+        .width(Length::Fixed(460.0))
         .style(move |_| palette.sheet())
         .into()
     }
