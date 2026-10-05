@@ -907,7 +907,9 @@ fn take_knobs(effect: &dyn loupe_stock::Effect) -> Vec<u8> {
 }
 
 fn put_knobs(effect: &mut dyn loupe_stock::Effect, state: &[u8]) {
-    if state.len() != effect.params().len() * 4 {
+    // A plugin that has grown knobs since the song was saved keeps the ones it had and starts
+    // the new ones at their defaults.
+    if state.len() % 4 != 0 || state.len() > effect.params().len() * 4 {
         return;
     }
     for (index, four) in state.chunks_exact(4).enumerate() {
@@ -1470,5 +1472,19 @@ mod real_plugin_tests {
         wanted.state = before;
         assert!(rack.reconcile(&[wanted]).is_empty());
         assert!((rack.readings(0)[knob].value - first[knob].value).abs() < 0.01, "undo puts the knob back");
+    }
+}
+
+#[cfg(test)]
+mod growing_tests {
+    use super::*;
+
+    #[test]
+    fn settings_saved_before_a_plugin_grew_still_load() {
+        let mut eq = loupe_stock::make("Loupe EQ").unwrap();
+        let older: Vec<u8> = (0..loupe_stock::OUTPUT_KNOB + 1).flat_map(|index| if index == 3 { 6.0f32 } else { eq.value(index) }.to_le_bytes()).collect();
+        put_knobs(eq.as_mut(), &older);
+        assert_eq!(eq.value(3), 6.0, "the band gain from the older song is kept");
+        assert_eq!(take_knobs(eq.as_ref()).len(), eq.params().len() * 4, "and it saves with every knob it has now");
     }
 }

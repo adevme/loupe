@@ -25,7 +25,7 @@ pub use chorus::{spread as chorus_spread, sweep as chorus_sweep, Chorus, MODES a
 pub use compressor::{Compressor, Curve, STYLES};
 pub use deesser::Deesser;
 pub use delay::{echo_seconds, Delay, NOTES};
-pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
+pub use eq::{design as band_design, dynamic_knob, knob, BandShape, Dynamic, Equalizer, Knob, Place, Scopes, ATTACK_KNOB, BANDS, OUTPUT_KNOB, PLACES, RELEASE_KNOB, SHAPES, SLOPES};
 pub use gate::Gate;
 pub use denoise::{Denoise, Spectra};
 pub use doubler::{Doubler, MOST_VOICES as MOST_DOUBLER_VOICES};
