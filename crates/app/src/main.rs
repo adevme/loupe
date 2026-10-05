@@ -487,6 +487,7 @@ struct App {
     practice_input: bool,
     engine: Engine,
     racks: Option<Box<dyn Chains>>,
+    racks_lent: bool,
     fx_was: u64,
     peeks: racks::Peeks,
     stock: Option<stockwin::Window>,
@@ -726,6 +727,7 @@ impl App {
             audio_lists: audio_settings::Lists::default(),
             silent,
             racks: None,
+            racks_lent: false,
             fx_was: 0,
             peeks: racks::Peeks::default(),
             stock: None,
@@ -2199,6 +2201,10 @@ impl App {
         if let Some(racks) = self.racks.take() {
             return Some(racks);
         }
+        if !self.racks_lent {
+            return None;
+        }
+        self.racks_lent = false;
         self.engine.drop_chains();
         for _ in 0..500 {
             if let Some(got) = self.engine.chains_back() {
@@ -2209,10 +2215,14 @@ impl App {
         None
     }
 
+    fn lend_racks(&mut self, racks: Box<dyn Chains>) {
+        self.engine.use_chains(racks);
+        self.racks_lent = true;
+    }
+
     fn hand_racks_over(&mut self) {
-        if let Some(mut racks) = self.racks.take() {
-            racks.nudge();
-            self.engine.use_chains(racks);
+        if let Some(racks) = self.racks.take() {
+            self.lend_racks(racks);
         }
         self.take_falls();
     }
@@ -2422,7 +2432,7 @@ impl App {
         if let Some(first) = troubles.first() {
             self.problem = Some(first.clone());
         }
-        self.engine.use_chains(racks);
+        self.lend_racks(racks);
         self.take_falls();
     }
 

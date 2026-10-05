@@ -1250,3 +1250,56 @@ mod naming {
         assert_eq!(project.clip(clip).unwrap().called(), "beat");
     }
 }
+
+#[cfg(test)]
+mod opening_a_big_song {
+    use super::*;
+
+    fn a_song_of(tracks: usize, clips_per_track: usize) -> (Project, Vec<Arc<Source>>) {
+        let mut project = Project::new(48_000);
+        let mut sources = Vec::new();
+        for which in 0..4 {
+            let source = Arc::new(Source::from_frames(format!("take {which}"), vec![[0.1, -0.1]; 4_000]));
+            sources.push(Arc::clone(&source));
+            project.apply(Command::AddSource(source)).unwrap();
+        }
+        for at in 0..tracks {
+            let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: format!("Track {at}") }) else {
+                panic!("no track")
+            };
+            project.apply(Command::SetTrackGain { track, gain: 0.8 }).unwrap();
+            for piece in 0..clips_per_track {
+                let source = Arc::clone(&sources[piece % sources.len()]);
+                let start = (at * clips_per_track + piece) as Frames * 1_000;
+                let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start }) else {
+                    panic!("no clip")
+                };
+                project.apply(Command::TrimClip { clip, offset: 100, len: 900 }).unwrap();
+                project.apply(Command::SetClipGain { clip, gain: 0.5 }).unwrap();
+            }
+        }
+        (project, sources)
+    }
+
+    fn quickest_read_back(tracks: usize, clips_per_track: usize) -> std::time::Duration {
+        let (project, sources) = a_song_of(tracks, clips_per_track);
+        let text = SavedProject::capture(&project, |_| None).to_text();
+        let mut quickest = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let saved = SavedProject::parse(&text).expect("it reads back");
+            let (back, _) = saved.build(&sources, 48_000);
+            quickest = quickest.min(started.elapsed());
+            assert_eq!(back.tracks.len(), tracks);
+        }
+        quickest
+    }
+
+    #[test]
+    fn three_times_the_song_does_not_take_nine_times_as_long_to_open() {
+        let small = quickest_read_back(200, 3);
+        let large = quickest_read_back(600, 3);
+        let grew = large.as_secs_f64() / small.as_secs_f64().max(f64::EPSILON);
+        assert!(grew < 4.5, "three times the song took {grew:.1} times as long to open ({small:?} then {large:?})");
+    }
+}

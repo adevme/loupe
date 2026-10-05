@@ -1071,12 +1071,12 @@ impl Project {
     }
 
     fn track_index(&self, id: TrackId) -> Result<usize, CommandError> {
-        self.tracks.iter().position(|t| t.id == id).ok_or(CommandError::NoSuchTrack)
+        self.tracks.iter().rposition(|t| t.id == id).ok_or(CommandError::NoSuchTrack)
     }
 
     fn locate(&self, id: ClipId) -> Result<(usize, usize), CommandError> {
-        for (t, track) in self.tracks.iter().enumerate() {
-            if let Some(i) = track.clips.iter().position(|c| c.id == id) {
+        for (t, track) in self.tracks.iter().enumerate().rev() {
+            if let Some(i) = track.clips.iter().rposition(|c| c.id == id) {
                 return Ok((t, i));
             }
         }
