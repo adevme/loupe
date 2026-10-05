@@ -636,7 +636,7 @@ impl Rack {
                     slot.record = *record;
                     slot.quiet_for = 0;
                     if let Some(made) = slot.built.as_mut() {
-                        put_knobs(made.as_mut(), state);
+                        put_knobs_it_still_has(made.as_mut(), state);
                     } else if !state.is_empty() && *state != slot.known {
                         if let Some(waiting) = slot.queued.as_mut() {
                             waiting.state = state.clone();
@@ -680,7 +680,7 @@ impl Rack {
                     if is_built_in(path) {
                         match self.make_built(*index) {
                             Ok(mut made) => {
-                                put_knobs(made.as_mut(), state);
+                                put_knobs_it_still_has(made.as_mut(), state);
                                 slot.latency = made.latency();
                                 slot.always_awake = must_stay_awake(made.as_ref());
                                 slot.built = Some(made);
@@ -906,9 +906,7 @@ fn take_knobs(effect: &dyn loupe_stock::Effect) -> Vec<u8> {
     out
 }
 
-fn put_knobs(effect: &mut dyn loupe_stock::Effect, state: &[u8]) {
-    // A plugin that has grown knobs since the song was saved keeps the ones it had and starts
-    // the new ones at their defaults.
+fn put_knobs_it_still_has(effect: &mut dyn loupe_stock::Effect, state: &[u8]) {
     if state.len() % 4 != 0 || state.len() > effect.params().len() * 4 {
         return;
     }
@@ -1483,7 +1481,7 @@ mod growing_tests {
     fn settings_saved_before_a_plugin_grew_still_load() {
         let mut eq = loupe_stock::make("Loupe EQ").unwrap();
         let older: Vec<u8> = (0..loupe_stock::OUTPUT_KNOB + 1).flat_map(|index| if index == 3 { 6.0f32 } else { eq.value(index) }.to_le_bytes()).collect();
-        put_knobs(eq.as_mut(), &older);
+        put_knobs_it_still_has(eq.as_mut(), &older);
         assert_eq!(eq.value(3), 6.0, "the band gain from the older song is kept");
         assert_eq!(take_knobs(eq.as_ref()).len(), eq.params().len() * 4, "and it saves with every knob it has now");
     }

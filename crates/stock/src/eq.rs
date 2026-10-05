@@ -330,7 +330,6 @@ impl Scopes {
         Self { before: Scope::new(SCOPE_LENGTH), after: Scope::new(SCOPE_LENGTH), moves: std::array::from_fn(|_| AtomicU32::new(0)) }
     }
 
-    /// How far a dynamic band has moved its gain just now, in dB.
     pub fn moved_db(&self, band: usize) -> f32 {
         self.moves.get(band).map_or(0.0, |kept| f32::from_bits(kept.load(Ordering::Relaxed)))
     }
@@ -439,7 +438,6 @@ impl Equalizer {
         bands + self.values.get(OUTPUT_KNOB)
     }
 
-    /// Whether a band moves its gain with the level it hears.
     pub fn dynamic(&self, band: usize) -> bool {
         self.values.get(dynamic_knob(band, Dynamic::On)) > 0.5 && BandShape::from_index(self.values.get(knob(band, Knob::Shape))).has_gain()
     }
