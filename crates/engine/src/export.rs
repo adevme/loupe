@@ -23,6 +23,8 @@ const READING_BACK_NANOSECONDS_A_FRAME: f64 = 3.0;
 const RENDER_NANOSECONDS_A_UNIT: f64 = 1.0;
 const PLUGIN_SLOT_UNITS: f32 = 8.0;
 const FRAMES_BEFORE_TIMING_THE_RENDER: Frames = BLOCK as Frames * 4;
+const TIMING_VARIABLE: &str = "LOUPE_EXPORT_TIMING";
+const TIMING_FILE: &str = "timing.txt";
 
 pub struct ExportPlan {
     pub folder: PathBuf,
@@ -138,6 +140,7 @@ impl fmt::Display for Normalise {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Stage {
+    pub what: &'static str,
     pub frames: Frames,
     pub render_units: f32,
     pub other_nanoseconds_a_frame: f64,
@@ -167,19 +170,21 @@ pub(crate) fn stages_of(project: &Project, plan: &ExportPlan, span: Frames, stem
     let encoding = plan.format.nanoseconds_a_frame();
     let mut stages = Vec::with_capacity(2 + stems.len());
     if plan.normalise == Normalise::Off {
-        stages.push(Stage { frames: span, render_units: render_units(project, None), other_nanoseconds_a_frame: encoding });
+        stages.push(Stage { what: "render and encode", frames: span, render_units: render_units(project, None), other_nanoseconds_a_frame: encoding });
     } else {
         let spilling = if held_in_memory { 0.0 } else { Format::WavFloat.nanoseconds_a_frame() };
         stages.push(Stage {
+            what: "render and measure",
             frames: span,
             render_units: render_units(project, None),
             other_nanoseconds_a_frame: METER_NANOSECONDS_A_FRAME + spilling,
         });
         let reading = if held_in_memory { 0.0 } else { READING_BACK_NANOSECONDS_A_FRAME };
-        stages.push(Stage { frames: span, render_units: 0.0, other_nanoseconds_a_frame: reading + encoding });
+        stages.push(Stage { what: "encode the mix", frames: span, render_units: 0.0, other_nanoseconds_a_frame: reading + encoding });
     }
     for track in stems {
         stages.push(Stage {
+            what: "render a stem",
             frames: span,
             render_units: render_units(project, Some(track.id)),
             other_nanoseconds_a_frame: encoding,
@@ -196,6 +201,117 @@ pub struct Going {
     pub left: Duration,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Buckets {
+    plugins: Duration,
+    render: Duration,
+    meter: Duration,
+    encode: Duration,
+    files: Duration,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Ran {
+    what: &'static str,
+    frames: Frames,
+    taken: Duration,
+}
+
+pub(crate) struct Timing {
+    wanted: bool,
+    began: Instant,
+    buckets: Buckets,
+    ran: Vec<Ran>,
+    plugin_nanoseconds: u64,
+    spending: crate::render::PluginSpending,
+}
+
+fn microseconds_a_frame(taken: Duration, frames: Frames) -> f64 {
+    if frames == 0 {
+        return 0.0;
+    }
+    taken.as_secs_f64() * 1_000_000.0 / frames as f64
+}
+
+impl Timing {
+    fn new() -> Self {
+        Self {
+            wanted: std::env::var_os(TIMING_VARIABLE).is_some_and(|said| said != "0"),
+            began: Instant::now(),
+            buckets: Buckets::default(),
+            ran: Vec::new(),
+            plugin_nanoseconds: 0,
+            spending: crate::render::PluginSpending::default(),
+        }
+    }
+
+    fn took_from_the_plugins(&mut self, now: u64) -> Duration {
+        let since = now.saturating_sub(self.plugin_nanoseconds);
+        self.plugin_nanoseconds = now;
+        Duration::from_nanos(since)
+    }
+
+    fn summary(&self, project: &Project, frames: Frames, rate: u32) -> String {
+        let whole = self.began.elapsed();
+        let counted = [
+            ("plugins", self.buckets.plugins),
+            ("render", self.buckets.render),
+            ("meter", self.buckets.meter),
+            ("encode", self.buckets.encode),
+            ("files", self.buckets.files),
+        ];
+        let named: Duration = counted.iter().map(|(_, taken)| *taken).sum();
+        let clips: usize = project.tracks.iter().map(|track| track.clips.len()).sum();
+        let plugins: usize = project.master_fx.len()
+            + project
+                .tracks
+                .iter()
+                .map(|track| track.fx.len() + track.clips.iter().map(|clip| clip.fx.len()).sum::<usize>())
+                .sum::<usize>();
+        let mut out = String::new();
+        out.push_str("Loupe export timing\n\n");
+        out.push_str(&format!("project    {} tracks, {clips} clips, {plugins} plugins\n", project.tracks.len()));
+        out.push_str(&format!("plugins    {} running, {} held back\n", self.spending.running, self.spending.held_back));
+        if self.spending.waves > 0 {
+            out.push_str(&format!(
+                "waves      {} of {:.1} tracks on average, up to {} at once\n",
+                self.spending.waves,
+                self.spending.tracks_in_waves as f64 / self.spending.waves as f64,
+                self.spending.at_once
+            ));
+        }
+        out.push_str(&format!("frames     {frames} at {rate} Hz\n"));
+        out.push_str(&format!("whole      {:>10.3} s  {:>8.2} us a frame\n\n", whole.as_secs_f64(), microseconds_a_frame(whole, frames)));
+        for (what, taken) in counted {
+            let share = if whole.as_secs_f64() > 0.0 { taken.as_secs_f64() / whole.as_secs_f64() * 100.0 } else { 0.0 };
+            out.push_str(&format!(
+                "{what:<10} {:>10.3} s  {:>8.2} us a frame  {share:>5.1}%\n",
+                taken.as_secs_f64(),
+                microseconds_a_frame(taken, frames)
+            ));
+        }
+        let elsewhere = whole.saturating_sub(named);
+        let share = if whole.as_secs_f64() > 0.0 { elsewhere.as_secs_f64() / whole.as_secs_f64() * 100.0 } else { 0.0 };
+        out.push_str(&format!(
+            "{:<10} {:>10.3} s  {:>8.2} us a frame  {share:>5.1}%\n\nstages\n",
+            "elsewhere",
+            elsewhere.as_secs_f64(),
+            microseconds_a_frame(elsewhere, frames)
+        ));
+        for (at, ran) in self.ran.iter().enumerate() {
+            out.push_str(&format!(
+                "{:<2} {:<20} {:>10} frames  {:>10.3} s  {:>8.2} us a frame\n",
+                at + 1,
+                ran.what,
+                ran.frames,
+                ran.taken.as_secs_f64(),
+                microseconds_a_frame(ran.taken, ran.frames)
+            ));
+        }
+        out
+    }
+}
+
 pub(crate) struct Pacer<'a> {
     report: &'a dyn Fn(Going) -> bool,
     stages: Vec<Stage>,
@@ -206,6 +322,7 @@ pub(crate) struct Pacer<'a> {
     nanoseconds_a_unit: f64,
     highest: f32,
     stopped: bool,
+    timing: Timing,
 }
 
 impl<'a> Pacer<'a> {
@@ -220,7 +337,38 @@ impl<'a> Pacer<'a> {
             nanoseconds_a_unit: RENDER_NANOSECONDS_A_UNIT,
             highest: 0.0,
             stopped: false,
+            timing: Timing::new(),
         }
+    }
+
+    pub fn timing_wanted(&self) -> bool {
+        self.timing.wanted
+    }
+
+    pub fn spent_rendering(&mut self, taken: Duration, plugin_nanoseconds: u64) {
+        let plugins = self.timing.took_from_the_plugins(plugin_nanoseconds);
+        self.timing.buckets.plugins += plugins;
+        self.timing.buckets.render += taken.saturating_sub(plugins);
+    }
+
+    pub fn spent_metering(&mut self, taken: Duration) {
+        self.timing.buckets.meter += taken;
+    }
+
+    pub fn spent_encoding(&mut self, taken: Duration) {
+        self.timing.buckets.encode += taken;
+    }
+
+    pub fn spent_on_files(&mut self, taken: Duration) {
+        self.timing.buckets.files += taken;
+    }
+
+    pub fn saw_the_plugins(&mut self, spending: crate::render::PluginSpending) {
+        self.timing.spending = spending;
+    }
+
+    pub fn summary(&self, project: &Project, frames: Frames, rate: u32) -> String {
+        self.timing.summary(project, frames, rate)
     }
 
     fn left(&self) -> f64 {
@@ -271,7 +419,12 @@ impl<'a> Pacer<'a> {
     }
 
     pub fn finished_a_stage(&mut self) {
-        self.stages_before += self.stage_begun.elapsed().as_nanos() as f64;
+        let taken = self.stage_begun.elapsed();
+        if self.timing.wanted {
+            let what = self.stages.get(self.at).map_or("the rest", |stage| stage.what);
+            self.timing.ran.push(Ran { what, frames: self.done, taken });
+        }
+        self.stages_before += taken.as_nanos() as f64;
         self.stage_begun = Instant::now();
         self.done = 0;
         self.at += 1;
@@ -324,7 +477,9 @@ pub fn export_through(
         Gain::unchanged(None)
     };
     let copy = plan.folder.join(format!("{}.lp", plan.name));
+    let began = Instant::now();
     fs::write(&copy, &plan.project_file).map_err(|why| failed(&copy, why))?;
+    pacer.spent_on_files(began.elapsed());
 
     if plan.split {
         let stems_folder = plan.folder.join(STEMS_FOLDER);
@@ -341,6 +496,18 @@ pub fn export_through(
         }
     }
     let mut notes: Vec<String> = gain.note.into_iter().collect();
+    if pacer.timing_wanted() {
+        if let Some(racks) = chains.as_deref() {
+            pacer.saw_the_plugins(racks.plugin_spending());
+        }
+        let told = pacer.summary(project, span, project.rate);
+        eprint!("{told}");
+        let beside = plan.folder.join(format!("{}.{TIMING_FILE}", plan.name));
+        match fs::write(&beside, &told) {
+            Ok(()) => notes.push(format!("Stage timings are in {}.", beside.display())),
+            Err(why) => notes.push(format!("The stage timings could not be written: {why}")),
+        }
+    }
     let written_rate = Format::mp3_rate(project.rate);
     if plan.format == Format::Mp3Cbr320 && written_rate != project.rate {
         notes.push(format!("MP3 stops at 48 kHz, so it was written at {written_rate} Hz."));
@@ -365,6 +532,7 @@ pub fn render_to_wav_through(
     let quiet = |_: Going| true;
     let span = to - from;
     let mut pacer = Pacer::new(&quiet, vec![Stage {
+        what: "render and encode",
         frames: span,
         render_units: render_units(project, None),
         other_nanoseconds_a_frame: Format::WavFloat.nanoseconds_a_frame(),
@@ -419,7 +587,13 @@ fn render_into(
     let mut pos = from;
     while pos < to {
         let count = BLOCK.min((to - pos) as usize);
+        let began = Instant::now();
         crate::render::render_through(project, pos, &mut block[..count], &mut spare, chains.as_deref_mut());
+        if pacer.timing_wanted() {
+            let taken = began.elapsed();
+            let plugins = chains.as_deref().map_or(0, |racks| racks.plugin_spending().nanoseconds);
+            pacer.spent_rendering(taken, plugins);
+        }
         take(&mut block[..count])?;
         pos += count as Frames;
         pacer.wrote(count as Frames);
@@ -442,12 +616,24 @@ fn write_file(
     pacer: &mut Pacer<'_>,
     chains: Option<&mut (dyn crate::render::Chains + '_)>,
 ) -> io::Result<()> {
-    let mut writer = Writer::create(path, format, project.rate, to - from, dither)?;
+    let mut writer = timed_on_files(pacer, || Writer::create(path, format, project.rate, to - from, dither))?;
+    let mut encoding = Duration::ZERO;
     render_into(project, from, to, pacer, chains, &mut |block| {
         amplify(block, gain);
-        writer.push(block)
+        let began = Instant::now();
+        let went = writer.push(block);
+        encoding += began.elapsed();
+        went
     })?;
-    writer.finish()
+    pacer.spent_encoding(encoding);
+    timed_on_files(pacer, || writer.finish())
+}
+
+fn timed_on_files<T>(pacer: &mut Pacer<'_>, work: impl FnOnce() -> T) -> T {
+    let began = Instant::now();
+    let done = work();
+    pacer.spent_on_files(began.elapsed());
+    done
 }
 
 
@@ -476,22 +662,38 @@ fn measure_into(
     match mixdown {
         Mixed::Memory(kept) => {
             kept.reserve((to - from) as usize);
+            let mut metering = Duration::ZERO;
             render_into(project, from, to, pacer, chains, &mut |block| {
+                let began = Instant::now();
                 meter.process(block);
+                metering += began.elapsed();
                 kept.extend_from_slice(block);
                 Ok(())
             })?;
+            pacer.spent_metering(metering);
         }
         Mixed::Spilt(path) => {
-            let mut writer = Writer::create(path, Format::WavFloat, project.rate, to - from, false)?;
+            let mut writer = timed_on_files(pacer, || Writer::create(path, Format::WavFloat, project.rate, to - from, false))?;
+            let mut metering = Duration::ZERO;
+            let mut spilling = Duration::ZERO;
             render_into(project, from, to, pacer, chains, &mut |block| {
+                let began = Instant::now();
                 meter.process(block);
-                writer.push(block)
+                let metered = began.elapsed();
+                metering += metered;
+                let went = writer.push(block);
+                spilling += began.elapsed() - metered;
+                went
             })?;
-            writer.finish()?;
+            pacer.spent_metering(metering);
+            pacer.spent_on_files(spilling);
+            timed_on_files(pacer, || writer.finish())?;
         }
     }
-    Ok(levels_of(&mut meter, project.rate))
+    let began = Instant::now();
+    let levels = levels_of(&mut meter, project.rate);
+    pacer.spent_metering(began.elapsed());
+    Ok(levels)
 }
 
 fn write_mixdown(
@@ -503,14 +705,19 @@ fn write_mixdown(
     gain: f32,
     pacer: &mut Pacer<'_>,
 ) -> io::Result<()> {
-    let mut writer = Writer::create(path, plan.format, rate, frames, plan.dither)?;
+    let mut writer = timed_on_files(pacer, || Writer::create(path, plan.format, rate, frames, plan.dither))?;
     let mut block = vec![[0.0f32; 2]; BLOCK];
+    let mut encoding = Duration::ZERO;
+    let mut reading = Duration::ZERO;
     match mixdown {
         Mixed::Memory(kept) => {
             for part in kept.chunks(BLOCK) {
                 block[..part.len()].copy_from_slice(part);
                 amplify(&mut block[..part.len()], gain);
-                writer.push(&block[..part.len()])?;
+                let began = Instant::now();
+                let went = writer.push(&block[..part.len()]);
+                encoding += began.elapsed();
+                went?;
                 pacer.wrote(part.len() as Frames);
                 if pacer.stopped() {
                     return Err(io::Error::other(STOPPED));
@@ -518,14 +725,17 @@ fn write_mixdown(
             }
         }
         Mixed::Spilt(held) => {
-            let mut input = BufReader::new(File::open(held)?);
+            let mut input = timed_on_files(pacer, || File::open(held).map(BufReader::new))?;
             let mut header = [0u8; wav::HEADER_BYTES as usize];
-            input.read_exact(&mut header)?;
+            timed_on_files(pacer, || input.read_exact(&mut header))?;
             let mut bytes = vec![0u8; BLOCK * 8];
             let mut left = frames;
             while left > 0 {
                 let count = BLOCK.min(left as usize);
-                input.read_exact(&mut bytes[..count * 8])?;
+                let began = Instant::now();
+                let came = input.read_exact(&mut bytes[..count * 8]);
+                reading += began.elapsed();
+                came?;
                 for (frame, raw) in block.iter_mut().zip(bytes[..count * 8].chunks_exact(8)) {
                     *frame = [
                         f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
@@ -533,7 +743,10 @@ fn write_mixdown(
                     ];
                 }
                 amplify(&mut block[..count], gain);
-                writer.push(&block[..count])?;
+                let began = Instant::now();
+                let went = writer.push(&block[..count]);
+                encoding += began.elapsed();
+                went?;
                 left -= count as Frames;
                 pacer.wrote(count as Frames);
                 if pacer.stopped() {
@@ -542,7 +755,9 @@ fn write_mixdown(
             }
         }
     }
-    writer.finish()
+    pacer.spent_encoding(encoding);
+    pacer.spent_on_files(reading);
+    timed_on_files(pacer, || writer.finish())
 }
 
 #[cfg(test)]
@@ -726,6 +941,42 @@ mod tests {
         let after_the_render = seen[rendered.saturating_sub(1)];
         assert!(after_the_render < 0.45, "rendering is not half the work of an MP3 export, got {after_the_render}");
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn the_timing_summary_splits_the_plugins_out_of_the_render_and_names_every_part() {
+        let project = song();
+        let folder = scratch("timing");
+        let plan = ExportPlan { normalise: Normalise::Loudness(-14.0), ..plan_for(&folder) };
+        let span = project.length();
+        let quiet = |_: Going| true;
+        let mut pacer = Pacer::new(&quiet, stages_of(&project, &plan, span, &[], true));
+        pacer.timing.wanted = true;
+        pacer.spent_rendering(Duration::from_millis(100), 60_000_000);
+        pacer.spent_rendering(Duration::from_millis(100), 130_000_000);
+        pacer.spent_metering(Duration::from_millis(10));
+        pacer.spent_encoding(Duration::from_millis(5));
+        pacer.spent_on_files(Duration::from_millis(1));
+        pacer.saw_the_plugins(crate::render::PluginSpending {
+            nanoseconds: 130_000_000,
+            running: 7,
+            held_back: 3,
+            waves: 4,
+            tracks_in_waves: 8,
+            at_once: 2,
+        });
+        pacer.wrote(span);
+        pacer.finished_a_stage();
+        let told = pacer.summary(&project, span, project.rate);
+        assert!(told.contains("plugins         0.130 s"), "{told}");
+        assert!(told.contains("render          0.070 s"), "{told}");
+        assert!(told.contains("meter           0.010 s"), "{told}");
+        assert!(told.contains("encode          0.005 s"), "{told}");
+        assert!(told.contains("files           0.001 s"), "{told}");
+        assert!(told.contains("7 running, 3 held back"), "{told}");
+        assert!(told.contains("waves      4 of 2.0 tracks on average, up to 2 at once"), "{told}");
+        assert!(told.contains("render and measure"), "{told}");
+        let _ = fs::remove_dir_all(folder);
     }
 
     #[test]

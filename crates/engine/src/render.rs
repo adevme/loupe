@@ -7,6 +7,16 @@ pub struct Job<'a> {
     pub side: &'a [[f32; 2]],
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PluginSpending {
+    pub nanoseconds: u64,
+    pub running: usize,
+    pub held_back: usize,
+    pub waves: u64,
+    pub tracks_in_waves: u64,
+    pub at_once: usize,
+}
+
 pub trait Chains: Send {
     fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
         self.process_with(track, audio, &[]);
@@ -138,6 +148,10 @@ pub trait Chains: Send {
 
     fn still_opening(&self) -> bool {
         false
+    }
+
+    fn plugin_spending(&self) -> PluginSpending {
+        PluginSpending::default()
     }
 
     fn nudge(&mut self) {}
@@ -1005,6 +1019,69 @@ mod tests {
             }
         }
         assert!(scratch.waves.len() > 1, "groups and sends make more than one wave");
+    }
+
+    struct CountingWaves {
+        handed: Vec<usize>,
+    }
+
+    impl Chains for CountingWaves {
+        fn whole_waves_at_once(&self) -> bool {
+            true
+        }
+
+        fn process_wave(&mut self, jobs: &mut [Job<'_>]) {
+            self.handed.push(jobs.len());
+        }
+    }
+
+    fn a_song_of_many_plain_tracks(how_many: usize) -> Project {
+        let mut p = Project::new(48_000);
+        for _ in 0..how_many {
+            let one = track(&mut p);
+            flat(&mut p, one, 0.1, 64);
+            let fx = crate::model::Fx {
+                mix: 1.0,
+                path: std::path::PathBuf::from("x.vst3"),
+                index: 0,
+                name: "x".into(),
+                bypassed: false,
+                state: Vec::new(),
+                record: false,
+            };
+            p.apply(Command::AddFx { track: one, fx }).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn a_hundred_plain_tracks_are_handed_over_as_one_wave_of_a_hundred() {
+        let p = a_song_of_many_plain_tracks(100);
+        let mut scratch = Mixdown::default();
+        scratch.work_out_order(&p);
+        assert_eq!(scratch.waves, vec![(0, 100)], "tracks that feed nothing belong in one wave");
+        let mut racks = CountingWaves { handed: Vec::new() };
+        let mut out = vec![[0.0; 2]; 32];
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(racks.handed, vec![100], "the racks were handed one wave of every track");
+    }
+
+    #[test]
+    fn groups_make_waves_that_are_still_wide() {
+        let mut p = a_song_of_many_plain_tracks(100);
+        let bus = track(&mut p);
+        let under: Vec<TrackId> = p.tracks.iter().take(100).map(|one| one.id).collect();
+        for one in under {
+            p.apply(Command::SetTrackParent { track: one, parent: Some(bus) }).unwrap();
+        }
+        let mut scratch = Mixdown::default();
+        scratch.work_out_order(&p);
+        let sizes: Vec<usize> = scratch.waves.iter().map(|(from, to)| to - from).collect();
+        assert_eq!(sizes, vec![100, 1], "the hundred children go over together, then the bus");
+        let mut racks = CountingWaves { handed: Vec::new() };
+        let mut out = vec![[0.0; 2]; 32];
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(racks.handed, vec![100], "only the tracks with plugins are handed over");
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use loupe_engine::{Chains, Clip, ClipId, Project, TrackId};
+use loupe_engine::{Chains, Clip, ClipId, PluginSpending, Project, TrackId};
 use loupe_plugins::rack::{Fallen, Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_plugins::wire::Region;
@@ -57,6 +57,9 @@ pub struct Racks {
     falls: Falls,
     said_held_back: usize,
     off_the_audio_thread: bool,
+    spent_in_plugins: AtomicU64,
+    waves: AtomicU64,
+    tracks_in_waves: AtomicU64,
 }
 
 impl Racks {
@@ -74,6 +77,9 @@ impl Racks {
             falls,
             said_held_back: 0,
             off_the_audio_thread: false,
+            spent_in_plugins: AtomicU64::new(0),
+            waves: AtomicU64::new(0),
+            tracks_in_waves: AtomicU64::new(0),
         }
     }
 
@@ -84,6 +90,54 @@ impl Racks {
 
     fn held_back(&self) -> usize {
         self.chains.values().chain(self.clips.values()).chain(self.master.iter()).map(Rack::held_back).sum()
+    }
+
+    fn running(&self) -> usize {
+        self.chains
+            .values()
+            .chain(self.clips.values())
+            .chain(self.master.iter())
+            .flat_map(Rack::slots)
+            .filter(|slot| !slot.held_back && slot.trouble.is_none() && !slot.bypassed)
+            .count()
+    }
+
+    fn note_plugin_time(&self, began: std::time::Instant) {
+        note_plugin_time(&self.spent_in_plugins, began);
+    }
+
+    fn run_a_whole_wave(&mut self, jobs: &mut [loupe_engine::Job<'_>]) {
+        let mut spare: Vec<&mut loupe_engine::Job<'_>> = jobs.iter_mut().collect();
+        let mut pairs: Vec<(&mut Rack, &mut loupe_engine::Job<'_>)> = Vec::with_capacity(spare.len());
+        for (id, rack) in self.chains.iter_mut() {
+            if rack.is_empty() {
+                continue;
+            }
+            if let Some(at) = spare.iter().position(|job| job.track == *id) {
+                pairs.push((rack, spare.swap_remove(at)));
+            }
+        }
+        self.waves.fetch_add(1, Ordering::Relaxed);
+        self.tracks_in_waves.fetch_add(pairs.len() as u64, Ordering::Relaxed);
+        if pairs.len() < 2 {
+            for (rack, job) in pairs {
+                run_one(rack, job, &self.falls);
+            }
+            return;
+        }
+        let queue = Mutex::new(pairs);
+        let hands = queue.lock().map(|held| held.len()).unwrap_or(0).min(tracks_at_once());
+        let falls = &self.falls;
+        std::thread::scope(|scope| {
+            for _ in 0..hands {
+                let queue = &queue;
+                scope.spawn(move || loop {
+                    let next = queue.lock().ok().and_then(|mut held| held.pop());
+                    let Some((rack, job)) = next else { return };
+                    run_one(rack, job, falls);
+                });
+            }
+        });
     }
 
     fn word_about_the_ceiling(&mut self) -> Option<String> {
@@ -348,30 +402,36 @@ impl Chains for Racks {
     }
 
     fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
-        let Some(rack) = self.clips.get_mut(&clip) else { return };
+        let Self { clips, scratch, falls, spent_in_plugins, .. } = self;
+        let Some(rack) = clips.get_mut(&clip) else { return };
         if rack.is_empty() {
             return;
         }
-        self.scratch.clear();
-        self.scratch.extend_from_slice(audio);
-        rack.process(&mut self.scratch);
+        let began = std::time::Instant::now();
+        scratch.clear();
+        scratch.extend_from_slice(audio);
+        rack.process(scratch);
+        note_plugin_time(spent_in_plugins, began);
         if rack.has_fallen() {
-            tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Clip(clip, slot));
+            tell_falls(falls, rack.take_fallen(), |slot| Spot::Clip(clip, slot));
         }
-        let shared = self.scratch.len().min(audio.len());
-        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+        let shared = scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&scratch[..shared]);
     }
 
     fn process_clip_at(&mut self, clip: ClipId, audio: &mut [[f32; 2]], at: loupe_engine::Frames) {
-        let Some(rack) = self.clips.get_mut(&clip) else { return };
+        let Self { clips, scratch, spent_in_plugins, .. } = self;
+        let Some(rack) = clips.get_mut(&clip) else { return };
         if rack.is_empty() {
             return;
         }
-        self.scratch.clear();
-        self.scratch.extend_from_slice(audio);
-        rack.process_at(&mut self.scratch, at as i64);
-        let shared = self.scratch.len().min(audio.len());
-        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+        let began = std::time::Instant::now();
+        scratch.clear();
+        scratch.extend_from_slice(audio);
+        rack.process_at(scratch, at as i64);
+        note_plugin_time(spent_in_plugins, began);
+        let shared = scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&scratch[..shared]);
     }
 
     fn clip_latency(&self, clip: ClipId) -> usize {
@@ -443,18 +503,21 @@ impl Chains for Racks {
     }
 
     fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
-        let Some(rack) = self.chains.get_mut(&track) else { return };
+        let Self { chains, scratch, falls, spent_in_plugins, .. } = self;
+        let Some(rack) = chains.get_mut(&track) else { return };
         if rack.is_empty() {
             return;
         }
-        self.scratch.clear();
-        self.scratch.extend_from_slice(audio);
-        rack.process_with(&mut self.scratch, side);
+        let began = std::time::Instant::now();
+        scratch.clear();
+        scratch.extend_from_slice(audio);
+        rack.process_with(scratch, side);
+        note_plugin_time(spent_in_plugins, began);
         if rack.has_fallen() {
-            tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
+            tell_falls(falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
         }
-        let shared = self.scratch.len().min(audio.len());
-        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+        let shared = scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&scratch[..shared]);
     }
 
     fn whole_waves_at_once(&self) -> bool {
@@ -462,69 +525,72 @@ impl Chains for Racks {
     }
 
     fn process_wave(&mut self, jobs: &mut [loupe_engine::Job<'_>]) {
-        let mut spare: Vec<&mut loupe_engine::Job<'_>> = jobs.iter_mut().collect();
-        let mut pairs: Vec<(&mut Rack, &mut loupe_engine::Job<'_>)> = Vec::with_capacity(spare.len());
-        for (id, rack) in self.chains.iter_mut() {
-            if rack.is_empty() {
-                continue;
-            }
-            if let Some(at) = spare.iter().position(|job| job.track == *id) {
-                pairs.push((rack, spare.swap_remove(at)));
-            }
+        let began = std::time::Instant::now();
+        self.run_a_whole_wave(jobs);
+        self.note_plugin_time(began);
+    }
+
+    fn plugin_spending(&self) -> PluginSpending {
+        PluginSpending {
+            nanoseconds: self.spent_in_plugins.load(Ordering::Relaxed),
+            running: self.running(),
+            held_back: self.held_back(),
+            waves: self.waves.load(Ordering::Relaxed),
+            tracks_in_waves: self.tracks_in_waves.load(Ordering::Relaxed),
+            at_once: tracks_at_once(),
         }
-        if pairs.len() < 2 {
-            for (rack, job) in pairs {
-                run_one(rack, job, &self.falls);
-            }
-            return;
-        }
-        let queue = Mutex::new(pairs);
-        let hands = queue.lock().map(|held| held.len()).unwrap_or(0).min(MOST_TRACKS_AT_ONCE);
-        let falls = &self.falls;
-        std::thread::scope(|scope| {
-            for _ in 0..hands {
-                let queue = &queue;
-                scope.spawn(move || loop {
-                    let next = queue.lock().ok().and_then(|mut held| held.pop());
-                    let Some((rack, job)) = next else { return };
-                    run_one(rack, job, falls);
-                });
-            }
-        });
     }
 
     fn process_takes(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
-        let Some(rack) = self.chains.get_mut(&track) else { return };
+        let Self { chains, scratch, falls, spent_in_plugins, .. } = self;
+        let Some(rack) = chains.get_mut(&track) else { return };
         if !rack.has_takes() {
             return;
         }
-        self.scratch.clear();
-        self.scratch.extend_from_slice(audio);
-        rack.process_takes(&mut self.scratch);
+        let began = std::time::Instant::now();
+        scratch.clear();
+        scratch.extend_from_slice(audio);
+        rack.process_takes(scratch);
+        note_plugin_time(spent_in_plugins, began);
         if rack.has_fallen() {
-            tell_falls(&self.falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
+            tell_falls(falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
         }
-        let shared = self.scratch.len().min(audio.len());
-        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+        let shared = scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&scratch[..shared]);
     }
 
     fn process_master(&mut self, audio: &mut [[f32; 2]]) {
-        let Some(rack) = self.master.as_mut() else { return };
+        let Self { master, scratch, falls, spent_in_plugins, .. } = self;
+        let Some(rack) = master.as_mut() else { return };
         if rack.is_empty() {
             return;
         }
-        self.scratch.clear();
-        self.scratch.extend_from_slice(audio);
-        rack.process(&mut self.scratch);
+        let began = std::time::Instant::now();
+        scratch.clear();
+        scratch.extend_from_slice(audio);
+        rack.process(scratch);
+        note_plugin_time(spent_in_plugins, began);
         if rack.has_fallen() {
-            tell_falls(&self.falls, rack.take_fallen(), Spot::Master);
+            tell_falls(falls, rack.take_fallen(), Spot::Master);
         }
-        let shared = self.scratch.len().min(audio.len());
-        audio[..shared].copy_from_slice(&self.scratch[..shared]);
+        let shared = scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&scratch[..shared]);
     }
 }
 
 const MOST_TRACKS_AT_ONCE: usize = 256;
+const FEWEST_TRACKS_AT_ONCE: usize = 4;
+const TRACKS_A_CORE_CARRIES: usize = 2;
+
+fn tracks_at_once() -> usize {
+    std::thread::available_parallelism()
+        .map_or(FEWEST_TRACKS_AT_ONCE, |cores| cores.get() * TRACKS_A_CORE_CARRIES)
+        .clamp(FEWEST_TRACKS_AT_ONCE, MOST_TRACKS_AT_ONCE)
+}
+
+fn note_plugin_time(spent: &AtomicU64, began: std::time::Instant) {
+    spent.fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
 
 fn run_one(rack: &mut Rack, job: &mut loupe_engine::Job<'_>, falls: &Falls) {
     let mut held: Vec<[f32; 2]> = job.audio.to_vec();
