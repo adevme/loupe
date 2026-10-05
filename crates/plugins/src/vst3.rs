@@ -154,6 +154,7 @@ pub struct Effect {
     pub side_bus: bool,
     turns: vst3::ComWrapper<crate::changes::Turns>,
     ids: Vec<u32>,
+    steps: Vec<u32>,
     controller: Option<ComPtr<vst3::Steinberg::Vst::IEditController>>,
     ara: Option<Document>,
     context: vst3::Steinberg::Vst::ProcessContext,
@@ -216,6 +217,7 @@ impl Effect {
                 side_bus: ins > 1,
                 turns: crate::changes::Turns::empty(),
                 ids: Vec::new(),
+                steps: Vec::new(),
                 controller: None,
                 ara,
                 context: std::mem::zeroed(),
@@ -362,11 +364,12 @@ impl Effect {
     pub fn knobs(&mut self) -> Vec<String> {
         use vst3::Steinberg::Vst::IEditControllerTrait;
         let mut out = Vec::new();
+        let mut steps = Vec::new();
         let mut seen = Vec::new();
         let Some(controller) = self.controller() else { return out };
         unsafe {
             let count = controller.getParameterCount();
-            for index in 0..count.min(512) {
+            for index in 0..count.min(crate::wording::MOST_KNOBS as _) {
                 let mut about: vst3::Steinberg::Vst::ParameterInfo = std::mem::zeroed();
                 if controller.getParameterInfo(index, &mut about) != kResultOk {
                     continue;
@@ -374,9 +377,11 @@ impl Effect {
                 let raw: Vec<u16> = about.title.iter().take_while(|unit| **unit != 0).copied().collect();
                 out.push(String::from_utf16_lossy(&raw));
                 seen.push(about.id);
+                steps.push(about.stepCount.max(0) as u32);
             }
         }
         self.ids = seen;
+        self.steps = steps;
         out
     }
 
@@ -428,7 +433,18 @@ impl Effect {
         words.push(0);
         let mut value = 0.0f64;
         let found = unsafe { controller.getParamValueByString(id, words.as_mut_ptr(), &mut value) };
-        (found == kResultOk && value.is_finite()).then_some(value.clamp(0.0, 1.0) as f32)
+        if found == kResultOk && value.is_finite() {
+            return Some(value.clamp(0.0, 1.0) as f32);
+        }
+        let steps = self.steps.get(knob).copied().unwrap_or(0);
+        let say = |value: f64| {
+            let mut words = [0u16; 128];
+            (unsafe { controller.getParamStringByValue(id, value, &mut words) } == kResultOk).then(|| {
+                let raw: Vec<u16> = words.iter().take_while(|unit| **unit != 0).copied().collect();
+                String::from_utf16_lossy(&raw)
+            })
+        };
+        crate::wording::find_value(steps, text, say).map(|value| value as f32)
     }
 
     pub fn save(&self) -> Result<Vec<u8>, String> {

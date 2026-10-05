@@ -10,6 +10,7 @@ pub mod presets;
 pub mod au;
 pub mod ceiling;
 pub mod changes;
+pub mod wording;
 pub mod chrome;
 pub mod clap;
 pub mod context;
