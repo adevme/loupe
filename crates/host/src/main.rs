@@ -544,9 +544,8 @@ fn show(
     }
     unsafe { made.attach(pane.inner(), kind) }?;
     let scale = pane.screen_scale();
-    let listened = scale > 1.01 && made.told_its_scale(scale);
     let asked = made.size();
-    let settled = match listened || scale <= 1.01 || asked != (width, height) {
+    let settled = match scale <= 1.01 || asked != (width, height) {
         true => asked,
         false => ((width as f32 * scale).round() as i32, (height as f32 * scale).round() as i32),
     };

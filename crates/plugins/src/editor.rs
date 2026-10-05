@@ -129,14 +129,6 @@ impl Editor {
         ((rect.right - rect.left).max(80), (rect.bottom - rect.top).max(60))
     }
 
-    pub fn told_its_scale(&self, scale: f32) -> bool {
-        use vst3::Steinberg::{IPlugViewContentScaleSupport, IPlugViewContentScaleSupportTrait};
-        let Some(aware) = self.view.cast::<IPlugViewContentScaleSupport>() else {
-            return false;
-        };
-        unsafe { aware.setContentScaleFactor(scale) == kResultOk }
-    }
-
     pub fn can_resize(&self) -> bool {
         unsafe { self.view.canResize() == kResultOk }
     }
