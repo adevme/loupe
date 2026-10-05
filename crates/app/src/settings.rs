@@ -30,7 +30,7 @@ pub struct Settings {
     pub count_in_bars: u32,
     pub preroll_bars: u32,
     pub punch: bool,
-    pub hear_input: bool,
+    pub hear_input: Hearing,
     pub snap: bool,
     pub midi_inputs: Option<Vec<String>>,
     pub audio: loupe_engine::Device,
@@ -99,7 +99,7 @@ impl Settings {
             count_in_bars: value_of("count_in").and_then(count_in_from).unwrap_or(0),
             preroll_bars: value_of("preroll").and_then(count_in_from).unwrap_or(DEFAULT_PREROLL_BARS),
             punch: value_of("punch") == Some("on"),
-            hear_input: value_of("hear_input") != Some("off"),
+            hear_input: Hearing::from_saved(value_of("hear_input")),
             snap: value_of("snap") != Some("off"),
             midi_inputs: value_of("midi_inputs").map(|value| value.split('\t').filter(|name| !name.is_empty()).map(str::to_string).collect()),
             audio: loupe_engine::Device {
@@ -297,6 +297,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hearing_says_when_the_input_comes_through() {
+        assert!(!Hearing::Never.wants_input(true, true));
+        assert!(Hearing::WhileArmed.wants_input(true, false), "armed is enough");
+        assert!(Hearing::WhileArmed.wants_input(true, true));
+        assert!(!Hearing::WhileRecording.wants_input(true, false), "armed alone is not enough");
+        assert!(Hearing::WhileRecording.wants_input(true, true));
+    }
+
+    #[test]
+    fn hearing_is_saved_and_read_back_and_an_old_on_still_means_recording() {
+        for mode in [Hearing::Never, Hearing::WhileArmed, Hearing::WhileRecording] {
+            assert_eq!(Hearing::from_saved(Some(mode.saved_as())), mode);
+        }
+        assert_eq!(Hearing::from_saved(Some("on")), Hearing::WhileRecording, "settings written before the modes existed");
+        assert_eq!(Hearing::from_saved(None), Hearing::WhileRecording);
+    }
+
+    #[test]
     fn count_in_is_one_of_the_offered_lengths() {
         for (text, bars) in [("0", 0), ("1", 1), (" 2 ", 2), ("4", 4)] {
             assert_eq!(count_in_from(text), Some(bars));
@@ -345,5 +363,49 @@ mod tests {
         let junk = ExportChoices::from_settings(|_| Some("nonsense".to_string()));
         assert_eq!(junk.format, loupe_engine::Format::WavFloat);
         assert_eq!(junk.normalise, loupe_engine::Normalise::Off);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Hearing {
+    Never,
+    WhileArmed,
+    #[default]
+    WhileRecording,
+}
+
+impl Hearing {
+    pub fn saved_as(self) -> &'static str {
+        match self {
+            Hearing::Never => "off",
+            Hearing::WhileArmed => "armed",
+            Hearing::WhileRecording => "recording",
+        }
+    }
+
+    pub fn from_saved(value: Option<&str>) -> Self {
+        match value {
+            Some("off") => Hearing::Never,
+            Some("armed") => Hearing::WhileArmed,
+            _ => Hearing::WhileRecording,
+        }
+    }
+
+    pub fn wants_input(self, armed: bool, recording: bool) -> bool {
+        match self {
+            Hearing::Never => false,
+            Hearing::WhileArmed => armed,
+            Hearing::WhileRecording => recording,
+        }
+    }
+}
+
+impl std::fmt::Display for Hearing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Hearing::Never => write!(f, "Never"),
+            Hearing::WhileArmed => write!(f, "Whenever a track is armed"),
+            Hearing::WhileRecording => write!(f, "Only while recording"),
+        }
     }
 }

@@ -209,7 +209,7 @@ mod tests {
             count_in_bars: 0,
             preroll_bars: 2,
             punch: false,
-            hear_input: true,
+            hear_input: crate::settings::Hearing::default(),
             snap: true,
             audio: loupe_engine::Device::default(),
             export: settings::ExportChoices::from_settings(|_| None),

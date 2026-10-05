@@ -276,7 +276,7 @@ pub enum Message {
     UseTake(ClipId, usize),
     Comp { track: TrackId, take: usize, from: Frames, to: Frames },
     ShowChain(TrackId, bool),
-    HearInputToggled,
+    HearingChosen(settings::Hearing),
     OpenSampler(TrackId),
     SamplerChanged(TrackId, loupe_engine::Sampler),
     PickSample(TrackId),
@@ -597,7 +597,7 @@ struct App {
     resources: resources::Resources,
     preroll_bars: u32,
     punch: bool,
-    hear_input: bool,
+    hear_input: settings::Hearing,
     rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
@@ -1191,9 +1191,9 @@ impl App {
                     self.rec_shown.remove(&track);
                 }
             }
-            Message::HearInputToggled => {
-                self.hear_input = !self.hear_input;
-                if let Err(why) = settings::save("hear_input", if self.hear_input { "on" } else { "off" }) {
+            Message::HearingChosen(chosen) => {
+                self.hear_input = chosen;
+                if let Err(why) = settings::save("hear_input", chosen.saved_as()) {
                     self.problem = Some(format!("Could not save settings: {why}"));
                 }
                 self.listen_if_armed();
@@ -2501,7 +2501,8 @@ impl App {
             return;
         }
         let rolling = self.recording.is_some();
-        self.engine.hear_on(if self.hear_input && rolling { &heard } else { &[] });
+        let through = self.hear_input.wants_input(true, rolling);
+        self.engine.hear_on(if through { &heard } else { &[] });
         if self.input.is_some() {
             return;
         }
@@ -3002,10 +3003,8 @@ impl App {
             text(self.keyboards_found()).size(12).color(palette.text_dim),
             self.midi_picker(),
             text("Hear yourself").size(13).font(palette.medium),
-            text("While a take is recording, armed tracks play what the input hears, through their Rec plugins. Use headphones, or speakers will howl.").size(12).color(palette.text_dim),
-            iced::widget::checkbox("Hear yourself while recording", self.hear_input)
-                .on_toggle(|_| Message::HearInputToggled)
-                .text_size(13),
+            text("Armed tracks play what the input hears, through their Rec plugins. Use headphones, or speakers will howl.").size(12).color(palette.text_dim),
+            theme::picker(palette, HEARINGS, Some(self.hear_input), Message::HearingChosen).width(Length::Fill),
             text("Count in").size(13).font(palette.medium),
             text("Bars of clicks before recording starts, when Loupe is stopped. The take begins where the playhead was.").size(12).color(palette.text_dim),
             theme::picker(palette, COUNT_INS, Some(CountIn(self.count_in_bars)), Message::CountInChosen).width(160),
@@ -3132,6 +3131,8 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CountIn(u32);
+
+const HEARINGS: [settings::Hearing; 3] = [settings::Hearing::Never, settings::Hearing::WhileArmed, settings::Hearing::WhileRecording];
 
 const COUNT_INS: [CountIn; 4] = [CountIn(settings::COUNT_IN_BARS[0]), CountIn(settings::COUNT_IN_BARS[1]), CountIn(settings::COUNT_IN_BARS[2]), CountIn(settings::COUNT_IN_BARS[3])];
 
