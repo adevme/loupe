@@ -12,6 +12,7 @@ pub fn wanted(fx: &[Fx]) -> Vec<Wanted> {
     fx.iter()
         .filter(|fx| fx.record)
         .map(|fx| Wanted {
+            mix: 1.0,
             path: fx.path.clone(),
             index: fx.index,
             name: fx.name.clone(),
@@ -73,8 +74,8 @@ mod tests {
         loupe_engine::write_frames(&take, &loud, 48_000).unwrap();
         let dry = Source::load(&take, 48_000).unwrap();
         let fx = [
-            Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: 1, name: "Loupe Compressor".into(), bypassed: false, state: Vec::new(), record: true },
-            Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: 2, name: "Loupe Limiter".into(), bypassed: false, state: Vec::new(), record: false },
+            Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: 1, name: "Loupe Compressor".into(), bypassed: false, state: Vec::new(), record: true, mix: 1.0 },
+            Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: 2, name: "Loupe Limiter".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 },
         ];
         let want = wanted(&fx);
         assert_eq!(want.len(), 1, "only the Rec plugins print");

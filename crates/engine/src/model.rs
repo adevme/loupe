@@ -133,6 +133,7 @@ pub struct Fx {
     pub bypassed: bool,
     pub state: Vec<u8>,
     pub record: bool,
+    pub mix: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,16 +305,19 @@ pub enum Command {
     RemoveClipFx { clip: ClipId, slot: usize },
     MoveClipFx { clip: ClipId, slot: usize, to: usize },
     BypassClipFx { clip: ClipId, slot: usize, bypassed: bool },
+    SetClipFxMix { clip: ClipId, slot: usize, mix: f32 },
     SetClipFxState { clip: ClipId, slot: usize, state: Vec<u8> },
     AddFx { track: TrackId, fx: Fx },
     RemoveFx { track: TrackId, slot: usize },
     MoveFx { track: TrackId, slot: usize, to: usize },
     BypassFx { track: TrackId, slot: usize, bypassed: bool },
+    SetFxMix { track: TrackId, slot: usize, mix: f32 },
     SetFxState { track: TrackId, slot: usize, state: Vec<u8> },
     AddMasterFx(Fx),
     RemoveMasterFx(usize),
     MoveMasterFx { slot: usize, to: usize },
     BypassMasterFx { slot: usize, bypassed: bool },
+    SetMasterFxMix { slot: usize, mix: f32 },
     SetMasterFxState { slot: usize, state: Vec<u8> },
     AddNotesClip { track: TrackId, name: String, start: Frames, len: Frames, notes: Vec<Note> },
     SetNotes { clip: ClipId, notes: Vec<Note> },
@@ -879,6 +883,12 @@ impl Project {
                 fx.bypassed = bypassed;
                 Ok(Outcome::Done)
             }
+            Command::SetClipFxMix { clip, slot, mix } => {
+                let (t, i) = self.locate(clip)?;
+                let fx = self.tracks[t].clips[i].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.mix = valid_mix(mix)?;
+                Ok(Outcome::Done)
+            }
             Command::SetClipFxState { clip, slot, state } => {
                 let (t, i) = self.locate(clip)?;
                 let fx = self.tracks[t].clips[i].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
@@ -914,6 +924,12 @@ impl Project {
                 fx.bypassed = bypassed;
                 Ok(Outcome::Done)
             }
+            Command::SetFxMix { track, slot, mix } => {
+                let t = self.track_index(track)?;
+                let fx = self.tracks[t].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.mix = valid_mix(mix)?;
+                Ok(Outcome::Done)
+            }
             Command::SetFxState { track, slot, state } => {
                 let t = self.track_index(track)?;
                 let fx = self.tracks[t].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
@@ -942,6 +958,11 @@ impl Project {
             Command::BypassMasterFx { slot, bypassed } => {
                 let fx = self.master_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
                 fx.bypassed = bypassed;
+                Ok(Outcome::Done)
+            }
+            Command::SetMasterFxMix { slot, mix } => {
+                let fx = self.master_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.mix = valid_mix(mix)?;
                 Ok(Outcome::Done)
             }
             Command::SetMasterFxState { slot, state } => {
@@ -1212,4 +1233,11 @@ mod tests {
         assert!(p.apply(Command::SetBpm(0.0)).is_err());
         assert!(p.apply(Command::DeleteClip(ClipId(999))).is_err());
     }
+}
+
+fn valid_mix(mix: f32) -> Result<f32, CommandError> {
+    if !mix.is_finite() || !(0.0..=1.0).contains(&mix) {
+        return Err(CommandError::InvalidValue);
+    }
+    Ok(mix)
 }

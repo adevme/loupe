@@ -87,6 +87,7 @@ impl Racks {
                 .master_fx
                 .iter()
                 .map(|fx| Wanted {
+                    mix: fx.mix,
                     path: fx.path.clone(),
                     index: fx.index,
                     name: fx.name.clone(),
@@ -108,6 +109,7 @@ impl Racks {
                 .fx
                 .iter()
                 .map(|fx| Wanted {
+                    mix: fx.mix,
                     path: fx.path.clone(),
                     index: fx.index,
                     name: fx.name.clone(),
@@ -134,6 +136,7 @@ impl Racks {
                     .fx
                     .iter()
                     .map(|fx| Wanted {
+                        mix: fx.mix,
                         path: fx.path.clone(),
                         index: fx.index,
                         name: fx.name.clone(),
@@ -426,7 +429,7 @@ mod tests {
     use super::*;
 
     fn fx(path: &str, index: usize, state: &[u8]) -> Fx {
-        Fx { path: PathBuf::from(path), index, name: format!("{path} {index}"), bypassed: false, state: state.to_vec(), record: false }
+        Fx { path: PathBuf::from(path), index, name: format!("{path} {index}"), bypassed: false, state: state.to_vec(), record: false, mix: 1.0 }
     }
 
     fn song_with_plugins() -> (Project, TrackId, ClipId) {
@@ -546,7 +549,7 @@ mod tests {
         let (mut project, id) = project_with_clip("C:\\Songs\\lead.wav");
         let archive = vec![0u8, 1, 2, 255, b'\n', b'\t', b' '];
         let state = pack(b"melodyne window", "com.celemony.ara.audiosourcedescription.13", &archive);
-        let fx = Fx { path: PathBuf::from("C:\\VST3\\Melodyne.vst3"), index: 0, name: "Melodyne".into(), bypassed: false, state: state.clone(), record: false };
+        let fx = Fx { path: PathBuf::from("C:\\VST3\\Melodyne.vst3"), index: 0, name: "Melodyne".into(), bypassed: false, state: state.clone(), record: false, mix: 1.0 };
         project.apply(Command::AddClipFx { clip: id, fx }).expect("the plugin goes on the clip");
         let text = SavedProject::capture(&project, |_| None).to_text();
         let sources = vec![project.sources[0].clone()];

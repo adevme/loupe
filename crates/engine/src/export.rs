@@ -678,6 +678,7 @@ mod tests {
         let mut project = song();
         let bare = render_units(&project, None);
         project.tracks[0].fx.push(crate::model::Fx {
+            mix: 1.0,
             path: "a.vst3".into(),
             index: 0,
             name: "A".into(),

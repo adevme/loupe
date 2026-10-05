@@ -25,6 +25,7 @@ mod stretching;
 mod stockwin;
 mod printing;
 mod chains;
+mod chainwin;
 mod keying;
 mod recording;
 mod takes;
@@ -174,6 +175,11 @@ pub enum Message {
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
     MixerMenu { at: Point },
+    OpenChain(stockwin::Spot),
+    SetFxMix(stockwin::Spot, usize, f32),
+    ChainGrab(stockwin::Spot, usize),
+    ChainOver(stockwin::Spot, usize),
+    ChainDrop,
     OpenFileMenu,
     OpenHelpMenu,
     OpenScriptsMenu,
@@ -401,6 +407,7 @@ enum Run {
     Fade(ClipId, Edge),
     TrackGain(TrackId),
     Master,
+    FxMix(stockwin::Spot, usize),
     Pan(TrackId),
     Paint,
     Trim(ClipId),
@@ -420,6 +427,7 @@ pub enum Overlay {
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
+    Chain(stockwin::Spot),
     MixerMenu { at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
@@ -531,6 +539,8 @@ struct App {
     settings_tab: SettingsTab,
     entry: String,
     clip_name: String,
+    chain_drag: Option<(stockwin::Spot, usize)>,
+    chain_over: Option<(stockwin::Spot, usize)>,
     entry_problem: Option<String>,
     main_window: window::Id,
     mixer_window: Option<window::Id>,
@@ -655,6 +665,8 @@ impl App {
             settings_tab: SettingsTab::default(),
             entry: String::new(),
             clip_name: String::new(),
+            chain_drag: None,
+            chain_over: None,
             entry_problem: None,
             main_window: main,
             mixer_window: None,
@@ -1255,6 +1267,18 @@ impl App {
             Message::DeleteClip(clip) => self.delete_clips(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
+            Message::OpenChain(spot) => self.overlay = Overlay::Chain(spot),
+            Message::SetFxMix(spot, slot, mix) => self.set_fx_mix(spot, slot, mix),
+            Message::ChainGrab(spot, slot) => {
+                self.chain_drag = Some((spot, slot));
+                self.chain_over = Some((spot, slot));
+            }
+            Message::ChainOver(spot, slot) => {
+                if self.chain_drag.is_some() {
+                    self.chain_over = Some((spot, slot));
+                }
+            }
+            Message::ChainDrop => self.drop_chain(),
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
             Message::OpenScriptsMenu => {
@@ -1432,6 +1456,7 @@ impl App {
             Message::AddMasterPlugin(which) => {
                 if let Some(plugin) = self.found.get(which).cloned() {
                     let fx = loupe_engine::Fx {
+                        mix: 1.0,
                         path: plugin.path.clone(),
                         index: plugin.index,
                         name: plugin.name.clone(),
@@ -1574,6 +1599,7 @@ impl App {
             Message::AddPlugin(track, which) => {
                 if let Some(plugin) = self.found.get(which).cloned() {
                     let fx = loupe_engine::Fx {
+                        mix: 1.0,
                         path: plugin.path.clone(),
                         index: plugin.index,
                         name: plugin.name.clone(),
@@ -1600,6 +1626,7 @@ impl App {
             Message::AddClipPlugin(clip, which) => {
                 if let Some(plugin) = self.found.get(which).cloned() {
                     let fx = loupe_engine::Fx {
+                        mix: 1.0,
                         path: plugin.path.clone(),
                         index: plugin.index,
                         name: plugin.name.clone(),

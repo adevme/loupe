@@ -172,7 +172,7 @@ impl App {
                     ..Default::default()
                 }),
                 strip_title(palette, "", "Master".to_string()),
-                self.master_fx_block(),
+                self.fx_button(crate::stockwin::Spot::Master),
                 hrow![
                     mouse_area(
                         vertical_slider(0.0..=LOUDEST_MASTER_PERCENT, percent, Message::MasterPercent)
@@ -275,7 +275,7 @@ impl App {
                         ..Default::default()
                     }),
                     strip_title(palette, &format!("{:02}", index + 1), name),
-                    self.fx_block(id),
+                    self.fx_button(crate::stockwin::Spot::Track(id)),
                     self.pan_knob(id, track.pan),
                     hrow![
                         mouse_area(

@@ -170,7 +170,7 @@ fn a_clip_rack_opens_the_ara_test_plugin_on_its_clip_and_follows_it() {
     let half = RATE as usize / 2;
     let mut rack = Rack::new(PathBuf::from(env!("CARGO_BIN_EXE_loupe-host")), RATE, BLOCK);
     assert!(rack.follow_region(Some(region(&take, 1.0))).is_empty());
-    let wanted = Wanted { path: plugin(), index: 0, name: "ARATestPlugIn".into(), bypassed: false, state: Vec::new(), record: false };
+    let wanted = Wanted { path: plugin(), index: 0, name: "ARATestPlugIn".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
     assert!(rack.reconcile(&[wanted]).is_empty());
     let began = std::time::Instant::now();
     while !rack.ready() {

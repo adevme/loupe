@@ -546,6 +546,7 @@ mod tests {
         let mut p = Project::new(48_000);
         let one = track(&mut p);
         let fx = crate::model::Fx {
+            mix: 1.0,
             path: std::path::PathBuf::from("x.vst3"),
             index: 0,
             name: "x".into(),
@@ -614,6 +615,7 @@ mod tests {
         let loud = clip(&mut p, one, counting(200), 0);
         let plain = clip(&mut p, one, counting(200), 300);
         let fx = crate::model::Fx {
+            mix: 1.0,
             path: std::path::PathBuf::from("x.vst3"),
             index: 0,
             name: "x".into(),
@@ -655,6 +657,7 @@ mod tests {
         let one = track(&mut p);
         let placed = clip(&mut p, one, counting(1000), 100);
         let fx = crate::model::Fx {
+            mix: 1.0,
             path: std::path::PathBuf::from("melodyne.vst3"),
             index: 0,
             name: "Melodyne".into(),
@@ -705,6 +708,7 @@ mod tests {
         p.apply(Command::SetSendPreFader { from: vox, to: beat, pre_fader: true }).unwrap();
         p.apply(Command::SetTrackMuted { track: vox, muted: true }).unwrap();
         let fx = crate::model::Fx {
+            mix: 1.0,
             path: std::path::PathBuf::from("duck.vst3"),
             index: 0,
             name: "duck".into(),
@@ -758,6 +762,7 @@ mod tests {
         clip(&mut p, slow, counting(400), 100);
         clip(&mut p, plain, counting(400), 100);
         let fx = crate::model::Fx {
+            mix: 1.0,
             path: std::path::PathBuf::from("slow.vst3"),
             index: 0,
             name: "slow".into(),
@@ -816,6 +821,7 @@ mod tests {
         p.apply(Command::SetSendGain { from: vox, to: verb, gain: 1.0 }).unwrap();
         p.apply(Command::SetSendPreFader { from: vox, to: verb, pre_fader: true }).unwrap();
         let fx = crate::model::Fx {
+            mix: 1.0,
             path: std::path::PathBuf::from("x.vst3"),
             index: 0,
             name: "x".into(),

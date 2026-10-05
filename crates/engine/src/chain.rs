@@ -34,6 +34,7 @@ pub fn chain_from(text: &str) -> Result<Vec<Fx>, String> {
                     Some(text) => bytes_of(text).ok_or("a plugin's settings in the chain are not readable")?,
                 };
                 chain.push(Fx {
+                    mix: 1.0,
                     path: path.take().ok_or("a plugin in the chain has no file")?,
                     index: fields.get("index").and_then(|v| v.parse().ok()).unwrap_or(0),
                     name: name.to_string(),
@@ -55,8 +56,8 @@ mod tests {
     #[test]
     fn a_chain_comes_back_as_it_was_saved() {
         let chain = vec![
-            Fx { path: PathBuf::from("loupe.loupe"), index: 0, name: "Loupe EQ".into(), bypassed: false, state: vec![1, 2, 250], record: true },
-            Fx { path: PathBuf::from("C:\\VST3\\Pro-DS.vst3"), index: 0, name: "FabFilter Pro-DS".into(), bypassed: true, state: Vec::new(), record: false },
+            Fx { path: PathBuf::from("loupe.loupe"), index: 0, name: "Loupe EQ".into(), bypassed: false, state: vec![1, 2, 250], record: true, mix: 1.0 },
+            Fx { path: PathBuf::from("C:\\VST3\\Pro-DS.vst3"), index: 0, name: "FabFilter Pro-DS".into(), bypassed: true, state: Vec::new(), record: false, mix: 1.0 },
         ];
         let back = chain_from(&chain_text(&chain)).unwrap();
         assert_eq!(back.len(), 2);

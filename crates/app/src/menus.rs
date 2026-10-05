@@ -36,6 +36,7 @@ impl App {
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::MixerMenu { at } => self.floating(*at, self.mixer_menu()),
+            Overlay::Chain(spot) => self.centred(self.chain_sheet(*spot)),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
             Overlay::Inputs { track, at, inputs } => self.floating(*at, self.input_menu(*track, *inputs)),

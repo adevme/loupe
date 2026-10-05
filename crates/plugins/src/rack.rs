@@ -5,6 +5,56 @@ use crate::wire::{Ask, Region, Reply};
 
 type Arrived = Result<Opened, (String, bool)>;
 
+struct Dry {
+    kept: Vec<[f32; 2]>,
+    at: usize,
+    held: usize,
+    spare: Vec<[f32; 2]>,
+}
+
+impl Dry {
+    fn empty() -> Self {
+        Self { kept: Vec::new(), at: 0, held: 0, spare: Vec::new() }
+    }
+
+    fn room_for(&mut self, latency: usize, block: usize) {
+        let want = latency + block.max(1);
+        if self.held != latency || self.kept.len() < want {
+            self.kept.clear();
+            self.kept.resize(want.max(1), [0.0; 2]);
+            self.spare.clear();
+            self.spare.resize(block.max(1), [0.0; 2]);
+            self.at = 0;
+            self.held = latency;
+        }
+    }
+
+    fn blend(&mut self, audio: &mut [[f32; 2]], mix: f32) {
+        if self.kept.is_empty() {
+            return;
+        }
+        let wet = mix.clamp(0.0, 1.0);
+        let dry = 1.0 - wet;
+        let room = self.kept.len();
+        for (at, frame) in audio.iter_mut().enumerate() {
+            let was = self.spare.get(at).copied().unwrap_or([0.0; 2]);
+            self.kept[self.at] = was;
+            let behind = (self.at + room - self.held.min(room)) % room;
+            let older = self.kept[behind];
+            self.at = (self.at + 1) % room;
+            frame[0] = frame[0] * wet + older[0] * dry;
+            frame[1] = frame[1] * wet + older[1] * dry;
+        }
+    }
+
+    fn remember(&mut self, audio: &[[f32; 2]]) {
+        if self.spare.len() < audio.len() {
+            return;
+        }
+        self.spare[..audio.len()].copy_from_slice(audio);
+    }
+}
+
 pub struct Slot {
     pub path: PathBuf,
     pub index: usize,
@@ -19,6 +69,8 @@ pub struct Slot {
     built: Option<Box<dyn loupe_stock::Effect>>,
     coming: Option<std::sync::mpsc::Receiver<Arrived>>,
     wanted_open: bool,
+    pub mix: f32,
+    dry: Dry,
 }
 
 impl Slot {
@@ -44,6 +96,7 @@ impl Slot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wanted {
+    pub mix: f32,
     pub path: PathBuf,
     pub index: usize,
     pub name: String,
@@ -110,6 +163,8 @@ impl Rack {
 
     pub fn add(&mut self, path: &Path, index: usize, name: &str) -> Result<usize, String> {
         let mut slot = Slot {
+            mix: 1.0,
+            dry: Dry::empty(),
             path: path.to_path_buf(),
             index,
             name: name.to_string(),
@@ -375,12 +430,21 @@ impl Rack {
 
     fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool, at: Option<i64>) {
         self.take_arrivals();
+        let block = audio.len();
         for (which, slot) in self.slots.iter_mut().enumerate() {
             if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
                 continue;
             }
+            let blending = slot.mix < 1.0;
+            if blending {
+                slot.dry.room_for(slot.latency, block);
+                slot.dry.remember(audio);
+            }
             if let Some(made) = slot.built.as_mut() {
                 made.process(audio);
+                if blending {
+                    slot.dry.blend(audio, slot.mix);
+                }
                 continue;
             }
             let Some(host) = slot.host.as_mut() else { continue };
@@ -388,12 +452,16 @@ impl Rack {
                 Some(at) if slot.ara => host.run_at(audio, at),
                 _ => host.run_with(audio, side),
             };
-            if let Err(why) = ran {
-                let fell = host.gone();
-                slot.trouble = Some(why.clone());
-                slot.host = None;
-                if fell {
-                    self.fallen.push(Fallen { slot: which, name: slot.name.clone(), why });
+            match ran {
+                Ok(()) if blending => slot.dry.blend(audio, slot.mix),
+                Ok(()) => {}
+                Err(why) => {
+                    let fell = host.gone();
+                    slot.trouble = Some(why.clone());
+                    slot.host = None;
+                    if fell {
+                        self.fallen.push(Fallen { slot: which, name: slot.name.clone(), why });
+                    }
                 }
             }
         }
@@ -402,13 +470,14 @@ impl Rack {
     pub fn reconcile(&mut self, want: &[Wanted]) -> Vec<String> {
         let mut pool: Vec<Slot> = self.slots.drain(..).collect();
         let mut troubles = Vec::new();
-        for Wanted { path, index, name, bypassed, state, record } in want {
+        for Wanted { path, index, name, bypassed, state, record, mix } in want {
             let found = pool.iter().position(|slot| &slot.path == path && slot.index == *index && slot.working());
             match found {
                 Some(at) => {
                     let mut slot = pool.remove(at);
                     slot.name = name.clone();
                     slot.bypassed = *bypassed;
+                    slot.mix = *mix;
                     slot.record = *record;
                     if let Some(made) = slot.built.as_mut() {
                         put_knobs(made.as_mut(), state);
@@ -417,6 +486,8 @@ impl Rack {
                 }
                 None => {
                     let mut slot = Slot {
+                        mix: *mix,
+                        dry: Dry::empty(),
                         path: path.clone(),
                         index: *index,
                         name: name.clone(),
@@ -550,8 +621,8 @@ mod tests {
     fn reconcile_keeps_what_is_still_wanted_and_drops_the_rest() {
         let mut rack = rack();
         let want = vec![
-            Wanted { path: PathBuf::from("one.vst3"), index: 0, name: "One".into(), bypassed: false, state: Vec::new(), record: false },
-            Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: true, state: Vec::new(), record: false },
+            Wanted { path: PathBuf::from("one.vst3"), index: 0, name: "One".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 },
+            Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: true, state: Vec::new(), record: false, mix: 1.0 },
         ];
         let troubles = rack.reconcile(&want);
         assert!(troubles.is_empty());
@@ -568,7 +639,7 @@ mod tests {
         }
         assert!(rack.slots().iter().all(|slot| slot.trouble.is_some()));
         assert!(!rack.has_fallen(), "a host that never started has not crashed");
-        let shorter = vec![Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: false, state: Vec::new(), record: false }];
+        let shorter = vec![Wanted { path: PathBuf::from("two.vst3"), index: 1, name: "Two".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }];
         rack.reconcile(&shorter);
         let names: Vec<_> = rack.slots().iter().map(|slot| slot.name.clone()).collect();
         assert_eq!(names, vec!["Two"]);
@@ -637,6 +708,7 @@ mod built_in_tests {
     #[test]
     fn recording_plugins_only_touch_what_is_being_recorded() {
         let squash = |record| Wanted {
+            mix: 1.0,
             path: PathBuf::from(crate::BUILT_IN),
             index: 1,
             name: "Loupe Compressor".into(),
@@ -668,6 +740,7 @@ mod built_in_tests {
         let first = rack.save(0).expect("it saves");
         assert!(!first.is_empty());
         let want = vec![Wanted {
+            mix: 1.0,
             path: PathBuf::from(crate::BUILT_IN),
             index: 0,
             name: "Loupe EQ".into(),
@@ -735,7 +808,7 @@ mod fallen_tests {
     }
 
     fn wanted(name: &str) -> Wanted {
-        Wanted { path: PathBuf::from("crashy.vst3"), index: 0, name: name.into(), bypassed: false, state: Vec::new(), record: false }
+        Wanted { path: PathBuf::from("crashy.vst3"), index: 0, name: name.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }
     }
 
     fn play_until_settled(rack: &mut Rack) {
@@ -816,5 +889,60 @@ mod fallen_tests {
         assert_eq!(audio, vec![[0.5; 2]; 64], "a late block passes the song through untouched");
         assert!(rack.slots()[0].trouble.is_none(), "being late is not being dead");
         assert!(!rack.has_fallen(), "a late plugin is not reported as a crash");
+    }
+}
+
+#[cfg(test)]
+mod blending {
+    use super::*;
+
+    fn line(latency: usize, block: usize) -> Dry {
+        let mut dry = Dry::empty();
+        dry.room_for(latency, block);
+        dry
+    }
+
+    #[test]
+    fn all_the_way_wet_leaves_the_plugin_alone() {
+        let mut dry = line(0, 4);
+        let mut audio = vec![[1.0, 1.0]; 4];
+        dry.remember(&[[0.25, 0.25]; 4]);
+        dry.blend(&mut audio, 1.0);
+        assert_eq!(audio, vec![[1.0, 1.0]; 4]);
+    }
+
+    #[test]
+    fn all_the_way_dry_gives_back_what_went_in() {
+        let mut dry = line(0, 4);
+        let mut audio = vec![[1.0, 1.0]; 4];
+        dry.remember(&[[0.25, 0.25]; 4]);
+        dry.blend(&mut audio, 0.0);
+        assert_eq!(audio, vec![[0.25, 0.25]; 4]);
+    }
+
+    #[test]
+    fn half_and_half_is_the_middle_of_the_two() {
+        let mut dry = line(0, 4);
+        let mut audio = vec![[1.0, -1.0]; 4];
+        dry.remember(&[[0.0, 1.0]; 4]);
+        dry.blend(&mut audio, 0.5);
+        assert_eq!(audio, vec![[0.5, 0.0]; 4]);
+    }
+
+    #[test]
+    fn a_plugin_with_latency_is_met_by_a_dry_that_waited_the_same() {
+        let block = 4;
+        let latency = 4;
+        let mut dry = line(latency, block);
+        let first = vec![[1.0, 1.0]; block];
+        let second = vec![[2.0, 2.0]; block];
+        let mut wet = vec![[0.0, 0.0]; block];
+        dry.remember(&first);
+        dry.blend(&mut wet, 0.0);
+        assert_eq!(wet, vec![[0.0, 0.0]; block], "nothing has come through the plugin yet");
+        let mut wet = vec![[0.0, 0.0]; block];
+        dry.remember(&second);
+        dry.blend(&mut wet, 0.0);
+        assert_eq!(wet, first, "the dry arrives as late as the plugin does");
     }
 }

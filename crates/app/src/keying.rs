@@ -128,8 +128,8 @@ mod tests {
     fn send_sets_the_tempo_and_every_loupe_tune_but_nothing_else() {
         let mut project = Project::new(48_000);
         let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
-        let tune = Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: tune_index().unwrap(), name: TUNE.into(), bypassed: false, state: Vec::new(), record: false };
-        let eq = Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: 0, name: "Loupe EQ".into(), bypassed: false, state: vec![1, 2, 3, 4], record: false };
+        let tune = Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: tune_index().unwrap(), name: TUNE.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        let eq = Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: 0, name: "Loupe EQ".into(), bypassed: false, state: vec![1, 2, 3, 4], record: false, mix: 1.0 };
         project.apply(Command::AddFx { track: vocal, fx: eq }).unwrap();
         project.apply(Command::AddFx { track: vocal, fx: tune.clone() }).unwrap();
         project.apply(Command::AddMasterFx(tune)).unwrap();

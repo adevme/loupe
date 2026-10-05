@@ -61,6 +61,7 @@ pub struct SavedFx {
     pub bypassed: bool,
     pub state: Vec<u8>,
     pub record: bool,
+    pub mix: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +98,7 @@ impl SavedProject {
                 .master_fx
                 .iter()
                 .map(|fx| SavedFx {
+                    mix: fx.mix,
                     path: fx.path.clone(),
                     index: fx.index,
                     name: fx.name.clone(),
@@ -160,6 +162,7 @@ impl SavedProject {
                         .fx
                         .iter()
                         .map(|fx| SavedFx {
+                            mix: fx.mix,
                             path: fx.path.clone(),
                             index: fx.index,
                             name: fx.name.clone(),
@@ -189,6 +192,7 @@ impl SavedProject {
                                 .fx
                                 .iter()
                                 .map(|fx| SavedFx {
+                                    mix: fx.mix,
                                     path: fx.path.clone(),
                                     index: fx.index,
                                     name: fx.name.clone(),
@@ -212,7 +216,7 @@ impl SavedProject {
         for fx in &self.master_fx {
             let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
             out.push_str(&format!("masterfxpath {}\n", fx.path.display()));
-            out.push_str(&format!("masterfx index={} bypass={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.name));
+            out.push_str(&format!("masterfx index={} bypass={} mix={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.mix, fx.name));
         }
         for track in &self.tracks {
             let colour = track.colour.map_or("-".to_string(), |[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"));
@@ -230,8 +234,8 @@ impl SavedProject {
                 out.push_str(&format!("fxpath {}\n", fx.path.display()));
                 let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
                 out.push_str(&format!(
-                    "fx index={} bypass={} rec={} state={state} name={}\n",
-                    fx.index, fx.bypassed as u8, fx.record as u8, fx.name
+                    "fx index={} bypass={} rec={} mix={} state={state} name={}\n",
+                    fx.index, fx.bypassed as u8, fx.record as u8, fx.mix, fx.name
                 ));
             }
             for clip in &track.clips {
@@ -263,7 +267,7 @@ impl SavedProject {
                 for fx in &clip.fx {
                     out.push_str(&format!("clipfxpath {}\n", fx.path.display()));
                     let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
-                    out.push_str(&format!("clipfx index={} bypass={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.name));
+                    out.push_str(&format!("clipfx index={} bypass={} mix={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.mix, fx.name));
                 }
             }
         }
@@ -347,6 +351,7 @@ impl SavedProject {
                         Some(text) => bytes_of(text).ok_or_else(|| bad("the plugin settings are not readable"))?,
                     };
                     let fx = SavedFx {
+                        mix: number_in(&fields, "mix").filter(|found| (0.0..=1.0).contains(found)).unwrap_or(1.0),
                         path,
                         index: fields.get("index").and_then(|v| v.parse().ok()).unwrap_or(0),
                         name: name.to_string(),
@@ -469,6 +474,7 @@ impl SavedProject {
         }
         for fx in &self.master_fx {
             let _ = project.apply(Command::AddMasterFx(crate::model::Fx {
+                mix: fx.mix,
                 path: fx.path.clone(),
                 index: fx.index,
                 name: fx.name.clone(),
@@ -532,6 +538,7 @@ impl SavedProject {
                 }
                 for fx in &clip.fx {
                     let added = crate::model::Fx {
+                        mix: fx.mix,
                         path: fx.path.clone(),
                         index: fx.index,
                         name: fx.name.clone(),
@@ -567,6 +574,7 @@ impl SavedProject {
             }
             for fx in &saved.fx {
                 let added = crate::model::Fx {
+                    mix: fx.mix,
                     path: fx.path.clone(),
                     index: fx.index,
                     name: fx.name.clone(),
@@ -859,8 +867,8 @@ mod routing_round_trip {
     fn rec_plugins_and_printing_survive_a_save_and_open() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
-        let denoise = crate::model::Fx { path: PathBuf::from("quiet.vst3"), index: 0, name: "Denoise".into(), bypassed: false, state: Vec::new(), record: true };
-        let glue = crate::model::Fx { path: PathBuf::from("glue.vst3"), index: 0, name: "Glue".into(), bypassed: false, state: Vec::new(), record: false };
+        let denoise = crate::model::Fx { path: PathBuf::from("quiet.vst3"), index: 0, name: "Denoise".into(), bypassed: false, state: Vec::new(), record: true, mix: 1.0 };
+        let glue = crate::model::Fx { path: PathBuf::from("glue.vst3"), index: 0, name: "Glue".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
         p.apply(Command::AddFx { track, fx: denoise.clone() }).unwrap();
         p.apply(Command::AddFx { track, fx: glue.clone() }).unwrap();
         p.apply(Command::SetPrintTakes { track, on: true }).unwrap();
@@ -879,6 +887,7 @@ mod routing_round_trip {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
         let on_track = crate::model::Fx {
+            mix: 1.0,
             path: PathBuf::from("one.vst3"),
             index: 0,
             name: "On the track".into(),
@@ -888,6 +897,7 @@ mod routing_round_trip {
         };
         p.apply(Command::AddFx { track, fx: on_track }).unwrap();
         let over_all = crate::model::Fx {
+            mix: 1.0,
             path: PathBuf::from("glue.vst3"),
             index: 2,
             name: "Over the mix".into(),
@@ -912,6 +922,7 @@ mod routing_round_trip {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
         let fx = |name: &str, record| crate::model::Fx {
+            mix: 1.0,
             path: PathBuf::from("one.vst3"),
             index: 0,
             name: name.to_string(),
@@ -947,6 +958,7 @@ mod routing_round_trip {
     fn a_master_plugin_knob_can_be_automated_and_comes_back() {
         let mut p = Project::new(48_000);
         let fx = crate::model::Fx {
+            mix: 1.0,
             path: PathBuf::from("glue.vst3"),
             index: 0,
             name: "Glue".into(),
@@ -1056,6 +1068,7 @@ mod routing_round_trip {
             panic!("no track")
         };
         let eq = crate::model::Fx {
+            mix: 1.0,
             path: PathBuf::from("/plugins/Pro Q 4.vst3"),
             index: 0,
             name: "FabFilter Pro-Q 4".into(),
@@ -1064,6 +1077,7 @@ mod routing_round_trip {
             record: false,
         };
         let comp = crate::model::Fx {
+            mix: 1.0,
             path: PathBuf::from("/plugins/Pro C 2.vst3"),
             index: 1,
             name: "FabFilter Pro-C 2".into(),

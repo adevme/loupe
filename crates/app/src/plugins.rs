@@ -1,5 +1,5 @@
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input, Space};
+
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Alignment, Element, Length};
 
 use loupe_engine::{ClipId, TrackId};
@@ -8,12 +8,6 @@ use loupe_plugins::Found;
 use crate::{App, Message};
 
 pub const FILTER_ID: &str = "plugin-filter";
-const NAME_LENGTH: usize = 20;
-const DOT: f32 = 9.0;
-const MASTER_SLOT_HINT: &str = "Click to open it, right click to remove. These run over the whole mix.";
-const SLOT_HINT: &str = "Click to open it, drag to reorder, right click to remove, middle click for its knobs";
-const MIX_HINT: &str = "Mix plugins: what the track plays through";
-const REC_HINT: &str = "Rec plugins: only what you hear while recording on this track";
 
 pub fn find_plugins() -> Vec<Found> {
     let mut found = newest_shells(loupe_plugins::everything());
@@ -22,67 +16,6 @@ pub fn find_plugins() -> Vec<Found> {
 }
 
 impl App {
-    pub(crate) fn fx_block(&self, track: TrackId) -> Element<'_, Message> {
-        let palette = self.palette;
-        let Some(found) = self.project.tracks.iter().find(|t| t.id == track) else {
-            return Space::new(Length::Fill, 0).into();
-        };
-        let record = self.rec_shown.contains(&track);
-        let mut rows = column![].spacing(2);
-        for (slot, fx) in found.fx.iter().enumerate().filter(|(_, fx)| fx.record == record) {
-            let short = shorten(&fx.name);
-            let on = !fx.bypassed;
-            let dragged = self.fx_drag.map(|(held, from, _)| held == track && from == slot).unwrap_or(false);
-            let landing = self.fx_drag.map(|(held, _, over)| held == track && over == slot).unwrap_or(false);
-            let dot = button(Space::new(DOT, DOT))
-                .padding(0)
-                .style(move |_, status| palette.toggled(!on, status))
-                .on_press(Message::BypassPlugin(track, slot));
-            let name = container(text(short).size(10.5).wrapping(iced::widget::text::Wrapping::None))
-                .padding(iced::Padding { top: 1.0, right: 3.0, bottom: 1.0, left: 3.0 })
-                .width(Length::Fill)
-                .style(move |_| crate::plugins::slot_look(palette, on, dragged, landing));
-            rows = rows.push(
-                row![
-                    dot,
-                    mouse_area(name)
-                        .on_press(Message::FxGrab(track, slot))
-                        .on_move(move |_| Message::FxOver(slot))
-                        .on_release(Message::FxDrop)
-                        .on_right_press(Message::RemovePlugin(track, slot))
-                        .on_middle_press(Message::OpenKnobs(crate::stockwin::Spot::Track(track), slot))
-                        .on_enter(Message::Hint(Some(SLOT_HINT)))
-                        .on_exit(Message::Hint(None))
-                        .interaction(iced::mouse::Interaction::Grab),
-                ]
-                .spacing(3)
-                .align_y(iced::Alignment::Center),
-            );
-        }
-        let adder = button(text("+ FX").size(10.5))
-            .padding([1, 4])
-            .width(Length::Fill)
-            .style(move |_, status| palette.ghost(status))
-            .on_press(Message::OpenPlugins(track));
-        let taking = found.fx.iter().filter(|fx| fx.record).count();
-        let tab = |label: String, rec: bool, hint: &'static str| {
-            let on = rec == record;
-            mouse_area(
-                button(text(label).size(10.5).wrapping(iced::widget::text::Wrapping::None))
-                    .padding([1, 4])
-                    .style(move |_, status| palette.toggled(on, status))
-                    .on_press(Message::ShowChain(track, rec)),
-            )
-            .on_enter(Message::Hint(Some(hint)))
-            .on_exit(Message::Hint(None))
-        };
-        let rec_label = if taking > 0 { format!("Rec {taking}") } else { "Rec".to_string() };
-        let add = row![tab("Mix".to_string(), false, MIX_HINT), tab(rec_label, true, REC_HINT), adder].spacing(2);
-        column![container(scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(3).scroller_width(3)))).padding(1).width(Length::Fill).style(move |_| palette.readout()), add]
-            .spacing(3)
-            .width(Length::Fill)
-            .into()
-    }
 
     pub(crate) fn plugin_sheet(&self, track: TrackId) -> Element<'_, Message> {
         let Some(found) = self.project.tracks.iter().find(|t| t.id == track) else {
@@ -157,36 +90,6 @@ impl App {
     }
 }
 
-
-fn shorten(name: &str) -> String {
-    if name.chars().count() <= NAME_LENGTH {
-        return name.to_string();
-    }
-    let words: Vec<&str> = name.split_whitespace().collect();
-    for from in 1..words.len() {
-        let rest = words[from..].join(" ");
-        if rest.chars().count() <= NAME_LENGTH {
-            return rest;
-        }
-    }
-    let tail = words.last().copied().unwrap_or(name);
-    let mut cut: String = tail.chars().take(NAME_LENGTH - 1).collect();
-    cut.push('…');
-    cut
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shorten;
-
-    #[test]
-    fn a_long_name_loses_the_maker_not_the_model() {
-        assert_eq!(shorten("FabFilter Pro-Q 4"), "FabFilter Pro-Q 4");
-        assert_eq!(shorten("Loupe EQ"), "Loupe EQ");
-        assert_eq!(shorten("Valhalla Supermassive"), "Supermassive");
-        assert_eq!(shorten("Auburn Sounds Graillon 3"), "Sounds Graillon 3");
-    }
-}
 
 pub fn slot_look(palette: crate::theme::Palette, on: bool, dragged: bool, landing: bool) -> iced::widget::container::Style {
     let shown = palette.toggled(on, iced::widget::button::Status::Active);
@@ -384,44 +287,4 @@ fn newest_shells(found: Vec<Found>) -> Vec<Found> {
         .into_iter()
         .filter(|plugin| !is_shell(&plugin.name) || best.get(&family(&plugin.name)) == Some(&plugin.name))
         .collect()
-}
-
-impl App {
-    pub(crate) fn master_fx_block(&self) -> Element<'_, Message> {
-        let palette = self.palette;
-        let mut rows = column![].spacing(2);
-        for (slot, fx) in self.project.master_fx.iter().enumerate() {
-            let on = !fx.bypassed;
-            let dot = button(Space::new(DOT, DOT))
-                .padding(0)
-                .style(move |_, status| palette.toggled(!on, status))
-                .on_press(Message::BypassMasterPlugin(slot));
-            let name = container(text(shorten(&fx.name)).size(10.5).wrapping(iced::widget::text::Wrapping::None))
-                .padding(iced::Padding { top: 1.0, right: 3.0, bottom: 1.0, left: 3.0 })
-                .width(Length::Fill)
-                .style(move |_| crate::plugins::slot_look(palette, on, false, false));
-            rows = rows.push(
-                row![
-                    dot,
-                    mouse_area(name)
-                        .on_press(Message::ShowMasterPlugin(slot))
-                        .on_right_press(Message::RemoveMasterPlugin(slot))
-                        .on_enter(Message::Hint(Some(MASTER_SLOT_HINT)))
-                        .on_exit(Message::Hint(None))
-                        .interaction(iced::mouse::Interaction::Pointer),
-                ]
-                .spacing(3)
-                .align_y(iced::Alignment::Center),
-            );
-        }
-        let add = button(text("+ FX").size(10.5).width(Length::Fill).center())
-            .padding([1, 4])
-            .width(Length::Fill)
-            .style(move |_, status| palette.ghost(status))
-            .on_press(Message::OpenMasterPlugins);
-        column![container(scrollable(rows).height(Length::Fixed(44.0)).direction(Direction::Vertical(Scrollbar::new().width(3).scroller_width(3)))).padding(1).width(Length::Fill).style(move |_| palette.readout()), add]
-            .spacing(3)
-            .width(Length::Fill)
-            .into()
-    }
 }

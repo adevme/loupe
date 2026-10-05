@@ -176,6 +176,7 @@ enum Hit<'a> {
     Pan(&'a Track),
     Arm(&'a Track),
     Route(&'a Track),
+    Fx(&'a Track),
     Remove(&'a Track),
     Collapse(&'a Track),
     AddTrack,
@@ -416,6 +417,13 @@ impl Timeline<'_> {
         Rectangle::new(Point::new(left, arm.y), Size::new(ARM_BUTTON, arm.height))
     }
 
+    fn fx_button(&self, index: usize) -> Rectangle {
+        let route = self.route_button(index);
+        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let left = if roomy { route.x + route.width + ARM_GAP } else { route.x - ARM_GAP - ARM_BUTTON };
+        Rectangle::new(Point::new(left, route.y), Size::new(ARM_BUTTON, route.height))
+    }
+
     fn solo_button(&self, index: usize) -> Rectangle {
         let mute = self.mute_button(index);
         let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
@@ -611,6 +619,9 @@ impl Timeline<'_> {
                 }
                 if self.route_button(i).contains(p) {
                     return Hit::Route(track);
+                }
+                if self.fx_button(i).contains(p) {
+                    return Hit::Fx(track);
                 }
                 if self.remove_button(i).contains(p) {
                     return Hit::Remove(track);
@@ -811,6 +822,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     }
                     (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
                     (_, Hit::Solo(track)) => Some(Message::ToggleSolo(track.id)),
+                    (_, Hit::Fx(track)) => Some(Message::OpenChain(crate::stockwin::Spot::Track(track.id))),
                     (_, Hit::Pan(track)) => {
                         let again = state.last_pan_press.is_some_and(|(id, at)| id == track.id && at.elapsed() < DOUBLE_CLICK);
                         state.last_pan_press = Some((track.id, Instant::now()));
@@ -1327,6 +1339,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     | Hit::Pan(_)
                     | Hit::Arm(_)
                     | Hit::Route(_)
+                    | Hit::Fx(_)
                     | Hit::Remove(_)
                     | Hit::AddTrack
                     | Hit::Tool(_)
@@ -2042,6 +2055,23 @@ impl Timeline<'_> {
                 position: Point::new(route.center_x(), route.center_y() - self.lanes_top()),
                 color: if wired { p.accent } else { p.text_dim },
                 size: 13.0.into(),
+                font: p.medium,
+                horizontal_alignment: alignment::Horizontal::Center,
+                vertical_alignment: alignment::Vertical::Center,
+                ..Text::default()
+            });
+
+            let fx_at = self.fx_button(i);
+            let loaded = track.fx.iter().filter(|fx| !fx.record).count();
+            let pad = Path::new(|b| {
+                b.rounded_rectangle(Point::new(fx_at.x, fx_at.y - self.lanes_top()), fx_at.size(), 5.0.into());
+            });
+            frame.fill(&pad, raised_fill(p, p.raised, fx_at.y - self.lanes_top(), fx_at.height));
+            frame.fill_text(Text {
+                content: "FX".into(),
+                position: Point::new(fx_at.center_x(), fx_at.center_y() - self.lanes_top()),
+                color: if loaded > 0 { p.accent } else { p.text_dim },
+                size: 11.0.into(),
                 font: p.medium,
                 horizontal_alignment: alignment::Horizontal::Center,
                 vertical_alignment: alignment::Vertical::Center,
