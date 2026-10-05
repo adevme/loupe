@@ -68,6 +68,26 @@ fn turn_back(real: &mut [f32], imaginary: &mut [f32]) {
     real.iter_mut().for_each(|value| *value *= share);
 }
 
+
+pub struct Spectra {
+    pub heard: crate::scope::Scope,
+    pub room: crate::scope::Scope,
+    pub kept: crate::scope::Scope,
+}
+
+impl Spectra {
+    fn new() -> Self {
+        Self { heard: crate::scope::Scope::new(BINS), room: crate::scope::Scope::new(BINS), kept: crate::scope::Scope::new(BINS) }
+    }
+
+    pub fn bins() -> usize {
+        BINS
+    }
+
+    pub fn top_hertz(rate: f32) -> f32 {
+        rate / 2.0
+    }
+}
 struct Settings {
     floor: f32,
     over: f32,
@@ -120,7 +140,7 @@ impl Side {
         self.dry_at = 0;
     }
 
-    fn work_out_a_window(&mut self, shape: &[f32], how: &Settings) {
+    fn work_out_a_window(&mut self, shape: &[f32], how: &Settings, watching: Option<&Spectra>) {
         for at in 0..WINDOW {
             self.real[at] = self.heard[(self.heard_at + at) % WINDOW] * shape[at];
             self.imaginary[at] = 0.0;
@@ -167,6 +187,18 @@ impl Side {
                 self.imaginary[mirror] = -self.imaginary[bin];
             }
         }
+        if let Some(spectra) = watching {
+            let mut at = spectra.heard.writer();
+            for bin in 0..BINS {
+                spectra.heard.put(at + bin, self.soft[bin]);
+                spectra.room.put(at + bin, self.noise[bin]);
+                spectra.kept.put(at + bin, self.gain[bin]);
+            }
+            at += BINS;
+            spectra.heard.publish(at);
+            spectra.room.publish(at);
+            spectra.kept.publish(at);
+        }
         turn_back(&mut self.real, &mut self.imaginary);
         for at in 0..WINDOW {
             let into = (self.coming_at + at) % WINDOW;
@@ -174,13 +206,13 @@ impl Side {
         }
     }
 
-    fn take(&mut self, heard: f32, shape: &[f32], how: &Settings, hop: &mut usize) -> f32 {
+    fn take(&mut self, heard: f32, shape: &[f32], how: &Settings, hop: &mut usize, watching: Option<&Spectra>) -> f32 {
         self.heard[self.heard_at] = heard;
         self.heard_at = (self.heard_at + 1) % WINDOW;
         self.dry[self.dry_at] = heard;
         self.dry_at = (self.dry_at + 1) % (WINDOW + 1);
         if *hop == 0 {
-            self.work_out_a_window(shape, how);
+            self.work_out_a_window(shape, how, watching);
         }
         *hop = (*hop + 1) % HOP;
         let cleaned = self.coming[self.coming_at];
@@ -204,6 +236,7 @@ pub struct Denoise {
     right: Side,
     hop_left: usize,
     hop_right: usize,
+    spectra: std::sync::Arc<Spectra>,
 }
 
 impl Denoise {
@@ -218,9 +251,14 @@ impl Denoise {
             right: Side::new(),
             hop_left: 0,
             hop_right: 0,
+            spectra: std::sync::Arc::new(Spectra::new()),
         };
         denoise.prepare(DEFAULT_RATE);
         denoise
+    }
+
+    pub fn spectra(&self) -> std::sync::Arc<Spectra> {
+        self.spectra.clone()
     }
 
     fn read_knobs(&mut self) {
@@ -243,6 +281,10 @@ impl Default for Denoise {
 impl Effect for Denoise {
     fn name(&self) -> &'static str {
         "Loupe De-noise"
+    }
+
+    fn spectra(&self) -> Option<std::sync::Arc<Spectra>> {
+        Some(self.spectra.clone())
     }
 
     fn params(&self) -> &'static [Param] {
@@ -289,8 +331,8 @@ impl Effect for Denoise {
         for frame in audio.iter_mut() {
             let was_left = frame[0];
             let was_right = frame[1];
-            let left = self.left.take(was_left, &self.shape, &self.how, &mut self.hop_left);
-            let right = self.right.take(was_right, &self.shape, &self.how, &mut self.hop_right);
+            let left = self.left.take(was_left, &self.shape, &self.how, &mut self.hop_left, Some(&self.spectra));
+            let right = self.right.take(was_right, &self.shape, &self.how, &mut self.hop_right, None);
             frame[0] = self.left.held() * (1.0 - self.mix) + left * self.mix;
             frame[1] = self.right.held() * (1.0 - self.mix) + right * self.mix;
         }

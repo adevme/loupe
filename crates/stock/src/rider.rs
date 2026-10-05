@@ -8,8 +8,8 @@ const PARAMS: [Param; 7] = [
     Param::new("range_up", "Reach up", 0.0, 24.0, 12.0, Unit::Decibels),
     Param::new("range_down", "Reach down", 0.0, 24.0, 12.0, Unit::Decibels),
     Param::new("speed", "Speed", 20.0, 2000.0, 300.0, Unit::Milliseconds),
-    Param::new("idle", "Leave quiet below", -80.0, -20.0, -45.0, Unit::Decibels),
-    Param::new("sensitivity", "Vocal sensitivity", 0.0, 100.0, 60.0, Unit::Percent),
+    Param::new("idle", "Idle below", -80.0, -20.0, -45.0, Unit::Decibels),
+    Param::new("sensitivity", "Voice focus", 0.0, 100.0, 60.0, Unit::Percent),
     Param::new("output", "Output", -24.0, 24.0, 0.0, Unit::Decibels),
 ];
 pub const TARGET: usize = 0;

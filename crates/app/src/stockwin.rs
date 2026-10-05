@@ -4,6 +4,7 @@ use loupe_engine::TrackId;
 use loupe_stock_ui::{
     Change, ChorusEditor, CompressorEditor, DeesserEditor, DelayEditor, EqEditor, EqMessage, GateEditor, LimiterEditor,
     Look, MeterEditor, MultibandEditor, ReverbEditor, SaturationEditor, TransientEditor, TuneEditor, KeyEditor, KeyMessage,
+    RiderEditor, DoublerEditor, DenoiseEditor,
 };
 
 use crate::racks::Peek;
@@ -24,6 +25,9 @@ pub enum Face {
     Multiband(Box<MultibandEditor>),
     Tune(Box<TuneEditor>),
     Key(Box<KeyEditor>),
+    Rider(Box<RiderEditor>),
+    Doubler(Box<DoublerEditor>),
+    Denoise(Box<DenoiseEditor>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +62,9 @@ impl Window {
             11 => Face::Multiband(Box::new(MultibandEditor::new(peek.history.clone(), look))),
             12 => Face::Tune(Box::new(TuneEditor::new(peek.history.clone(), look))),
             13 => Face::Key(Box::new(KeyEditor::new(peek.findings.clone(), look))),
+            14 => Face::Rider(Box::new(RiderEditor::new(peek.history.clone(), look))),
+            15 => Face::Doubler(Box::new(DoublerEditor::new(look))),
+            16 => Face::Denoise(Box::new(DenoiseEditor::new(peek.spectra.clone(), rate, look))),
             _ => return None,
         };
         if !values.is_empty() {
@@ -75,6 +82,9 @@ impl Window {
                 Face::Meter(editor) => editor.load(values),
                 Face::Multiband(editor) => editor.load(values),
                 Face::Tune(editor) => editor.load(values),
+                Face::Rider(editor) => editor.load(values),
+                Face::Doubler(editor) => editor.load(values),
+                Face::Denoise(editor) => editor.load(values),
                 Face::Key(_) => {}
             }
         }
@@ -92,6 +102,9 @@ impl Window {
             Face::Meter(editor) => editor.tick(),
             Face::Multiband(editor) => editor.tick(),
             Face::Tune(editor) => editor.tick(),
+            Face::Rider(editor) => editor.tick(),
+            Face::Denoise(editor) => editor.tick(),
+            Face::Doubler(_) => {}
             Face::Key(editor) => editor.tick(),
             _ => {}
         }
@@ -112,6 +125,9 @@ impl Window {
             Face::Meter(editor) => editor.update(change),
             Face::Multiband(editor) => editor.update(change),
             Face::Tune(editor) => editor.update(change),
+            Face::Rider(editor) => editor.update(change),
+            Face::Doubler(editor) => editor.update(change),
+            Face::Denoise(editor) => editor.update(change),
             Face::Key(_) => Vec::new(),
         }
     }
@@ -152,6 +168,9 @@ impl Window {
             Face::Meter(editor) => editor.view().map(Message::StockTurned),
             Face::Multiband(editor) => editor.view().map(Message::StockTurned),
             Face::Tune(editor) => editor.view().map(Message::StockTurned),
+            Face::Rider(editor) => editor.view().map(Message::StockTurned),
+            Face::Doubler(editor) => editor.view().map(Message::StockTurned),
+            Face::Denoise(editor) => editor.view().map(Message::StockTurned),
             Face::Key(editor) => editor.view().map(Message::KeyTold),
         }
     }

@@ -27,8 +27,8 @@ pub use deesser::Deesser;
 pub use delay::{echo_seconds, Delay, NOTES};
 pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
 pub use gate::Gate;
-pub use denoise::Denoise;
-pub use doubler::Doubler;
+pub use denoise::{Denoise, Spectra};
+pub use doubler::{Doubler, MOST_VOICES as MOST_DOUBLER_VOICES};
 pub use rider::Rider;
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use key::{key_name, listen_to, relative_of, Findings, Heard, KeyListener};
@@ -150,6 +150,10 @@ pub trait Effect: Send {
     }
 
     fn findings(&self) -> Option<std::sync::Arc<Findings>> {
+        None
+    }
+
+    fn spectra(&self) -> Option<std::sync::Arc<Spectra>> {
         None
     }
 

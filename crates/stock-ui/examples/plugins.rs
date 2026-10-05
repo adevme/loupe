@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Element, Length, Subscription, Task, Theme};
-use loupe_stock::{KeyListener, Tune, Chorus, Gate, Meter, Multiband, Transient, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb};
-use loupe_stock_ui::{KeyEditor, KeyMessage, TuneEditor, Change, ChorusEditor, GateEditor, MeterEditor, MultibandEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor};
+use loupe_stock::{KeyListener, Tune, Chorus, Gate, Meter, Multiband, Transient, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb, Rider, Doubler, Denoise};
+use loupe_stock_ui::{KeyEditor, KeyMessage, TuneEditor, Change, ChorusEditor, GateEditor, MeterEditor, MultibandEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor, RiderEditor, DoublerEditor, DenoiseEditor};
 
 const RATE: f32 = 48_000.0;
 const BPM: f32 = 120.0;
 const FRAMES_PER_TICK: usize = 768;
-const TABS: [&str; 14] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband", "Loupe Tune", "Loupe Key"];
+const TABS: [&str; 17] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband", "Loupe Tune", "Loupe Key", "Loupe Rider", "Loupe Doubler", "Loupe De-noise"];
 
 struct Beat {
     clock: u64,
@@ -92,6 +92,12 @@ struct Preview {
     multiband_editor: MultibandEditor,
     tune_editor: TuneEditor,
     key_editor: KeyEditor,
+    rider: Rider,
+    doubler: Doubler,
+    denoise: Denoise,
+    rider_editor: RiderEditor,
+    doubler_editor: DoublerEditor,
+    denoise_editor: DenoiseEditor,
     look: Look,
 }
 
@@ -115,6 +121,12 @@ impl Preview {
         let mut deesser = Deesser::new();
         let mut saturation = Saturation::new();
         let mut chorus = Chorus::new();
+        let mut rider = Rider::new();
+        rider.prepare(RATE);
+        let mut doubler = Doubler::new();
+        doubler.prepare(RATE);
+        let mut denoise = Denoise::new();
+        denoise.prepare(RATE);
         let mut transient = Transient::new();
         let mut gate = Gate::new();
         let mut meter = Meter::new();
@@ -142,7 +154,13 @@ impl Preview {
             meter_editor: MeterEditor::new(Some(meter.readings()), look),
             multiband_editor: MultibandEditor::new(Some(multiband.history()), look),
             tune_editor: TuneEditor::new(Some(tune.history()), look),
+            rider_editor: RiderEditor::new(Some(rider.history()), look),
+            doubler_editor: DoublerEditor::new(look),
+            denoise_editor: DenoiseEditor::new(Some(denoise.spectra()), RATE, look),
             key_editor: KeyEditor::new(Some(key.findings()), look),
+            rider,
+            doubler,
+            denoise,
             eq,
             compressor,
             limiter,
@@ -177,7 +195,10 @@ impl Preview {
             10 => &mut self.meter,
             11 => &mut self.multiband,
             12 => &mut self.tune,
-            _ => &mut self.key,
+            13 => &mut self.key,
+            14 => &mut self.rider,
+            15 => &mut self.doubler,
+            _ => &mut self.denoise,
         }
     }
 
@@ -226,6 +247,8 @@ impl Preview {
                     11 => self.multiband_editor.tick(),
                     12 => self.tune_editor.tick(),
                     13 => self.key_editor.tick(),
+                    14 => self.rider_editor.tick(),
+                    16 => self.denoise_editor.tick(),
                     _ => {}
                 }
             }
@@ -269,7 +292,10 @@ impl Preview {
             10 => self.meter_editor.view().map(Message::Knob),
             11 => self.multiband_editor.view().map(Message::Knob),
             12 => self.tune_editor.view().map(Message::Knob),
-            _ => self.key_editor.view().map(Message::Key),
+            13 => self.key_editor.view().map(Message::Key),
+            14 => self.rider_editor.view().map(Message::Knob),
+            15 => self.doubler_editor.view().map(Message::Knob),
+            _ => self.denoise_editor.view().map(Message::Knob),
         };
         column![bar, body].into()
     }
@@ -286,6 +312,6 @@ fn main() -> iced::Result {
         .font(include_bytes!("../../app/assets/Inter-Regular.ttf").as_slice())
         .default_font(iced::Font::with_name("Inter"))
         .antialiasing(true)
-        .window_size((1040.0, 640.0))
+        .window_size((1280.0, 640.0))
         .run_with(Preview::new)
 }
