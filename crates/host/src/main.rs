@@ -542,9 +542,9 @@ fn show(
     if let Some(folder) = preset_folder(name) {
         pane.presets(&loupe_plugins::presets::list(&folder), None);
     }
+    unsafe { made.attach(pane.inner(), kind) }?;
     let scale = pane.screen_scale();
     let listened = scale > 1.01 && made.told_its_scale(scale);
-    unsafe { made.attach(pane.inner(), kind) }?;
     let asked = made.size();
     let settled = match listened || scale <= 1.01 || asked != (width, height) {
         true => asked,
