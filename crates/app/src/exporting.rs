@@ -191,11 +191,13 @@ impl App {
         self.stop_export.store(false, Ordering::Relaxed);
         self.export_began = Some(std::time::Instant::now());
         let progress = self.export_progress.clone();
+        let left = self.export_left.clone();
         let stop = self.stop_export.clone();
         let (done, exported) = oneshot::channel();
         std::thread::spawn(move || {
-            let report = |fraction: f32| {
-                progress.store((fraction * crate::EXPORT_PROGRESS_STEPS as f32) as u32, Ordering::Relaxed);
+            let report = |going: loupe_engine::Going| {
+                progress.store((going.done * crate::EXPORT_PROGRESS_STEPS as f32) as u32, Ordering::Relaxed);
+                left.store(going.left.as_secs().min(u32::MAX as u64) as u32, Ordering::Relaxed);
                 !stop.load(Ordering::Relaxed)
             };
             let mut racks: Box<dyn loupe_engine::Chains> =

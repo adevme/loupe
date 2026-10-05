@@ -2,7 +2,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use loupe_stock::{Effect, Meter, SILENT_LUFS};
 
@@ -190,8 +190,14 @@ pub(crate) fn stages_of(project: &Project, plan: &ExportPlan, span: Frames, stem
 
 pub const STOPPED: &str = "the export was stopped";
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Going {
+    pub done: f32,
+    pub left: Duration,
+}
+
 pub(crate) struct Pacer<'a> {
-    report: &'a dyn Fn(f32) -> bool,
+    report: &'a dyn Fn(Going) -> bool,
     stages: Vec<Stage>,
     at: usize,
     done: Frames,
@@ -203,7 +209,7 @@ pub(crate) struct Pacer<'a> {
 }
 
 impl<'a> Pacer<'a> {
-    pub fn new(report: &'a dyn Fn(f32) -> bool, stages: Vec<Stage>) -> Self {
+    pub fn new(report: &'a dyn Fn(Going) -> bool, stages: Vec<Stage>) -> Self {
         Self {
             report,
             stages,
@@ -247,10 +253,11 @@ impl<'a> Pacer<'a> {
 
     fn tell(&mut self) {
         let spent = self.spent();
-        let whole = spent + self.left();
+        let left = self.left();
+        let whole = spent + left;
         let fraction = if whole > 0.0 { (spent / whole) as f32 } else { 0.0 };
         self.highest = self.highest.max(fraction.clamp(0.0, 1.0));
-        self.stopped |= !(self.report)(self.highest);
+        self.stopped |= !(self.report)(Going { done: self.highest, left: Duration::from_nanos(left.max(0.0) as u64) });
     }
 
     pub fn wrote(&mut self, frames: Frames) {
@@ -272,14 +279,14 @@ impl<'a> Pacer<'a> {
     }
 }
 
-pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32) -> bool) -> Result<Option<String>, String> {
+pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(Going) -> bool) -> Result<Option<String>, String> {
     export_through(project, plan, progress, None)
 }
 
 pub fn export_through(
     project: &Project,
     plan: &ExportPlan,
-    progress: &dyn Fn(f32) -> bool,
+    progress: &dyn Fn(Going) -> bool,
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
 ) -> Result<Option<String>, String> {
     let (from, to) = plan.range.unwrap_or((0, project.length()));
@@ -355,7 +362,7 @@ pub fn render_to_wav_through(
     if to <= from {
         return Err("there is nothing to write".into());
     }
-    let quiet = |_: f32| true;
+    let quiet = |_: Going| true;
     let span = to - from;
     let mut pacer = Pacer::new(&quiet, vec![Stage {
         frames: span,
@@ -713,7 +720,7 @@ mod tests {
         let folder = scratch("pace");
         let plan = ExportPlan { format: Format::Mp3Cbr320, normalise: Normalise::Loudness(-14.0), ..plan_for(&folder) };
         let seen = std::cell::RefCell::new(Vec::new());
-        export(&project, &plan, &|fraction| { seen.borrow_mut().push(fraction); true }).unwrap();
+        export(&project, &plan, &|going| { seen.borrow_mut().push(going.done); true }).unwrap();
         let seen = seen.into_inner();
         let rendered = project.length() as usize / BLOCK;
         let after_the_render = seen[rendered.saturating_sub(1)];
@@ -728,7 +735,7 @@ mod tests {
         let plan =
             ExportPlan { split: true, ..plan_for(&folder) };
         let seen = std::cell::RefCell::new(Vec::new());
-        export(&project, &plan, &|fraction| { seen.borrow_mut().push(fraction); true }).unwrap();
+        export(&project, &plan, &|going| { seen.borrow_mut().push(going.done); true }).unwrap();
         let seen = seen.into_inner();
         assert!(seen.len() >= 3, "one report per file at least");
         assert!(seen.windows(2).all(|pair| pair[1] >= pair[0]));

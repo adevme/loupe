@@ -541,6 +541,7 @@ struct App {
     exporting: bool,
     stop_export: Arc<AtomicBool>,
     export_began: Option<Instant>,
+    export_left: Arc<AtomicU32>,
     export_progress: Arc<AtomicU32>,
     startup_problem: Option<String>,
     scale: f64,
@@ -654,6 +655,7 @@ impl App {
             exporting: false,
             stop_export: Arc::new(AtomicBool::new(false)),
             export_began: None,
+            export_left: Arc::new(AtomicU32::new(0)),
             export_progress: Arc::new(AtomicU32::new(0)),
             startup_problem: no_sound.or(no_folder),
             bpm: format_bpm(project.bpm),
@@ -2737,7 +2739,8 @@ impl App {
         let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
         let spent = self.export_began.map(|began| began.elapsed()).unwrap_or_default();
         let (minutes, seconds) = (spent.as_secs() / 60, spent.as_secs() % 60);
-        let left = (done > 0.01).then(|| spent.mul_f32((1.0 - done) / done)).map(|rest| format!("  ·  about {} left", said_as(rest))).unwrap_or_default();
+        let waiting = self.export_left.load(Ordering::Relaxed);
+        let left = (done > 0.02 && waiting > 0).then(|| format!("  ·  about {} left", said_as(Duration::from_secs(waiting as u64)))).unwrap_or_default();
         let notice = column![
             text("Exporting").size(15).font(palette.medium),
             progress_bar(0.0..=1.0, done).width(300).height(8),
