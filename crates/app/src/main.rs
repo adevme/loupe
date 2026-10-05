@@ -428,6 +428,7 @@ pub enum Overlay {
     About,
     TrackMenu { track: TrackId, at: Point },
     Chain(stockwin::Spot),
+    Exported(PathBuf, Option<String>),
     MixerMenu { at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
@@ -1866,8 +1867,7 @@ impl App {
             Message::Exported(result) => {
                 self.exporting = false;
                 match result {
-                    Ok((folder, None)) => self.notice = Some(format!("Exported to {}", folder.display())),
-                    Ok((folder, Some(note))) => self.notice = Some(format!("Exported to {}. {note}", folder.display())),
+                    Ok((folder, note)) => self.overlay = Overlay::Exported(folder, note),
                     Err(why) => self.problem = Some(format!("Could not export: {why}")),
                 }
             }

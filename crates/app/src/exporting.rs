@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use iced::futures::channel::oneshot;
-use iced::widget::{button, checkbox, column, horizontal_space, row, text};
+use iced::widget::{button, checkbox, column, horizontal_space, row, text, Space};
 use iced::{Alignment, Element, Length, Task};
 use loupe_engine::{next_version_folder, ExportPlan, Format, Normalise, SavedProject};
 
@@ -205,5 +205,34 @@ impl App {
             async move { exported.await.unwrap_or_else(|_| Err("the export stopped unexpectedly".into())) },
             Message::Exported,
         )
+    }
+}
+
+impl App {
+    pub(crate) fn exported_sheet(&self, folder: &std::path::Path, note: Option<&str>) -> Element<'_, Message> {
+        let palette = self.palette;
+        let where_it_went = folder.display().to_string();
+        let mut body = column![
+            text("Your song is exported.").size(15).font(palette.medium),
+            text(where_it_went.clone()).size(12.5).font(palette.mono).color(palette.text_dim).wrapping(text::Wrapping::Glyph),
+        ]
+        .spacing(10);
+        if let Some(note) = note {
+            body = body.push(text(note.to_string()).size(12.5).color(palette.text_dim));
+        }
+        let open = button(text("Show in folder").size(13).font(palette.medium))
+            .padding([7, 16])
+            .style(move |_, status| palette.outlined(status))
+            .on_press(Message::ShowInFolder(folder.to_path_buf()));
+        let copy = button(text(if self.copied.is_some() { "Copied" } else { "Copy path" }).size(13).font(palette.medium))
+            .padding([7, 16])
+            .style(move |_, status| palette.outlined(status))
+            .on_press(Message::CopyText(where_it_went));
+        let close = button(text("Done").size(13).font(palette.medium))
+            .padding([7, 16])
+            .style(move |_, status| palette.solid(status))
+            .on_press(Message::CloseOverlay);
+        body = body.push(row![open, copy, Space::with_width(Length::Fill), close].spacing(10).align_y(Alignment::Center));
+        self.window("Exported".to_string(), body.into(), 520.0)
     }
 }
