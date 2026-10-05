@@ -2398,6 +2398,9 @@ impl App {
                 fx.path.hash(&mut hasher);
                 fx.index.hash(&mut hasher);
                 fx.bypassed.hash(&mut hasher);
+                if !loupe_plugins::rack::is_built_in(&fx.path) {
+                    fx.state.hash(&mut hasher);
+                }
             }
         }
         for clip in self.project.tracks.iter().flat_map(|track| track.clips.iter()) {
@@ -2415,6 +2418,9 @@ impl App {
                 fx.path.hash(&mut hasher);
                 fx.index.hash(&mut hasher);
                 fx.bypassed.hash(&mut hasher);
+                if !loupe_plugins::rack::is_built_in(&fx.path) {
+                    fx.state.hash(&mut hasher);
+                }
             }
         }
         hasher.finish()

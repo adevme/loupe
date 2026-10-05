@@ -73,6 +73,7 @@ pub struct Slot {
     coming: Option<std::sync::mpsc::Receiver<Arrived>>,
     queued: Option<Beginning>,
     kept_state: Vec<u8>,
+    known: Vec<u8>,
     wanted_open: bool,
     pub mix: f32,
     dry: Dry,
@@ -203,6 +204,7 @@ impl Rack {
             coming: None,
             queued: None,
             kept_state: Vec::new(),
+            known: Vec::new(),
             wanted_open: false,
         };
         if is_built_in(&slot.path) {
@@ -282,6 +284,32 @@ impl Rack {
         match host.ask(Ask::Knobs) {
             Ok(Reply::Knobs(names)) => names,
             _ => Vec::new(),
+        }
+    }
+
+    pub fn turn_and_save(&mut self, slot: usize, knob: usize, value: f32) -> Option<Vec<u8>> {
+        self.tweak(slot, knob, value);
+        let quiet = self.block.max(1);
+        let host = self.slots.get_mut(slot)?.host.as_mut()?;
+        host.run(&mut vec![[0.0; 2]; quiet]).ok()?;
+        self.save(slot)
+    }
+
+    pub fn readings(&mut self, slot: usize) -> Vec<crate::wire::Reading> {
+        let Some(host) = self.slots.get_mut(slot).and_then(|found| found.host.as_mut()) else { return Vec::new() };
+        match host.ask(Ask::Readings) {
+            Ok(Reply::Readings(found)) => found,
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn from_text(&mut self, slot: usize, knob: usize, text: &str) -> Result<f32, String> {
+        let host = self.slots.get_mut(slot).and_then(|found| found.host.as_mut()).ok_or("that plugin is not running")?;
+        match host.ask(Ask::FromText { knob, text: text.to_string() }) {
+            Ok(Reply::Value(value)) => Ok(value),
+            Ok(Reply::Trouble(why)) => Err(why),
+            Ok(_) => Err("the plugin host answered something else".into()),
+            Err(why) => Err(why),
         }
     }
 
@@ -385,7 +413,10 @@ impl Rack {
         let asked = host.ask(Ask::Save);
         let fell = host.gone();
         match asked {
-            Ok(Reply::State(state)) => Some(state),
+            Ok(Reply::State(state)) => {
+                found.known = state.clone();
+                Some(state)
+            }
             Ok(Reply::Trouble(why)) => {
                 self.lost_host(slot, why, false);
                 None
@@ -508,6 +539,19 @@ impl Rack {
                     slot.record = *record;
                     if let Some(made) = slot.built.as_mut() {
                         put_knobs(made.as_mut(), state);
+                    } else if !state.is_empty() && *state != slot.known {
+                        if let Some(waiting) = slot.queued.as_mut() {
+                            waiting.state = state.clone();
+                            slot.known = state.clone();
+                        } else if let Some(host) = slot.host.as_mut() {
+                            match settle(host, state) {
+                                Ok(()) => {
+                                    let _ = host.run(&mut vec![[0.0; 2]; self.block.max(1)]);
+                                    slot.known = state.clone();
+                                }
+                                Err(why) => troubles.push(format!("{} would not go back to its earlier settings: {why}", slot.name)),
+                            }
+                        }
                     }
                     self.slots.push(slot);
                 }
@@ -530,6 +574,7 @@ impl Rack {
                         coming: None,
                         queued: None,
                         kept_state: Vec::new(),
+                        known: state.clone(),
                         wanted_open: false,
                     };
                     if is_built_in(path) {
@@ -1067,5 +1112,43 @@ mod blending {
         dry.remember(&second);
         dry.blend(&mut wet, 0.0);
         assert_eq!(wet, first, "the dry arrives as late as the plugin does");
+    }
+}
+
+#[cfg(test)]
+mod real_plugin_tests {
+    use super::*;
+
+    fn real(state: Vec<u8>) -> Option<(Rack, Wanted)> {
+        let plugin = PathBuf::from(std::env::var_os("LOUPE_TEST_VST3")?);
+        let host = crate::sandbox::host_beside_us().parent()?.parent()?.join("loupe-host");
+        let wanted = Wanted { path: plugin, index: 0, name: "Test".into(), bypassed: false, state, record: false, mix: 1.0 };
+        let mut rack = Rack::new(host, 48_000, 64);
+        assert!(rack.reconcile(&[wanted.clone()]).is_empty());
+        let mut audio = vec![[0.0; 2]; 64];
+        let gave_up = std::time::Instant::now();
+        while rack.slots()[0].on_its_way() {
+            assert!(gave_up.elapsed() < std::time::Duration::from_secs(20), "the plugin never loaded");
+            rack.process(&mut audio);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(rack.slots()[0].trouble.is_none(), "{:?}", rack.slots()[0].trouble);
+        Some((rack, wanted))
+    }
+
+    #[test]
+    fn a_turned_knob_reads_back_saves_and_undoes() {
+        let Some((mut rack, mut wanted)) = real(Vec::new()) else { return };
+        let first = rack.readings(0);
+        assert!(!first.is_empty(), "the plugin shows no knobs");
+        let knob = first.len() - 1;
+        let target = rack.from_text(0, knob, "0.5").unwrap_or(0.5);
+        let before = rack.save(0).unwrap();
+        let after = rack.turn_and_save(0, knob, target).unwrap();
+        assert_ne!(before, after, "the saved settings carry the turn");
+        assert!((rack.readings(0)[knob].value - target).abs() < 0.01);
+        wanted.state = before;
+        assert!(rack.reconcile(&[wanted]).is_empty());
+        assert!((rack.readings(0)[knob].value - first[knob].value).abs() < 0.01, "undo puts the knob back");
     }
 }

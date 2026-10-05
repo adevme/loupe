@@ -110,6 +110,26 @@ impl Open {
         }
     }
 
+    fn readings(&mut self) -> Vec<loupe_plugins::wire::Reading> {
+        match self {
+            Open::Vst3(effect) => effect.readings(),
+            Open::Clap(effect) => effect.readings(),
+            Open::Lv2(_) => Vec::new(),
+            #[cfg(target_os = "macos")]
+            Open::Au(_) => Vec::new(),
+        }
+    }
+
+    fn from_text(&mut self, knob: usize, text: &str) -> Option<f32> {
+        match self {
+            Open::Vst3(effect) => effect.from_text(knob, text),
+            Open::Clap(effect) => effect.from_text(knob, text),
+            Open::Lv2(_) => None,
+            #[cfg(target_os = "macos")]
+            Open::Au(_) => None,
+        }
+    }
+
     fn turn(&mut self, knob: usize, value: f32) {
         match self {
             Open::Clap(effect) => effect.turn(knob, value),
@@ -329,6 +349,15 @@ fn main() {
             }
             Ask::Knobs => match open.as_mut() {
                 Some(effect) => Reply::Knobs(effect.knobs()),
+                None => Reply::Trouble("no plugin is open".into()),
+            },
+            Ask::Readings => match open.as_mut() {
+                Some(effect) => Reply::Readings(effect.readings()),
+                None => Reply::Trouble("no plugin is open".into()),
+            },
+            Ask::FromText { knob, text } => match open.as_mut().map(|effect| effect.from_text(knob, &text)) {
+                Some(Some(value)) => Reply::Value(value),
+                Some(None) => Reply::Trouble(format!("the plugin did not understand \"{text}\"")),
                 None => Reply::Trouble("no plugin is open".into()),
             },
             Ask::Turn { knob, value } => {
