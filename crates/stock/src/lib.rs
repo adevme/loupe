@@ -11,6 +11,7 @@ mod limiter;
 mod loudness;
 mod multiband;
 mod reverb;
+mod rider;
 mod saturation;
 mod scope;
 mod smooth;
@@ -24,6 +25,7 @@ pub use deesser::Deesser;
 pub use delay::{echo_seconds, Delay, NOTES};
 pub use eq::{design as band_design, knob, BandShape, Equalizer, Knob, Place, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
 pub use gate::Gate;
+pub use rider::Rider;
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
 pub use key::{key_name, listen_to, relative_of, Findings, Heard, KeyListener};
 pub use limiter::Limiter;
@@ -164,7 +166,7 @@ pub trait Effect: Send {
     }
 }
 
-pub const NAMES: [&str; 14] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband", "Loupe Tune", "Loupe Key"];
+pub const NAMES: [&str; 15] = ["Loupe EQ", "Loupe Compressor", "Loupe Limiter", "Loupe Delay", "Loupe Reverb", "Loupe De-esser", "Loupe Saturation", "Loupe Chorus", "Loupe Transient", "Loupe Gate", "Loupe Meter", "Loupe Multiband", "Loupe Tune", "Loupe Key", "Loupe Rider"];
 
 pub fn make(name: &str) -> Option<Box<dyn Effect>> {
     Some(match name {
@@ -182,6 +184,7 @@ pub fn make(name: &str) -> Option<Box<dyn Effect>> {
         "Loupe Multiband" => Box::new(Multiband::new()),
         "Loupe Tune" => Box::new(Tune::new()),
         "Loupe Key" => Box::new(KeyListener::new()),
+        "Loupe Rider" => Box::new(Rider::new()),
         _ => return None,
     })
 }
