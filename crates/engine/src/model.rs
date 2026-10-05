@@ -233,6 +233,7 @@ pub struct Track {
     pub clips: Vec<Clip>,
     pub parent: Option<TrackId>,
     pub collapsed: bool,
+    pub hidden: bool,
     pub sends: Vec<Send>,
     pub fx: Vec<Fx>,
     pub instrument: Instrument,
@@ -288,6 +289,7 @@ pub enum Command {
     ToggleMasterMute,
     SetTrackParent { track: TrackId, parent: Option<TrackId> },
     ToggleCollapsed(TrackId),
+    SetTrackHidden { track: TrackId, hidden: bool },
     AddSend { from: TrackId, to: TrackId },
     RemoveSend { from: TrackId, to: TrackId },
     SetSendGain { from: TrackId, to: TrackId, gain: f32 },
@@ -429,7 +431,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None, print_takes: false, input: InputChannels::default() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, hidden: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None, print_takes: false, input: InputChannels::default() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -765,6 +767,11 @@ impl Project {
             Command::ToggleCollapsed(track) => {
                 let t = self.track_index(track)?;
                 self.tracks[t].collapsed = !self.tracks[t].collapsed;
+                Ok(Outcome::Done)
+            }
+            Command::SetTrackHidden { track, hidden } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].hidden = hidden;
                 Ok(Outcome::Done)
             }
             Command::AddSend { from, to } => {

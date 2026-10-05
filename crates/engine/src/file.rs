@@ -45,6 +45,7 @@ pub struct SavedTrack {
     pub clips: Vec<SavedClip>,
     pub parent: Option<usize>,
     pub collapsed: bool,
+    pub hidden: bool,
     pub sends: Vec<(usize, f32, bool, bool)>,
     pub fx: Vec<SavedFx>,
     pub instrument: Instrument,
@@ -147,6 +148,7 @@ impl SavedProject {
                     height: height_of(track.id),
                     parent: track.parent.and_then(|id| project.tracks.iter().position(|t| t.id == id)),
                     collapsed: track.collapsed,
+                    hidden: track.hidden,
                     instrument: track.instrument,
                     sample: track.sample.as_ref().and_then(|sample| project.sources.iter().position(|kept| Arc::ptr_eq(kept, sample))),
                     print_takes: track.print_takes,
@@ -224,8 +226,8 @@ impl SavedProject {
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             let sample = track.sample.map_or("-".to_string(), |s| s.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} instrument={} sample={sample} print={} input={} name={}\n",
-                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, instrument_text(&track.instrument), track.print_takes as u8, track.input.text(), track.name
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} hidden={} instrument={} sample={sample} print={} input={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, track.hidden as u8, instrument_text(&track.instrument), track.print_takes as u8, track.input.text(), track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -325,6 +327,7 @@ impl SavedProject {
                         clips: Vec::new(),
                         parent: fields.get("parent").and_then(|v| v.parse::<usize>().ok()),
                         collapsed: fields.get("collapsed") == Some(&"1"),
+                        hidden: fields.get("hidden") == Some(&"1"),
                         sends: Vec::new(),
                         fx: Vec::new(),
                         instrument: fields.get("instrument").and_then(|text| instrument_from(text)).unwrap_or_default(),
@@ -563,6 +566,9 @@ impl SavedProject {
             }
             if saved.collapsed {
                 let _ = project.apply(Command::ToggleCollapsed(*track));
+            }
+            if saved.hidden {
+                let _ = project.apply(Command::SetTrackHidden { track: *track, hidden: true });
             }
             for (to, gain, pre, side) in &saved.sends {
                 let Some(to) = ids.get(*to) else { continue };
@@ -1046,6 +1052,7 @@ mod routing_round_trip {
         };
         p.apply(Command::SetTrackParent { track: child, parent: Some(folder) }).unwrap();
         p.apply(Command::ToggleCollapsed(folder)).unwrap();
+        p.apply(Command::SetTrackHidden { track: verb, hidden: true }).unwrap();
         p.apply(Command::AddSend { from: child, to: verb }).unwrap();
         p.apply(Command::SetSendGain { from: child, to: verb, gain: 0.25 }).unwrap();
         p.apply(Command::SetSendPreFader { from: child, to: verb, pre_fader: true }).unwrap();
@@ -1056,6 +1063,8 @@ mod routing_round_trip {
         let (back, _) = read.build(&sources, 48_000);
         assert_eq!(back.tracks[1].parent, Some(back.tracks[0].id));
         assert!(back.tracks[0].collapsed);
+        assert!(back.tracks[2].hidden, "a track hidden from the arrangement stays hidden");
+        assert!(!back.tracks[1].hidden);
         assert_eq!(back.tracks[1].sends.len(), 1);
         assert_eq!(back.tracks[1].sends[0].gain, 0.25);
         assert!(back.tracks[1].sends[0].pre_fader);
