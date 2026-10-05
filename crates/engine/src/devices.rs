@@ -68,15 +68,29 @@ pub fn outputs(driver: Option<&str>) -> Vec<String> {
     names
 }
 
+static IN_USE: Mutex<Option<cpal::Device>> = Mutex::new(None);
+
 pub(crate) fn output_named(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
-    match name {
+    let found = match name {
         Some(name) => host
             .output_devices()
             .ok()
             .and_then(|mut devices| devices.find(|device| device.name().is_ok_and(|found| found == name)))
             .or_else(|| host.default_output_device()),
         None => host.default_output_device(),
+    };
+    if let Ok(mut held) = IN_USE.lock() {
+        *held = found.clone();
     }
+    found
+}
+
+pub(crate) fn in_use() -> Option<cpal::Device> {
+    IN_USE.lock().ok().and_then(|held| held.clone())
+}
+
+pub fn one_device_both_ways() -> bool {
+    DRIVER.lock().ok().and_then(|chosen| chosen.clone()).is_some_and(|name| name == "ASIO")
 }
 
 pub fn choices(driver: Option<&str>, output: Option<&str>) -> Choices {

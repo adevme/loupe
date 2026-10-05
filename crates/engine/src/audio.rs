@@ -845,7 +845,7 @@ fn open_device(choice: &Device) -> Result<(cpal::Stream, Remote, Running, Option
     let format = supported.sample_format();
     let mut config: cpal::StreamConfig = supported.into();
     let mut warning = None;
-    if let Some(size) = choice.buffer {
+    if let Some(size) = choice.buffer.filter(|_| !devices::one_device_both_ways()) {
         config.buffer_size = cpal::BufferSize::Fixed(size);
     }
     let stream = match start_stream(&device, &config, format) {

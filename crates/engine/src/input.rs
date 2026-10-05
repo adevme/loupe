@@ -403,6 +403,11 @@ fn named_of(device: &cpal::Device) -> String {
 }
 
 fn devices_to_try(choice: &InputChoice) -> Result<Vec<cpal::Device>, String> {
+    if crate::devices::one_device_both_ways() {
+        return crate::devices::in_use()
+            .map(|device| vec![device])
+            .ok_or_else(|| "the ASIO driver is not open, so there is nothing to record from".to_string());
+    }
     let host = crate::devices::host();
     let listed: Vec<cpal::Device> = host.input_devices().map_err(|why| why.to_string())?.collect();
     let mut order = Vec::new();
@@ -433,6 +438,9 @@ fn settings_for(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, St
     if let Ok(usual) = device.default_input_config() {
         return Ok(usual);
     }
+    if crate::devices::one_device_both_ways() {
+        return Err("the ASIO driver would not say how it records".to_string());
+    }
     let offered = device.supported_input_configs().map_err(|why| why.to_string())?;
     offered
         .max_by_key(|range| (range.channels().min(MOST_INPUTS as u16), range.max_sample_rate().0))
@@ -452,6 +460,9 @@ fn open_device(choice: &InputChoice, heard: Arc<Heard>) -> Result<(cpal::Stream,
 }
 
 fn smallest_block(device: &cpal::Device) -> Option<u32> {
+    if crate::devices::one_device_both_ways() {
+        return None;
+    }
     device.supported_input_configs().ok()?.filter_map(|range| match range.buffer_size() {
         cpal::SupportedBufferSize::Range { min, .. } => Some(*min),
         cpal::SupportedBufferSize::Unknown => None,
