@@ -451,19 +451,42 @@ fn open_device(choice: &InputChoice, heard: Arc<Heard>) -> Result<(cpal::Stream,
     Err(format!("no recording input would open. {}", refused.join("; ")))
 }
 
+fn smallest_block(device: &cpal::Device) -> Option<u32> {
+    device.supported_input_configs().ok()?.filter_map(|range| match range.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, .. } => Some(*min),
+        cpal::SupportedBufferSize::Unknown => None,
+    })
+    .min()
+}
+
 fn open_one(device: &cpal::Device, heard: Arc<Heard>) -> Result<(cpal::Stream, Opened), String> {
     let supported = settings_for(device)?;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
-    let (tap, ends) = tap_for(heard, config.sample_rate.0, (config.channels as usize).clamp(1, MOST_INPUTS));
-    let stream = match format {
-        cpal::SampleFormat::F32 => stream::<f32>(device, &config, tap),
-        cpal::SampleFormat::I16 => stream::<i16>(device, &config, tap),
-        cpal::SampleFormat::U16 => stream::<u16>(device, &config, tap),
-        cpal::SampleFormat::I32 => stream::<i32>(device, &config, tap),
-        other => return Err(format!("the input uses a format Loupe cannot read ({other})")),
-    }
-    .map_err(|why| why.to_string())?;
+    let small = smallest_block(device);
+    let attempt = |config: &cpal::StreamConfig| {
+        let (tap, ends) = tap_for(heard.clone(), config.sample_rate.0, (config.channels as usize).clamp(1, MOST_INPUTS));
+        let built = match format {
+            cpal::SampleFormat::F32 => stream::<f32>(device, config, tap),
+            cpal::SampleFormat::I16 => stream::<i16>(device, config, tap),
+            cpal::SampleFormat::U16 => stream::<u16>(device, config, tap),
+            cpal::SampleFormat::I32 => stream::<i32>(device, config, tap),
+            other => return Err(format!("the input uses a format Loupe cannot read ({other})")),
+        };
+        built.map(|stream| (stream, ends)).map_err(|why| why.to_string())
+    };
+    let opened = match small {
+        Some(block) => {
+            let mut tight = config.clone();
+            tight.buffer_size = cpal::BufferSize::Fixed(block);
+            match attempt(&tight) {
+                Ok(working) => Ok(working),
+                Err(_) => attempt(&config),
+            }
+        }
+        None => attempt(&config),
+    };
+    let (stream, ends) = opened?;
     stream.play().map_err(|why| why.to_string())?;
     Ok((stream, ends))
 }
