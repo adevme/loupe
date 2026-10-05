@@ -102,6 +102,7 @@ pub struct Timeline<'a> {
     pub snap: bool,
     pub armed: &'a HashSet<TrackId>,
     pub recording_from: Option<Frames>,
+    pub taking_shape: &'a [f32],
     pub input_levels: &'a [f32],
     pub opening: bool,
     pub width: f32,
@@ -243,6 +244,30 @@ impl Timeline<'_> {
             Point::new((self.header_right() - TOOLS_LEFT - TOOL_BUTTON).max(tools.x + TOOL_BUTTON + TOOL_GAP), tools.y),
             tools.size(),
         )
+    }
+
+    fn draw_taking_shape(&self, overlay: &mut Frame, left: f32, right: f32, top: f32, bottom: f32, from: Frames) {
+        if self.taking_shape.is_empty() {
+            return;
+        }
+        let p = self.palette;
+        let step = loupe_engine::Input::shape_step().as_secs_f64();
+        let middle = (top + bottom) / 2.0;
+        let reach = (bottom - top) / 2.0 - 2.0;
+        if reach <= 0.0 {
+            return;
+        }
+        let began = from as f64 / self.rate();
+        for (index, loudest) in self.taking_shape.iter().enumerate() {
+            let at = self.x_of(((began + index as f64 * step) * self.rate()).max(0.0));
+            let next = self.x_of(((began + (index + 1) as f64 * step) * self.rate()).max(0.0));
+            if next < left || at > right {
+                continue;
+            }
+            let wide = (next - at).max(1.0);
+            let tall = (loudest * reach).max(1.0);
+            overlay.fill_rectangle(Point::new(at.max(left), middle - tall), Size::new(wide, tall * 2.0), theme::alpha(p.text, 0.65));
+        }
     }
 
     fn x_of(&self, frames: f64) -> f32 {
@@ -1240,6 +1265,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 if self.armed.contains(&track.id) && right > left && bottom > top {
                     let taken = Size::new(right - left, bottom - top);
                     overlay.fill_rectangle(Point::new(left, top), taken, theme::alpha(p.danger, 0.3));
+                    self.draw_taking_shape(&mut overlay, left, right, top, bottom, from);
                 }
             }
         }

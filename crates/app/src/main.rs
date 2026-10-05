@@ -484,6 +484,7 @@ struct App {
     recording: Option<recording::Recording>,
     input: Option<Input>,
     input_levels: Vec<f32>,
+    taking_shape: Vec<f32>,
     track_levels: [f32; loupe_engine::METERS],
     master_level: f32,
     input_name: Option<String>,
@@ -638,6 +639,7 @@ impl App {
             recording: None,
             input: None,
             input_levels: Vec::new(),
+            taking_shape: Vec::new(),
             track_levels: [0.0; loupe_engine::METERS],
             master_level: 0.0,
             input_name: settings.input.clone(),
@@ -926,6 +928,10 @@ impl App {
                     for (shown, now) in self.input_levels.iter_mut().zip(peaks) {
                         *shown = now.max(*shown * METER_FALL_PER_TICK);
                     }
+                    self.taking_shape = match self.recording.is_some() {
+                        true => input.shape(),
+                        false => Vec::new(),
+                    };
                 }
                 let (tracks, master) = self.engine.levels();
                 for (shown, now) in self.track_levels.iter_mut().zip(tracks) {
@@ -2688,6 +2694,7 @@ impl App {
             snap: self.snap,
             armed: &self.armed,
             recording_from: self.recording.as_ref().map(|recording| recording.from),
+            taking_shape: &self.taking_shape,
             input_levels: &self.input_levels,
             opening: self.opening.is_some(),
             width: self.canvas_width(),

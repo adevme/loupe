@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,8 @@ const TAKE_QUEUE_FRAMES: usize = 1 << 17;
 const TAKE_SETTLES_FOR: Duration = Duration::from_millis(30);
 const KEEPER_RESTS_FOR: Duration = Duration::from_millis(15);
 const EAR_QUEUE_FRAMES: usize = 1 << 14;
+const SHAPE_STEP_MS: usize = 10;
+const SHAPE_KEPT: usize = 60 * 60 * 1000 / SHAPE_STEP_MS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputChoice {
@@ -115,8 +117,15 @@ struct Opened {
     ear: Consumer<f32>,
 }
 
+#[derive(Default)]
+struct Shaping {
+    loudest: f32,
+    counted: usize,
+}
+
 pub struct Input {
     heard: Arc<Heard>,
+    shape: Arc<Mutex<Vec<f32>>>,
     rate: u32,
     width: usize,
     ear: Option<Consumer<f32>>,
@@ -158,14 +167,24 @@ impl Input {
             .map_err(|why| why.to_string())?;
         let Opened { rate, width, queue, ear } = opened_rx.recv().map_err(|_| "the input thread stopped".to_string())??;
         let (orders, orders_rx) = mpsc::channel();
+        let shape = Arc::new(Mutex::new(Vec::new()));
         let keeper = thread::Builder::new()
             .name("loupe-takes".into())
             .spawn({
                 let heard = heard.clone();
-                move || keep_takes(queue, width, heard, rate, orders_rx)
+                let shape = shape.clone();
+                move || keep_takes(queue, width, heard, shape, rate, orders_rx)
             })
             .map_err(|why| why.to_string())?;
-        Ok(Self { heard, rate, width, ear: Some(ear), orders: Some(orders), quit, host: Some(host), keeper: Some(keeper) })
+        Ok(Self { heard, shape, rate, width, ear: Some(ear), orders: Some(orders), quit, host: Some(host), keeper: Some(keeper) })
+    }
+
+    pub fn shape(&self) -> Vec<f32> {
+        self.shape.lock().map(|kept| kept.clone()).unwrap_or_default()
+    }
+
+    pub fn shape_step() -> Duration {
+        Duration::from_millis(SHAPE_STEP_MS as u64)
     }
 
     pub fn rate(&self) -> u32 {
@@ -271,7 +290,15 @@ fn named(path: &Path, why: io::Error) -> String {
     format!("{}: {why}", path.display())
 }
 
-fn drain(files: &mut [TakeFile], queue: &mut Consumer<f32>, width: usize, waiting: &mut Vec<f32>) -> Result<(), String> {
+fn drain(
+    files: &mut [TakeFile],
+    queue: &mut Consumer<f32>,
+    width: usize,
+    waiting: &mut Vec<f32>,
+    shape: &Arc<Mutex<Vec<f32>>>,
+    shaping: &mut Shaping,
+    per_step: usize,
+) -> Result<(), String> {
     let whole = queue.slots() / width * width;
     let Ok(chunk) = queue.read_chunk(whole) else {
         return Ok(());
@@ -281,9 +308,26 @@ fn drain(files: &mut [TakeFile], queue: &mut Consumer<f32>, width: usize, waitin
     waiting.extend_from_slice(front);
     waiting.extend_from_slice(back);
     chunk.commit_all();
+    let mut steps = Vec::new();
     for frame in waiting.chunks_exact(width) {
         for file in files.iter_mut() {
             file.keep(frame).map_err(|why| named(&file.path, why))?;
+        }
+        let loudest = frame.iter().fold(0.0f32, |most, sample| most.max(sample.abs()));
+        shaping.loudest = shaping.loudest.max(loudest);
+        shaping.counted += 1;
+        if shaping.counted >= per_step {
+            steps.push(shaping.loudest.min(1.0));
+            *shaping = Shaping::default();
+        }
+    }
+    if !steps.is_empty() {
+        if let Ok(mut kept) = shape.lock() {
+            kept.extend(steps);
+            if kept.len() > SHAPE_KEPT {
+                let over = kept.len() - SHAPE_KEPT;
+                kept.drain(..over);
+            }
         }
     }
     Ok(())
@@ -299,7 +343,9 @@ fn close_all(files: Vec<TakeFile>, lost: u64) -> Result<Vec<Take>, String> {
         .collect()
 }
 
-fn keep_takes(mut queue: Consumer<f32>, width: usize, heard: Arc<Heard>, rate: u32, orders: mpsc::Receiver<Order>) {
+fn keep_takes(mut queue: Consumer<f32>, width: usize, heard: Arc<Heard>, shape: Arc<Mutex<Vec<f32>>>, rate: u32, orders: mpsc::Receiver<Order>) {
+    let per_step = (rate as usize * SHAPE_STEP_MS / 1000).max(1);
+    let mut shaping = Shaping::default();
     let mut open: Vec<TakeFile> = Vec::new();
     let mut trouble: Option<String> = None;
     let mut waiting = Vec::new();
@@ -307,6 +353,10 @@ fn keep_takes(mut queue: Consumer<f32>, width: usize, heard: Arc<Heard>, rate: u
         match orders.recv_timeout(KEEPER_RESTS_FOR) {
             Ok(Order::Begin(takes, reply)) => {
                 heard.taking.store(false, Ordering::Release);
+                if let Ok(mut kept) = shape.lock() {
+                    kept.clear();
+                }
+                shaping = Shaping::default();
                 while queue.pop().is_ok() {}
                 let made: Result<Vec<TakeFile>, String> =
                     takes.iter().map(|(path, channels)| TakeFile::create(path, *channels, rate).map_err(|why| named(path, why))).collect();
@@ -329,7 +379,7 @@ fn keep_takes(mut queue: Consumer<f32>, width: usize, heard: Arc<Heard>, rate: u
                         let _ = close_all(files, lost);
                         Err(why)
                     }
-                    (false, None) => drain(&mut files, &mut queue, width, &mut waiting).and_then(|_| close_all(files, lost)),
+                    (false, None) => drain(&mut files, &mut queue, width, &mut waiting, &shape, &mut shaping, per_step).and_then(|_| close_all(files, lost)),
                 };
                 let _ = reply.send(finished);
             }
@@ -337,13 +387,13 @@ fn keep_takes(mut queue: Consumer<f32>, width: usize, heard: Arc<Heard>, rate: u
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 heard.taking.store(false, Ordering::Release);
                 let mut files = std::mem::take(&mut open);
-                let _ = drain(&mut files, &mut queue, width, &mut waiting);
+                let _ = drain(&mut files, &mut queue, width, &mut waiting, &shape, &mut shaping, per_step);
                 let _ = close_all(files, 0);
                 return;
             }
         }
         if !open.is_empty() && trouble.is_none() {
-            if let Err(why) = drain(&mut open, &mut queue, width, &mut waiting) {
+            if let Err(why) = drain(&mut open, &mut queue, width, &mut waiting, &shape, &mut shaping, per_step) {
                 heard.taking.store(false, Ordering::Release);
                 trouble = Some(why);
             }
@@ -614,6 +664,25 @@ mod tests {
         assert!(read.frames.iter().all(|frame| frame[0] == frame[1]), "one input lands in the middle");
         assert!(near(tone_of(&read.frames, 0), practice_tone(0)), "input 1 is recorded");
         assert!(input.finish_takes().is_err(), "there is no take left to finish");
+        fs::remove_dir_all(file.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_take_draws_its_shape_as_it_runs() {
+        let file = scratch("shape");
+        let input = Input::open(InputChoice::Practice).unwrap();
+        assert!(input.shape().is_empty(), "nothing is recorded yet");
+        input.begin_takes(&[(file.clone(), InputChannels::Mono(0))]).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let early = input.shape();
+        thread::sleep(Duration::from_millis(300));
+        let later = input.shape();
+        let _ = input.finish_takes().unwrap();
+        let steps = Input::shape_step().as_secs_f64();
+        assert!(early.len() >= 20, "about {:.0} steps in 300 ms, got {}", 0.3 / steps, early.len());
+        assert!(later.len() > early.len(), "the shape keeps growing");
+        assert!(later.iter().all(|loudest| (0.0..=1.0).contains(loudest)), "every step is a level");
+        assert!(later.iter().any(|loudest| *loudest > 0.01), "the shape is not silence");
         fs::remove_dir_all(file.parent().unwrap().parent().unwrap()).unwrap();
     }
 
