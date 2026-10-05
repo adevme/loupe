@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use std::path::PathBuf;
 
-use loupe_engine::{ClipId, Command, CommandError, Frames, Fx, Instrument, Note, Outcome, Point, Project, Shape, Source, Target, TrackId};
+use loupe_engine::{Chains, ClipId, Command, CommandError, Frames, Fx, Instrument, Note, Outcome, Point, Project, Shape, Source, Target, TrackId};
 use mlua::{Lua, LuaOptions, StdLib, Table, Value, Variadic};
 
 const LONGEST_RUN: Duration = Duration::from_secs(5);
@@ -11,7 +11,7 @@ const CHECK_EVERY: u32 = 10_000;
 const MOST_MEMORY: usize = 256 * 1024 * 1024;
 const HIGHEST_KEY: i64 = 127;
 
-pub const FUNCTIONS: [(&str, &str); 58] = [
+pub const FUNCTIONS: [(&str, &str); 59] = [
     ("print(...)", "Show text in Loupe's status line"),
     ("bpm()", "The tempo in beats per minute"),
     ("set_bpm(bpm)", "Change the tempo"),
@@ -61,7 +61,8 @@ pub const FUNCTIONS: [(&str, &str); 58] = [
     ("clear_selection()", "Select nothing"),
     ("track_plugins(track)", "The names of a track's plugins, slot 1 first"),
     ("add_plugin(track, name)", "Add a plugin by name, for example \"Loupe EQ\", and return its slot"),
-    ("set_plugin_knob(track, slot, knob, value)", "Turn a knob on one of Loupe's own plugins; knob is a number from 1 or a name like \"threshold\""),
+    ("plugin_knobs(track, slot)", "Every knob on a plugin as {name, value, text}; value is 0 to 1 for other makers' plugins"),
+    ("set_plugin_knob(track, slot, knob, value)", "Turn any plugin's knob by number or name; value is 0 to 1, or text in the plugin's own units like \"-6 dB\" or \"3 kHz\". Returns the value and the text the plugin shows"),
     ("add_send(from, to, db)", "Send a track to another, for example a reverb bus"),
     ("set_track_folder(track, folder)", "Put a track inside a folder track, or nil to take it out"),
     ("add_automation_point(track, what, seconds, value)", "Draw automation: what is \"volume\" in dB or \"pan\" from -1 to 1"),
@@ -101,6 +102,7 @@ pub struct Ran {
 struct Host<'a> {
     project: &'a mut Project,
     view: &'a View,
+    plugins: Option<&'a mut (dyn Chains + 'static)>,
     wishes: Wishes,
     changed: bool,
 }
@@ -167,6 +169,55 @@ fn gain_of(db: f64) -> f32 {
     10f64.powf(db / 20.0) as f32
 }
 
+fn number_of(value: &Value) -> Option<f32> {
+    match value {
+        Value::Integer(number) => Some(*number as f32),
+        Value::Number(number) => Some(*number as f32),
+        _ => None,
+    }
+}
+
+fn leading_number(text: &str) -> Option<f32> {
+    let text = text.trim();
+    let end = text.char_indices().find(|(at, c)| !(c.is_ascii_digit() || *c == '.' || (*at == 0 && matches!(c, '-' | '+')))).map_or(text.len(), |(at, _)| at);
+    text[..end].parse().ok()
+}
+
+fn knob_index(knob: &Value, names: &[String]) -> Option<usize> {
+    match knob {
+        Value::Integer(_) | Value::Number(_) => {
+            let at = (number_of(knob)? as usize).checked_sub(1)?;
+            (at < names.len()).then_some(at)
+        }
+        Value::String(text) => {
+            let wanted = text.to_str().ok()?.trim().to_lowercase();
+            names
+                .iter()
+                .position(|name| name.to_lowercase() == wanted)
+                .or_else(|| names.iter().position(|name| name.to_lowercase().contains(&wanted)))
+        }
+        _ => None,
+    }
+}
+
+fn built_in_values(effect: &dyn loupe_stock::Effect, state: &[u8]) -> Vec<f32> {
+    let count = effect.params().len();
+    if state.len() == count * 4 {
+        state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect()
+    } else {
+        (0..count).map(|i| effect.value(i)).collect()
+    }
+}
+
+fn hosted_readings(h: &mut Host<'_>, track: u64, slot: usize, name: &str) -> mlua::Result<Vec<(String, f32, String)>> {
+    let plugins = h.plugins.as_deref_mut().ok_or_else(|| fail(format!("plugins are not running, so scripts cannot reach {name}")))?;
+    let readings = plugins.knob_readings(TrackId(track), slot - 1);
+    if readings.is_empty() {
+        return Err(fail(format!("{name} is still loading or shows no knobs; try again in a moment")));
+    }
+    Ok(readings)
+}
+
 pub fn shortcut_of(source: &str) -> Option<String> {
     source.lines().take(5).find_map(|line| {
         let rest = line.trim().strip_prefix("--")?.trim();
@@ -175,7 +226,7 @@ pub fn shortcut_of(source: &str) -> Option<String> {
     })
 }
 
-pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Result<Ran, String> {
+pub fn run(source: &str, name: &str, project: &mut Project, view: &View, plugins: Option<&mut (dyn Chains + 'static)>) -> Result<Ran, String> {
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::new()).map_err(|why| why.to_string())?;
     lua.set_memory_limit(MOST_MEMORY).map_err(|why| why.to_string())?;
     let started = Instant::now();
@@ -187,7 +238,7 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Resu
         }
     })
     .map_err(|why| why.to_string())?;
-    let host = RefCell::new(Host { project, view, wishes: Wishes::default(), changed: false });
+    let host = RefCell::new(Host { project, view, plugins, wishes: Wishes::default(), changed: false });
     let result = lua.scope(|scope| {
         let globals = lua.globals();
         for unsafe_name in ["dofile", "loadfile", "load", "collectgarbage"] {
@@ -410,36 +461,77 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View) -> Resu
             h.apply(Command::AddFx { track: TrackId(track), fx: Fx { path, index, name, bypassed: false, state: Vec::new(), record: false, mix: 1.0 } })?;
             Ok(h.track(track)?.fx.len())
         });
-        def!("set_plugin_knob", |_, (track, slot, knob, value): (u64, usize, Value, f32)| {
+        def!("plugin_knobs", |lua, (track, slot): (u64, usize)| {
             let mut h = host.borrow_mut();
             let fx = h.track(track)?.fx.get(slot.wrapping_sub(1)).cloned().ok_or_else(|| fail(format!("track {track} has no plugin in slot {slot}")))?;
+            let readings: Vec<(String, f32, String)> = if loupe_plugins::rack::is_built_in(&fx.path) {
+                let effect = loupe_stock::make(&fx.name).ok_or_else(|| fail(format!("Loupe has no plugin called {}", fx.name)))?;
+                let values = built_in_values(effect.as_ref(), &fx.state);
+                effect.params().iter().zip(values).map(|(param, value)| (param.name.to_string(), value, loupe_stock_ui::shown(param, value))).collect()
+            } else {
+                hosted_readings(&mut h, track, slot, &fx.name)?
+            };
+            let out = lua.create_table()?;
+            for (at, (name, value, text)) in readings.into_iter().enumerate() {
+                let knob = lua.create_table()?;
+                knob.set("name", name)?;
+                knob.set("value", value)?;
+                knob.set("text", text)?;
+                out.set(at + 1, knob)?;
+            }
+            Ok(out)
+        });
+        def!("set_plugin_knob", |_, (track, slot, knob, value): (u64, usize, Value, Value)| {
+            let mut h = host.borrow_mut();
+            let fx = h.track(track)?.fx.get(slot.wrapping_sub(1)).cloned().ok_or_else(|| fail(format!("track {track} has no plugin in slot {slot}")))?;
+            let missing = || fail(format!("{} has no knob {}", fx.name, knob.to_string().unwrap_or_default()));
             if !loupe_plugins::rack::is_built_in(&fx.path) {
-                return Err(fail(format!("{} is not one of Loupe's own plugins, so scripts cannot turn its knobs yet", fx.name)));
+                let names: Vec<String> = hosted_readings(&mut h, track, slot, &fx.name)?.into_iter().map(|(name, _, _)| name).collect();
+                let index = knob_index(&knob, &names).ok_or_else(missing)?;
+                let plugins = h.plugins.as_deref_mut().ok_or_else(|| fail("plugins are not running"))?;
+                let position = match &value {
+                    Value::Integer(_) | Value::Number(_) => {
+                        let position = number_of(&value).unwrap_or(-1.0);
+                        if !(0.0..=1.0).contains(&position) {
+                            return Err(fail(format!("for {}, give a number from 0 to 1 or text in its own units, like \"-6 dB\"", fx.name)));
+                        }
+                        position
+                    }
+                    Value::String(text) => {
+                        let text = text.to_str()?.to_string();
+                        plugins.knob_from_text(TrackId(track), slot - 1, index, &text).map_err(|why| fail(format!("{} {}: {why}", fx.name, names[index])))?
+                    }
+                    _ => return Err(fail("give the knob a number from 0 to 1 or text like \"-6 dB\"")),
+                };
+                let state = plugins
+                    .turn_and_keep(TrackId(track), slot - 1, index, position)
+                    .ok_or_else(|| fail(format!("{} did not hand back its settings", fx.name)))?;
+                let shown = plugins.knob_readings(TrackId(track), slot - 1).get(index).map(|(_, _, text)| text.clone()).unwrap_or_default();
+                h.apply(Command::SetFxState { track: TrackId(track), slot: slot - 1, state })?;
+                return Ok((position, shown));
             }
             let mut effect = loupe_stock::make(&fx.name).ok_or_else(|| fail(format!("Loupe has no plugin called {}", fx.name)))?;
             let params = effect.params();
-            let index = match &knob {
-                Value::Integer(number) => (*number as usize).wrapping_sub(1),
-                Value::Number(number) => (*number as usize).wrapping_sub(1),
-                Value::String(text) => {
-                    let text = text.to_str()?.to_lowercase();
-                    params.iter().position(|param| param.id == text || param.name.to_lowercase() == text).unwrap_or(usize::MAX)
-                }
-                _ => usize::MAX,
+            let names: Vec<String> = params.iter().map(|param| param.name.to_string()).collect();
+            let by_id = match &knob {
+                Value::String(text) => text.to_str().ok().and_then(|text| params.iter().position(|param| param.id == text.trim().to_lowercase())),
+                _ => None,
             };
-            let param = params.get(index).ok_or_else(|| fail(format!("{} has no knob {}", fx.name, knob.to_string().unwrap_or_default())))?;
-            let mut values: Vec<f32> = if fx.state.len() == params.len() * 4 {
-                fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect()
-            } else {
-                (0..params.len()).map(|i| effect.value(i)).collect()
-            };
-            let value = param.clamp(value);
+            let index = by_id.or_else(|| knob_index(&knob, &names)).ok_or_else(missing)?;
+            let param = params[index];
+            let wanted = match &value {
+                Value::String(text) => leading_number(&text.to_str()?),
+                _ => number_of(&value),
+            }
+            .ok_or_else(|| fail(format!("{} needs a number for {}", fx.name, param.name)))?;
+            let mut values = built_in_values(effect.as_ref(), &fx.state);
+            let value = param.clamp(wanted);
             values[index] = value;
             effect.set(index, value);
             let state = values.iter().flat_map(|v| v.to_le_bytes()).collect();
             h.apply(Command::SetFxState { track: TrackId(track), slot: slot - 1, state })?;
             h.wishes.tweaks.push((TrackId(track), slot - 1, index, value));
-            Ok(value)
+            Ok((value, loupe_stock_ui::shown(&param, value)))
         });
         def!("add_send", |_, (from, to, db): (u64, u64, Option<f64>)| {
             let mut h = host.borrow_mut();
@@ -561,7 +653,7 @@ mod tests {
     }
 
     fn ran(source: &str, project: &mut Project) -> Result<Ran, String> {
-        run(source, "test", project, &view())
+        run(source, "test", project, &view(), None)
     }
 
     #[test]
@@ -644,6 +736,86 @@ mod tests {
         let mut project = song();
         let greedy = ran("local t = {} while true do t[#t + 1] = string.rep('x', 4096) end", &mut project).unwrap_err();
         assert!(greedy.to_lowercase().contains("memory"), "{greedy}");
+    }
+
+    struct FakeEq {
+        knobs: Vec<(String, f32)>,
+    }
+
+    impl FakeEq {
+        fn text(value: f32) -> String {
+            format!("{:.0} Hz", 20.0 + value * 19_980.0)
+        }
+    }
+
+    impl Chains for FakeEq {
+        fn knob_readings(&mut self, _: TrackId, slot: usize) -> Vec<(String, f32, String)> {
+            if slot != 0 {
+                return Vec::new();
+            }
+            self.knobs.iter().map(|(name, value)| (name.clone(), *value, Self::text(*value))).collect()
+        }
+
+        fn knob_from_text(&mut self, _: TrackId, _: usize, _: usize, text: &str) -> Result<f32, String> {
+            let hz: f32 = text.trim_end_matches(" Hz").parse().map_err(|_| "not a frequency".to_string())?;
+            Ok((hz - 20.0) / 19_980.0)
+        }
+
+        fn turn_and_keep(&mut self, _: TrackId, _: usize, knob: usize, value: f32) -> Option<Vec<u8>> {
+            self.knobs[knob].1 = value;
+            Some(self.knobs.iter().flat_map(|(_, value)| value.to_le_bytes()).collect())
+        }
+    }
+
+    #[test]
+    fn scripts_read_and_turn_another_makers_plugin() {
+        let mut project = song();
+        let track = project.tracks[0].id;
+        let fx = Fx { path: PathBuf::from("/plugins/Pro-Q 4.vst3"), index: 0, name: "Pro-Q 4".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        project.apply(Command::AddFx { track, fx }).unwrap();
+        let mut eq = FakeEq { knobs: vec![("Band 1 Used".into(), 0.0), ("Band 1 Frequency".into(), 0.5)] };
+        let done = run(
+            r#"
+            local track = loupe.tracks()[1]
+            local knobs = loupe.plugin_knobs(track, 1)
+            print(#knobs, knobs[2].name, knobs[2].text)
+            local value, text = loupe.set_plugin_knob(track, 1, "frequency", "3000 Hz")
+            print(text)
+            local _, middle = loupe.set_plugin_knob(track, 1, 2, 0.5)
+            print(middle)
+            "#,
+            "test",
+            &mut project,
+            &view(),
+            Some(&mut eq),
+        )
+        .unwrap();
+        assert_eq!(done.wishes.printed, vec!["2 Band 1 Frequency 10010 Hz".to_string(), "3000 Hz".to_string(), "10010 Hz".to_string()]);
+        assert_eq!(project.tracks[0].fx[0].state, [0.0f32, 0.5].iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<u8>>());
+        assert!(done.changed && done.wishes.tweaks.is_empty());
+        let mut eq = FakeEq { knobs: vec![("Gain".into(), 0.5)] };
+        let mut again = |source: &str, project: &mut Project| run(source, "test", project, &view(), Some(&mut eq)).unwrap_err();
+        assert!(again("loupe.set_plugin_knob(loupe.tracks()[1], 1, 'gain', 3000)", &mut project).contains("from 0 to 1"));
+        assert!(again("loupe.set_plugin_knob(loupe.tracks()[1], 1, 'gain', 'loud')", &mut project).contains("not a frequency"));
+        assert!(again("loupe.set_plugin_knob(loupe.tracks()[1], 1, 'width', 0.5)", &mut project).contains("has no knob"));
+        assert!(ran("loupe.plugin_knobs(loupe.tracks()[1], 1)", &mut project).unwrap_err().contains("not running"));
+    }
+
+    #[test]
+    fn loupe_plugins_show_their_knobs_to_scripts() {
+        let mut project = song();
+        let done = ran(
+            r#"
+            local track = loupe.tracks()[1]
+            local slot = loupe.add_plugin(track, "loupe compressor")
+            local _, text = loupe.set_plugin_knob(track, slot, "threshold", "-24 dB")
+            local knobs = loupe.plugin_knobs(track, slot)
+            print(text, knobs[1].name, knobs[1].value)
+            "#,
+            &mut project,
+        )
+        .unwrap();
+        assert_eq!(done.wishes.printed, vec!["-24.0 dB Threshold -24".to_string()]);
     }
 
     #[test]
@@ -731,10 +903,10 @@ mod tests {
         let mut project = song();
         let mut here = view();
         here.folder = Some(folder.clone());
-        let done = run("local clip = loupe.import_audio('hit.wav', loupe.tracks()[1], 1.5) print(loupe.clip_start(clip), loupe.clip_length(clip))", "test", &mut project, &here).unwrap();
+        let done = run("local clip = loupe.import_audio('hit.wav', loupe.tracks()[1], 1.5) print(loupe.clip_start(clip), loupe.clip_length(clip))", "test", &mut project, &here, None).unwrap();
         assert_eq!(done.wishes.printed, vec!["1.5 0.1".to_string()]);
-        assert!(run("loupe.import_audio('missing.wav', loupe.tracks()[1], 0)", "test", &mut project, &here).unwrap_err().contains("could not read"));
-        run("loupe.set_sample(loupe.tracks()[1], 'hit.wav')", "test", &mut project, &here).unwrap();
+        assert!(run("loupe.import_audio('missing.wav', loupe.tracks()[1], 0)", "test", &mut project, &here, None).unwrap_err().contains("could not read"));
+        run("loupe.set_sample(loupe.tracks()[1], 'hit.wav')", "test", &mut project, &here, None).unwrap();
         assert!(matches!(project.tracks[0].instrument, Instrument::Sampler(_)));
         assert_eq!(project.tracks[0].sample.as_ref().map(|s| s.frames.len()), Some(4_800));
         std::fs::remove_dir_all(folder).unwrap();

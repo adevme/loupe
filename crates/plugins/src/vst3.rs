@@ -154,6 +154,7 @@ pub struct Effect {
     pub side_bus: bool,
     turns: vst3::ComWrapper<crate::changes::Turns>,
     ids: Vec<u32>,
+    controller: Option<ComPtr<vst3::Steinberg::Vst::IEditController>>,
     ara: Option<Document>,
     context: vst3::Steinberg::Vst::ProcessContext,
     rate: f64,
@@ -215,6 +216,7 @@ impl Effect {
                 side_bus: ins > 1,
                 turns: crate::changes::Turns::empty(),
                 ids: Vec::new(),
+                controller: None,
                 ara,
                 context: std::mem::zeroed(),
                 rate,
@@ -329,27 +331,39 @@ impl Effect {
         unsafe { self.processor.getLatencySamples() as usize }
     }
 
-    pub fn knobs(&mut self) -> Vec<String> {
-        use vst3::Steinberg::Vst::{IEditController, IEditControllerTrait};
-        let mut out = Vec::new();
-        let mut seen = Vec::new();
+    fn controller(&mut self) -> Option<ComPtr<vst3::Steinberg::Vst::IEditController>> {
+        use vst3::Steinberg::Vst::IEditController;
+        if let Some(found) = self.controller.as_ref() {
+            return Some(found.clone());
+        }
         unsafe {
             let mut cid = [0i8; 16];
-            let controller: Option<ComPtr<IEditController>> = if self.component.getControllerClassId(&mut cid) == kResultOk {
+            let separate: Option<ComPtr<IEditController>> = if self.component.getControllerClassId(&mut cid) == kResultOk {
                 let id = cid.map(|c| c as u8);
                 self._library.make::<IEditController>(&id).ok()
             } else {
                 None
             };
-            let Some(controller) = controller.or_else(|| self.component.cast()) else { return out };
+            let controller = separate.or_else(|| self.component.cast())?;
             let context = self
                 .us
                 .as_com_ref::<vst3::Steinberg::FUnknown>()
                 .map(|found| found.as_ptr())
                 .unwrap_or(std::ptr::null_mut());
             if controller.initialize(context) != kResultOk {
-                return out;
+                return None;
             }
+            self.controller = Some(controller.clone());
+            Some(controller)
+        }
+    }
+
+    pub fn knobs(&mut self) -> Vec<String> {
+        use vst3::Steinberg::Vst::IEditControllerTrait;
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        let Some(controller) = self.controller() else { return out };
+        unsafe {
             let count = controller.getParameterCount();
             for index in 0..count.min(512) {
                 let mut about: vst3::Steinberg::Vst::ParameterInfo = std::mem::zeroed();
@@ -371,6 +385,49 @@ impl Effect {
         }
         let Some(id) = self.ids.get(knob).copied() else { return };
         self.turns.set(id, value.clamp(0.0, 1.0) as f64);
+    }
+
+    pub fn readings(&mut self) -> Vec<crate::wire::Reading> {
+        use vst3::Steinberg::Vst::IEditControllerTrait;
+        let names = self.knobs();
+        let Some(controller) = self.controller() else { return Vec::new() };
+        if let Ok(state) = self.settings() {
+            let wrapper = crate::stream::Bytes::holding(state);
+            if let Some(stream) = wrapper.as_com_ref::<vst3::Steinberg::IBStream>() {
+                unsafe {
+                    controller.setComponentState(stream.as_ptr());
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (name, id) in names.into_iter().zip(self.ids.clone()) {
+            let value = self.turns.get(id).unwrap_or_else(|| unsafe { controller.getParamNormalized(id) });
+            let mut words = [0u16; 128];
+            let text = unsafe {
+                if controller.getParamStringByValue(id, value, &mut words) == kResultOk {
+                    let raw: Vec<u16> = words.iter().take_while(|unit| **unit != 0).copied().collect();
+                    String::from_utf16_lossy(&raw).trim().to_string()
+                } else {
+                    String::new()
+                }
+            };
+            out.push(crate::wire::Reading { name, value: value as f32, text });
+        }
+        out
+    }
+
+    pub fn from_text(&mut self, knob: usize, text: &str) -> Option<f32> {
+        use vst3::Steinberg::Vst::IEditControllerTrait;
+        if self.ids.is_empty() {
+            let _ = self.knobs();
+        }
+        let id = self.ids.get(knob).copied()?;
+        let controller = self.controller()?;
+        let mut words: Vec<u16> = text.encode_utf16().collect();
+        words.push(0);
+        let mut value = 0.0f64;
+        let found = unsafe { controller.getParamValueByString(id, words.as_mut_ptr(), &mut value) };
+        (found == kResultOk && value.is_finite()).then_some(value.clamp(0.0, 1.0) as f32)
     }
 
     pub fn save(&self) -> Result<Vec<u8>, String> {
@@ -485,6 +542,11 @@ impl Effect {
 impl Drop for Effect {
     fn drop(&mut self) {
         unsafe {
+            if let Some(controller) = self.controller.take() {
+                if controller.as_ptr() as *mut () != self.component.as_ptr() as *mut () {
+                    controller.terminate();
+                }
+            }
             self.processor.setProcessing(0);
             self.component.setActive(0);
             self.component.terminate();

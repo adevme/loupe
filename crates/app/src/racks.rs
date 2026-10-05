@@ -320,6 +320,19 @@ impl Chains for Racks {
         }
     }
 
+    fn knob_readings(&mut self, track: TrackId, slot: usize) -> Vec<(String, f32, String)> {
+        let Some(rack) = self.chains.get_mut(&track) else { return Vec::new() };
+        rack.readings(slot).into_iter().map(|found| (found.name, found.value, found.text)).collect()
+    }
+
+    fn knob_from_text(&mut self, track: TrackId, slot: usize, knob: usize, text: &str) -> Result<f32, String> {
+        self.chains.get_mut(&track).ok_or("that track has no plugins running")?.from_text(slot, knob, text)
+    }
+
+    fn turn_and_keep(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) -> Option<Vec<u8>> {
+        self.chains.get_mut(&track)?.turn_and_save(slot, knob, value)
+    }
+
     fn latency(&self, track: TrackId) -> usize {
         self.chains.get(&track).map(|rack| rack.latency()).unwrap_or(0)
     }

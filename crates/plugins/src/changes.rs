@@ -64,6 +64,10 @@ impl Turns {
         held.push(ComWrapper::new(Turn { id, value: RefCell::new(value) }));
     }
 
+    pub fn get(&self, id: ParamID) -> Option<ParamValue> {
+        self.held.borrow().iter().find(|kept| kept.id == id).map(|kept| *kept.value.borrow())
+    }
+
     pub fn clear(&self) {
         self.held.borrow_mut().clear();
     }

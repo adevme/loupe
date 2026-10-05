@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use iced::{keyboard, Element, Task};
-use loupe_engine::{CommandError, Outcome};
+use loupe_engine::{Command, Outcome};
 
 use crate::scripting::{self, View, FUNCTIONS};
 use crate::{settings, App, Message};
@@ -158,25 +158,33 @@ impl App {
         }
         let folder = self.path.as_deref().and_then(Path::parent).map(Path::to_path_buf);
         let view = View { playhead: self.playhead, playing: self.playing, selected: self.selection.iter().copied().collect(), plugins, folder };
-        let mut finished = None;
-        self.transact(None, |project| {
-            let ran = scripting::run(&source, &name, project, &view);
-            let keep = matches!(&ran, Ok(done) if done.changed);
-            finished = Some(ran);
-            if keep {
-                Ok(Outcome::Done)
-            } else {
-                Err(CommandError::InvalidValue)
+        let hosted = self.project.tracks.iter().flat_map(|track| track.fx.iter()).any(|fx| !loupe_plugins::rack::is_built_in(&fx.path));
+        let mut racks = if hosted { self.borrow_racks() } else { None };
+        if let Some(running) = racks.as_deref_mut() {
+            for (track, slot, state) in running.harvest() {
+                let _ = self.project.apply(Command::SetFxState { track, slot, state });
             }
-        });
+        }
+        let before = self.project.clone();
+        let ran = scripting::run(&source, &name, &mut self.project, &view, racks.as_deref_mut());
+        let after = std::mem::replace(&mut self.project, before);
+        self.racks = racks;
+        if matches!(&ran, Ok(done) if done.changed) {
+            self.transact(None, |project| {
+                *project = after;
+                Ok(Outcome::Done)
+            });
+        }
+        if self.racks.is_some() {
+            self.follow_chains();
+        }
         self.forget_gone_clips();
-        let ran = match finished {
-            Some(Ok(ran)) => ran,
-            Some(Err(why)) => {
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(why) => {
                 self.problem = Some(format!("Script {name}: {why}"));
                 return Task::none();
             }
-            None => return Task::none(),
         };
         let wishes = ran.wishes;
         if let Some(chosen) = wishes.select {
@@ -249,10 +257,10 @@ mod tests {
         project.apply(loupe_engine::Command::AddTrack { name: "Drums".into() }).unwrap();
         let view = View { playhead: 0, playing: false, selected: Vec::new(), plugins: Vec::new(), folder: None };
         for (name, body) in EXAMPLES {
-            scripting::run(body, name, &mut project, &view).unwrap_or_else(|why| panic!("{name}: {why}"));
+            scripting::run(body, name, &mut project, &view, None).unwrap_or_else(|why| panic!("{name}: {why}"));
         }
         assert_eq!(project.tracks[0].name, "01 Drums");
-        scripting::run(EXAMPLES[0].1, "again", &mut project, &view).unwrap();
+        scripting::run(EXAMPLES[0].1, "again", &mut project, &view, None).unwrap();
         assert_eq!(project.tracks[0].name, "01 Drums");
     }
 }

@@ -318,6 +318,54 @@ impl Effect {
         self.waiting.push(event);
     }
 
+    fn params(&self) -> Option<*const clap_sys::ext::params::clap_plugin_params> {
+        unsafe {
+            let get = (*self.plugin).get_extension?;
+            let found = get(self.plugin, clap_sys::ext::params::CLAP_EXT_PARAMS.as_ptr());
+            (!found.is_null()).then_some(found as *const clap_sys::ext::params::clap_plugin_params)
+        }
+    }
+
+    fn spread(&self, knob: usize, plain: f64) -> f32 {
+        let (low, high) = self.ranges.get(knob).copied().unwrap_or((0.0, 1.0));
+        if high > low { ((plain - low) / (high - low)).clamp(0.0, 1.0) as f32 } else { 0.0 }
+    }
+
+    pub fn readings(&mut self) -> Vec<crate::wire::Reading> {
+        let names = self.knobs();
+        let Some(part) = self.params() else { return Vec::new() };
+        let mut out = Vec::new();
+        for (knob, (name, id)) in names.into_iter().zip(self.ids.clone()).enumerate() {
+            let waiting = self.waiting.iter().find(|kept| kept.param_id == id).map(|kept| kept.value);
+            let mut plain = 0.0f64;
+            let known = waiting.is_some() || unsafe { (*part).get_value.map(|get| get(self.plugin, id, &mut plain)).unwrap_or(false) };
+            let plain = waiting.unwrap_or(plain);
+            let mut words = [0 as std::ffi::c_char; 128];
+            let text = unsafe {
+                match (*part).value_to_text {
+                    Some(say) if known && say(self.plugin, id, plain, words.as_mut_ptr(), words.len() as u32) => {
+                        std::ffi::CStr::from_ptr(words.as_ptr()).to_string_lossy().trim().to_string()
+                    }
+                    _ => String::new(),
+                }
+            };
+            out.push(crate::wire::Reading { name, value: self.spread(knob, plain), text });
+        }
+        out
+    }
+
+    pub fn from_text(&mut self, knob: usize, text: &str) -> Option<f32> {
+        if self.ids.is_empty() {
+            let _ = self.knobs();
+        }
+        let id = self.ids.get(knob).copied()?;
+        let part = self.params()?;
+        let words = std::ffi::CString::new(text).ok()?;
+        let mut plain = 0.0f64;
+        let read = unsafe { (*part).text_to_value?(self.plugin, id, words.as_ptr(), &mut plain) };
+        (read && plain.is_finite()).then(|| self.spread(knob, plain))
+    }
+
     pub fn latency(&self) -> usize {
         unsafe {
             let Some(get) = (*self.plugin).get_extension else { return 0 };

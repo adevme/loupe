@@ -48,6 +48,21 @@ pub trait Chains: Send {
         Vec::new()
     }
 
+    fn knob_readings(&mut self, track: TrackId, slot: usize) -> Vec<(String, f32, String)> {
+        let _ = (track, slot);
+        Vec::new()
+    }
+
+    fn knob_from_text(&mut self, track: TrackId, slot: usize, knob: usize, text: &str) -> Result<f32, String> {
+        let _ = (track, slot, knob, text);
+        Err("plugins are not wired up".into())
+    }
+
+    fn turn_and_keep(&mut self, track: TrackId, slot: usize, knob: usize, value: f32) -> Option<Vec<u8>> {
+        let _ = (track, slot, knob, value);
+        None
+    }
+
     fn show(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
         let _ = (track, slot);
         Err("plugin windows are not wired up".into())

@@ -13,6 +13,8 @@ pub enum Ask {
     Save,
     Knobs,
     Turn { knob: usize, value: f32 },
+    Readings,
+    FromText { knob: usize, text: String },
     Restore(Vec<u8>),
     Quit,
 }
@@ -23,8 +25,21 @@ pub enum Reply {
     Loaded { inputs: usize, outputs: usize, latency: usize, ara: bool },
     State(Vec<u8>),
     Knobs(Vec<String>),
+    Readings(Vec<Reading>),
+    Value(f32),
     Fine,
     Trouble(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reading {
+    pub name: String,
+    pub value: f32,
+    pub text: String,
+}
+
+fn tidy(text: &str) -> String {
+    text.replace(['\t', '\n', '\x1e', '\x1f'], " ")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +95,8 @@ impl Ask {
             Ask::Save => "save".to_string(),
             Ask::Knobs => "knobs".to_string(),
             Ask::Turn { knob, value } => format!("turn\t{knob}\t{value}"),
+            Ask::Readings => "readings".to_string(),
+            Ask::FromText { knob, text } => format!("fromtext\t{knob}\t{}", tidy(text)),
             Ask::Restore(state) => format!("restore\t{}", hex_of(state)),
             Ask::Quit => "quit".to_string(),
         };
@@ -106,6 +123,8 @@ impl Ask {
             "save" => Some(Ask::Save),
             "knobs" => Some(Ask::Knobs),
             "turn" => Some(Ask::Turn { knob: parts.next()?.parse().ok()?, value: parts.next()?.parse().ok()? }),
+            "readings" => Some(Ask::Readings),
+            "fromtext" => Some(Ask::FromText { knob: parts.next()?.parse().ok()?, text: parts.next().unwrap_or("").to_string() }),
             "restore" => Some(Ask::Restore(bytes_of(parts.next().unwrap_or(""))?)),
             "quit" => Some(Ask::Quit),
             _ => None,
@@ -120,6 +139,8 @@ impl Reply {
             Reply::Loaded { inputs, outputs, latency, ara } => format!("loaded\t{inputs}\t{outputs}\t{latency}\t{}", *ara as u8),
             Reply::State(state) => format!("state\t{}", hex_of(state)),
             Reply::Knobs(names) => format!("knobs\t{}", names.join("\x1f")),
+            Reply::Readings(found) => format!("readings\t{}", found.iter().map(|reading| format!("{}\x1e{}\x1e{}", tidy(&reading.name), reading.value, tidy(&reading.text))).collect::<Vec<_>>().join("\x1f")),
+            Reply::Value(value) => format!("value\t{value}"),
             Reply::Fine => "fine".to_string(),
             Reply::Trouble(why) => format!("trouble\t{}", why.replace('\n', " ")),
         };
@@ -147,6 +168,16 @@ impl Reply {
                 let names = if rest.is_empty() { Vec::new() } else { rest.split('\x1f').map(str::to_string).collect() };
                 Some(Reply::Knobs(names))
             }
+            "readings" => {
+                let rest = parts.next().unwrap_or("");
+                let mut found = Vec::new();
+                for entry in rest.split('\x1f').filter(|entry| !entry.is_empty()) {
+                    let mut bits = entry.split('\x1e');
+                    found.push(Reading { name: bits.next()?.to_string(), value: bits.next()?.parse().ok()?, text: bits.next().unwrap_or("").to_string() });
+                }
+                Some(Reply::Readings(found))
+            }
+            "value" => Some(Reply::Value(parts.next()?.parse().ok()?)),
             "fine" => Some(Reply::Fine),
             "trouble" => Some(Reply::Trouble(parts.next().unwrap_or("something went wrong").to_string())),
             _ => None,
@@ -255,6 +286,8 @@ mod tests {
             Ask::Save,
             Ask::Knobs,
             Ask::Turn { knob: 3, value: 0.25 },
+            Ask::Readings,
+            Ask::FromText { knob: 2, text: "-6 dB".into() },
             Ask::Restore(vec![0, 15, 16, 255]),
             Ask::Quit,
         ];
@@ -312,6 +345,12 @@ mod tests {
             Reply::Loaded { inputs: 2, outputs: 2, latency: 0, ara: true },
             Reply::State(vec![1, 2, 3, 250]),
             Reply::Knobs(vec!["Threshold".into(), "Ratio".into()]),
+            Reply::Readings(vec![
+                Reading { name: "Gain".into(), value: 0.5, text: "-6.0 dB".into() },
+                Reading { name: "Band 1 Frequency".into(), value: 0.25, text: String::new() },
+            ]),
+            Reply::Readings(Vec::new()),
+            Reply::Value(0.75),
             Reply::Fine,
             Reply::Trouble("it broke".into()),
         ];
@@ -350,5 +389,20 @@ mod older_tests {
         let Some(Ask::Region(back)) = Ask::read(&String::from_utf8(written).unwrap()) else { panic!("it did not come back") };
         assert_eq!(back.name, "two words");
         assert_eq!(back.length, region.length);
+    }
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    #[test]
+    fn odd_characters_in_knob_text_do_not_break_the_line() {
+        let reply = Reply::Readings(vec![Reading { name: "Mix\tWet".into(), value: 1.0, text: "100\n%".into() }]);
+        let mut written = Vec::new();
+        reply.write(&mut written).unwrap();
+        let text = String::from_utf8(written).unwrap();
+        assert_eq!(text.matches('\n').count(), 1);
+        assert_eq!(Reply::read(&text), Some(Reply::Readings(vec![Reading { name: "Mix Wet".into(), value: 1.0, text: "100 %".into() }])));
     }
 }

@@ -24,6 +24,7 @@ pub use delay_view::DelayEditor;
 pub use eq_view::{EqEditor, EqMessage};
 pub use gate_view::GateEditor;
 pub use key_view::{KeyEditor, KeyMessage};
+pub use kit::shown;
 pub use knobs::Change;
 pub use limiter_view::LimiterEditor;
 pub use look::Look;
