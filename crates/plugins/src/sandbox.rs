@@ -39,6 +39,10 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn start(host: &Path) -> Result<Self, String> {
         Self::start_in_a_seat(host, Ceiling::for_this_computer().squeeze_in())
     }

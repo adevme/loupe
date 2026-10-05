@@ -13,8 +13,10 @@ const TALLEST_MENU: f32 = 290.0;
 const EDGE_GAP: f32 = 8.0;
 const FILE_MENU_LEFT: f32 = 14.0;
 const SCRIPTS_MENU_LEFT: f32 = 72.0;
-const HELP_MENU_LEFT: f32 = 148.0;
-const HOME_HELP_MENU_LEFT: f32 = 76.0;
+const VIEW_MENU_LEFT: f32 = 148.0;
+const HELP_MENU_LEFT: f32 = 208.0;
+const HOME_VIEW_MENU_LEFT: f32 = 76.0;
+const HOME_HELP_MENU_LEFT: f32 = 136.0;
 const MENU_OVERLAPS_BAR: f32 = 8.0;
 pub const ENTRY_ID: &str = "overlay-entry";
 
@@ -32,6 +34,8 @@ impl App {
             Overlay::HelpMenu => self.floating(self.under_the_bar(self.help_menu_left()), self.menu(vec![
                 self.item("About Loupe", "", Some(Message::OpenAbout)),
             ])),
+            Overlay::ViewMenu => self.floating(self.under_the_bar(self.view_menu_left()), self.view_menu()),
+            Overlay::Performance => self.centred(self.performance_sheet()),
             Overlay::ScriptsMenu => self.floating(self.under_the_bar(SCRIPTS_MENU_LEFT), self.scripts_menu()),
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
@@ -67,6 +71,30 @@ impl App {
 
     fn under_the_bar(&self, left: f32) -> Point {
         Point::new(left, self.palette.top_bar_height - MENU_OVERLAPS_BAR)
+    }
+
+    fn view_menu_left(&self) -> f32 {
+        if self.screen == Screen::Home {
+            HOME_VIEW_MENU_LEFT
+        } else {
+            VIEW_MENU_LEFT
+        }
+    }
+
+    fn view_menu(&self) -> Element<'_, Message> {
+        let mut items = Vec::new();
+        if self.screen != Screen::Home {
+            let mixer = if self.mixer_open { "Mixer ✓" } else { "Mixer" };
+            items.push(self.item(mixer, "F6", Some(Message::ToggleMixer)));
+            if !self.project.tracks.is_empty() {
+                items.push(self.item("Routing matrix", "F7", Some(Message::OpenMatrix)));
+            }
+            let audio = if self.pool_open { "All audio ✓" } else { "All audio" };
+            items.push(self.item(audio, "", Some(Message::TogglePool)));
+            items.push(rule(self.palette));
+        }
+        items.push(self.item("Performance", "Ctrl+Alt+P", Some(Message::OpenPerformance)));
+        self.menu(items)
     }
 
     fn help_menu_left(&self) -> f32 {
@@ -152,12 +180,7 @@ impl App {
             items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
             items.push(self.item("Save as template…", "", Some(Message::SaveAsTemplate)));
             items.push(self.item("Export…", "Ctrl+E", Some(Message::OpenExport)));
-            items.push(rule(self.palette));
-            items.push(self.item("Routing matrix", "F7", Some(Message::OpenMatrix)));
         }
-        items.push(rule(self.palette));
-        let audio = if self.pool_open { "Hide all audio" } else { "Show all audio" };
-        items.push(self.item(audio, "", Some(Message::TogglePool)));
         items.push(rule(self.palette));
         items.push(self.item("Close project", "Ctrl+W", Some(Message::GoHome)));
         self.menu(items)

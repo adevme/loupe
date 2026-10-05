@@ -28,6 +28,8 @@ mod chains;
 mod chainwin;
 mod keying;
 mod recording;
+mod performance;
+mod resources;
 mod takes;
 mod selection;
 mod sampler_sheet;
@@ -132,6 +134,7 @@ pub enum Message {
     ToStart,
     Seek(Frames),
     Tick,
+    LookAround,
     Import,
     Picked(Vec<PathBuf>),
     Dropped(PathBuf),
@@ -182,6 +185,8 @@ pub enum Message {
     LoadHeldBackPlugin(stockwin::Spot, usize),
     OpenFileMenu,
     OpenHelpMenu,
+    OpenViewMenu,
+    OpenPerformance,
     OpenScriptsMenu,
     RunScript(PathBuf),
     OpenScriptsFolder,
@@ -423,6 +428,8 @@ pub enum Overlay {
     Settings,
     FileMenu,
     HelpMenu,
+    ViewMenu,
+    Performance,
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
@@ -586,6 +593,7 @@ struct App {
     usage: usage::Usage,
     metronome: bool,
     count_in_bars: u32,
+    resources: resources::Resources,
     preroll_bars: u32,
     punch: bool,
     hear_input: bool,
@@ -712,6 +720,7 @@ impl App {
             usage: usage_now,
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
+            resources: resources::Resources::new(),
             preroll_bars: settings.preroll_bars,
             punch: settings.punch,
             hear_input: settings.hear_input,
@@ -881,6 +890,10 @@ impl App {
             }
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
+            Message::LookAround => {
+                let hosts = self.plugin_hosts();
+                self.resources.look(&hosts);
+            }
             Message::Tick => {
                 let punched_out = self.recording.as_ref().and_then(|recording| recording.punch).is_some_and(|(_, to)| self.engine.position() >= to);
                 if punched_out {
@@ -1273,6 +1286,12 @@ impl App {
             Message::LoadHeldBackPlugin(spot, slot) => self.load_held_back_plugin(spot, slot),
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
+            Message::OpenViewMenu => self.overlay = Overlay::ViewMenu,
+            Message::OpenPerformance => {
+                let hosts = self.plugin_hosts();
+                self.resources.look(&hosts);
+                self.overlay = Overlay::Performance;
+            }
             Message::OpenScriptsMenu => {
                 self.find_scripts();
                 self.overlay = Overlay::ScriptsMenu;
@@ -2100,7 +2119,8 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys])
+        let looking_around = iced::time::every(Duration::from_secs(1)).map(|_| Message::LookAround);
+        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -2261,9 +2281,12 @@ impl App {
             None => self.problem = Some("Loupe has no window for that plugin".into()),
         }
     }
-
-    fn peek_at(&self, spot: racks::Spot) -> racks::Peek {
+    pub(crate) fn peek_at(&self, spot: racks::Spot) -> racks::Peek {
         self.peeks.lock().ok().and_then(|held| held.get(&spot).cloned()).unwrap_or_default()
+    }
+
+    fn plugin_hosts(&self) -> Vec<u32> {
+        self.peeks.lock().map(|held| held.values().filter_map(|peek| peek.host).collect()).unwrap_or_default()
     }
 
     pub(crate) fn open_clip_plugin_window(&mut self, clip: ClipId, slot: usize) {
@@ -2745,6 +2768,16 @@ impl App {
         .into()
     }
 
+    pub(crate) fn view_button(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let view_menu_open = self.overlay == Overlay::ViewMenu;
+        button(text("View").size(13).font(palette.medium))
+            .padding([6, 10])
+            .style(move |_, status| palette.toggled(view_menu_open, status))
+            .on_press(Message::OpenViewMenu)
+            .into()
+    }
+
     pub(crate) fn help_button(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let help_menu_open = self.overlay == Overlay::HelpMenu;
@@ -2876,7 +2909,7 @@ impl App {
             (BarItem::Settings, icon_button(palette, "settings", Some(Message::OpenSettings))),
             (BarItem::Import, import.into()),
         ];
-        let mut bar = row![self.file_button(), scripts, self.help_button(), Space::with_width(6)].spacing(8).align_y(Alignment::Center);
+        let mut bar = row![self.file_button(), scripts, self.view_button(), self.help_button(), Space::with_width(6)].spacing(8).align_y(Alignment::Center);
         for item in palette.top_bar_items() {
             let piece = match item {
                 BarItem::Gap => Some(horizontal_space().into()),
@@ -3020,6 +3053,8 @@ impl App {
         } else {
             text(self.hint.unwrap_or_default()).size(12).color(palette.text_dim).into()
         };
+        let usage = text(self.resources.summary()).size(12).font(palette.mono).color(palette.text_dim);
+        let line = row![container(line).width(Length::Fill).clip(true), usage].spacing(16).align_y(Alignment::Center);
         Some(
             container(line)
                 .padding([0, 16])
@@ -3075,6 +3110,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("z", true, false) => Some(Message::Undo),
                 ("z", true, true) | ("y", true, _) => Some(Message::Redo),
                 ("i", true, _) => Some(Message::Import),
+                ("p", true, _) if modifiers.alt() => Some(Message::OpenPerformance),
                 _ if modifiers.command() || modifiers.alt() => Some(Message::ScriptKey(c.to_lowercase(), modifiers)),
                 _ => None,
             }

@@ -21,6 +21,15 @@ const QUEUE: usize = 256;
 const SILENT_RATE: u32 = 48_000;
 pub const METERS: usize = 64;
 const TAPE: usize = 4096;
+const LOAD_KEEP: f32 = 0.95;
+const PEAK_KEEP: f32 = 0.995;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Load {
+    pub average: f32,
+    pub peak: f32,
+    pub overloads: u64,
+}
 const MOST_HEARD: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,6 +79,9 @@ impl Default for Shared {
             heard_turn: AtomicU64::new(0),
             heard_pos: AtomicU64::new(0),
             heard_at: AtomicU64::new(0),
+            load: AtomicU32::new(0),
+            load_peak: AtomicU32::new(0),
+            overloads: AtomicU64::new(0),
         }
     }
 }
@@ -82,10 +94,15 @@ struct Shared {
     heard_turn: AtomicU64,
     heard_pos: AtomicU64,
     heard_at: AtomicU64,
+    load: AtomicU32,
+    load_peak: AtomicU32,
+    overloads: AtomicU64,
 }
 
 struct Rt {
     scratch: Mixdown,
+    load: f32,
+    load_peak: f32,
     chains: Option<Box<dyn Chains>>,
     peaks: [f32; METERS],
     project: Arc<Project>,
@@ -182,6 +199,8 @@ fn pair(rate: u32) -> (Rt, Remote) {
         metronome: false,
         count_in: 0,
         count_in_len: 0,
+        load: 0.0,
+        load_peak: 0.0,
         ear: Ear { voice: vec![0.0; MAX_BLOCK * MOST_INPUTS], track: vec![[0.0; 2]; MAX_BLOCK], ..Ear::default() },
         done_feeds: done_in,
         scratch: Mixdown::default(),
@@ -479,6 +498,17 @@ impl Rt {
         });
     }
 
+    fn note_load(&mut self, spent: Duration, budget: Duration) {
+        let load = spent.as_secs_f32() / budget.as_secs_f32().max(1e-6);
+        self.load = self.load * LOAD_KEEP + load * (1.0 - LOAD_KEEP);
+        self.load_peak = (self.load_peak * PEAK_KEEP).max(load);
+        self.shared.load.store(self.load.to_bits(), Ordering::Relaxed);
+        self.shared.load_peak.store(self.load_peak.to_bits(), Ordering::Relaxed);
+        if load >= 1.0 {
+            self.shared.overloads.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     fn heard(&self, at: Instant) {
         let shared = &self.shared;
         shared.heard_turn.fetch_add(1, Ordering::AcqRel);
@@ -590,6 +620,15 @@ impl Engine {
 
     pub fn position(&self) -> Frames {
         self.remote.shared.pos.load(Ordering::Relaxed)
+    }
+
+    pub fn load(&self) -> Load {
+        let shared = &self.remote.shared;
+        Load {
+            average: f32::from_bits(shared.load.load(Ordering::Relaxed)),
+            peak: f32::from_bits(shared.load_peak.load(Ordering::Relaxed)),
+            overloads: shared.overloads.load(Ordering::Relaxed),
+        }
     }
 
     pub fn levels(&self) -> ([f32; METERS], f32) {
@@ -774,7 +813,9 @@ fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
     let block = rate as usize / 100;
     let mut next = Instant::now();
     while !quit.load(Ordering::Relaxed) {
+        let began = Instant::now();
         rt.process(block);
+        rt.note_load(began.elapsed(), Duration::from_secs_f64(block as f64 / rate as f64));
         next += Duration::from_millis(10);
         rt.heard(next);
         match next.checked_duration_since(Instant::now()) {
@@ -857,9 +898,12 @@ fn stream<T: SizedSample + FromSample<f32>>(
         move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             let stamp = info.timestamp();
             let delay = stamp.playback.duration_since(&stamp.callback).unwrap_or_default();
-            let mut heard = Instant::now() + delay;
+            let began = Instant::now();
+            let mut heard = began + delay;
+            let mut made = 0;
             for part in data.chunks_mut(MAX_BLOCK * channels) {
                 let frames = part.len() / channels;
+                made += frames;
                 let mixed = rt.process(frames);
                 for (frame, m) in part.chunks_mut(channels).zip(mixed) {
                     match frame {
@@ -875,6 +919,7 @@ fn stream<T: SizedSample + FromSample<f32>>(
                 heard += Duration::from_secs_f64(frames as f64 / rate);
                 rt.heard(heard);
             }
+            rt.note_load(began.elapsed(), Duration::from_secs_f64(made as f64 / rate));
         },
         |e| eprintln!("loupe: sound output error: {e}"),
         None,
@@ -936,6 +981,22 @@ mod tests {
         let (rt, mut remote) = pair(RATE);
         remote.outbox.push(Msg::Project(Arc::new(steady(len)))).ok().unwrap();
         (rt, remote)
+    }
+
+    #[test]
+    fn engine_load_is_time_spent_over_time_allowed_and_overruns_are_counted() {
+        let (mut rt, _remote) = rig(1_000);
+        let budget = Duration::from_millis(10);
+        rt.note_load(Duration::from_millis(5), budget);
+        assert!((f32::from_bits(rt.shared.load_peak.load(Ordering::Relaxed)) - 0.5).abs() < 1e-3);
+        assert_eq!(rt.shared.overloads.load(Ordering::Relaxed), 0);
+        for _ in 0..200 {
+            rt.note_load(Duration::from_millis(3), budget);
+        }
+        assert!((f32::from_bits(rt.shared.load.load(Ordering::Relaxed)) - 0.3).abs() < 0.01);
+        rt.note_load(Duration::from_millis(12), budget);
+        assert_eq!(rt.shared.overloads.load(Ordering::Relaxed), 1);
+        assert!(f32::from_bits(rt.shared.load_peak.load(Ordering::Relaxed)) >= 1.2 - 1e-3);
     }
 
     #[test]
