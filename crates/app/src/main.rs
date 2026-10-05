@@ -213,6 +213,7 @@ pub enum Message {
     MasterPercent(f32),
     ToggleMasterMute,
     ToggleCollapsed(loupe_engine::TrackId),
+    SetTrackHidden { track: loupe_engine::TrackId, hidden: bool },
     SetTrackParent { track: TrackId, parent: Option<TrackId> },
     OpenRouting(TrackId),
     OpenPlugins(TrackId),
@@ -1590,6 +1591,10 @@ impl App {
             }
             Message::ToggleMasterMute => {
                 self.edit(None, Command::ToggleMasterMute);
+            }
+            Message::SetTrackHidden { track, hidden } => {
+                self.overlay = Overlay::None;
+                self.edit(None, Command::SetTrackHidden { track, hidden });
             }
             Message::ToggleCollapsed(track) => {
                 self.edit(None, Command::ToggleCollapsed(track));

@@ -4,7 +4,7 @@ use iced::Font;
 
 const BUILT_IN_FAMILY: &str = "lucide";
 
-pub const BUILT_IN: [(&str, char); 21] = [
+pub const BUILT_IN: [(&str, char); 22] = [
     ("play", '\u{e13c}'),
     ("pause", '\u{e12e}'),
     ("skip-back", '\u{e15f}'),
@@ -26,6 +26,7 @@ pub const BUILT_IN: [(&str, char); 21] = [
     ("magnet", '\u{e2b5}'),
     ("keyboard-music", '\u{e560}'),
     ("layers-2", '\u{e52a}'),
+    ("eye-off", '\u{e0bb}'),
 ];
 
 struct Chosen {

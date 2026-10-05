@@ -171,7 +171,7 @@ impl App {
                     background: Some(palette.accent.into()),
                     ..Default::default()
                 }),
-                strip_title(palette, "", "Master".to_string()),
+                strip_title(palette, "", "Master".to_string(), None),
                 self.fx_button(crate::stockwin::Spot::Master),
                 hrow![
                     mouse_area(
@@ -274,7 +274,7 @@ impl App {
                         background: Some(colour.into()),
                         ..Default::default()
                     }),
-                    strip_title(palette, &format!("{:02}", index + 1), name),
+                    strip_title(palette, &format!("{:02}", index + 1), name, track.hidden.then_some(id)),
                     self.fx_button(crate::stockwin::Spot::Track(id)),
                     self.pan_knob(id, track.pan),
                     hrow![
@@ -356,10 +356,20 @@ impl App {
     }
 }
 
-fn strip_title(palette: crate::theme::Palette, number: &str, name: String) -> Element<'static, Message> {
+fn strip_title(palette: crate::theme::Palette, number: &str, name: String, hidden: Option<TrackId>) -> Element<'static, Message> {
+    let mark: Element<'static, Message> = match hidden {
+        Some(track) => button(text(crate::icons::glyph("eye-off").to_string()).font(crate::icons::font("eye-off")).size(12).color(palette.text_dim))
+            .padding(0)
+            .width(HIDDEN_MARK)
+            .style(|_, _| button::Style::default())
+            .on_press(Message::SetTrackHidden { track, hidden: false })
+            .into(),
+        None => Space::new(HIDDEN_MARK, 0).into(),
+    };
     hrow![
         text(number.to_string()).size(10).font(palette.mono).color(palette.text_faint),
-        text(name).size(12).font(palette.semibold).wrapping(iced::widget::text::Wrapping::None),
+        text(name).size(12).font(palette.semibold).wrapping(iced::widget::text::Wrapping::None).width(Length::Fill),
+        mark,
     ]
     .spacing(5)
     .width(Length::Fill)
@@ -378,6 +388,7 @@ fn peak_text(palette: crate::theme::Palette, level: f32) -> Element<'static, Mes
 }
 
 pub const METER_W: f32 = 32.0;
+const HIDDEN_MARK: f32 = 14.0;
 const FADER_W: f32 = 20.0;
 const SCALE_W: f32 = 20.0;
 const FLOOR_DB: f32 = -60.0;

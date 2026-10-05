@@ -314,13 +314,16 @@ impl Timeline<'_> {
     }
 
     fn hidden(&self, track: &Track) -> bool {
+        if track.hidden {
+            return true;
+        }
         let mut at = track.parent;
         let mut steps = 0;
         while let Some(id) = at {
             let Some(parent) = self.project.tracks.iter().find(|t| t.id == id) else {
                 return false;
             };
-            if parent.collapsed {
+            if parent.collapsed || parent.hidden {
                 return true;
             }
             steps += 1;

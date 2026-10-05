@@ -223,6 +223,7 @@ impl App {
             items.push(self.item("Take out of its folder", "", Some(Message::SetTrackParent { track, parent: None })));
         }
         items.push(self.item("Routing…", "", Some(Message::OpenRouting(track))));
+        items.push(self.item("Hide from arrangement", "", Some(Message::SetTrackHidden { track, hidden: true })));
         items.push(rule(self.palette));
         items.push(self.item("New note clip", "", Some(Message::NewNotesClip(track))));
         let keys = self.project.track(track).is_some_and(|t| t.records_notes);
