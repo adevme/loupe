@@ -90,8 +90,7 @@ fn main() -> iced::Result {
     let mut loaded = Palette::load(settings.theme.as_deref());
     let icon_font = loaded.icon_font.take();
     let ui_font = loaded.palette.ui;
-    let opens_a_song = std::env::args_os().len() > 1;
-    let first_size = if opens_a_song { START_SIZE } else { scaled(HOME_SIZE, settings.scale) };
+    let first_size = START_SIZE;
     let first_window = window::Settings {
         size: first_size,
         icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
@@ -124,7 +123,6 @@ fn main() -> iced::Result {
 }
 
 const START_SIZE: Size = Size::new(1280.0, 760.0);
-const HOME_SIZE: Size = Size::new(940.0, 600.0);
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -366,7 +364,6 @@ pub enum Message {
     ScaleTyped(String),
     ScaleEntered,
     ScaleReset,
-    LeftSong { maximized: bool },
     PickFolder,
     FolderPicked(Option<PathBuf>),
     FolderReset,
@@ -554,8 +551,6 @@ struct App {
     dirty: bool,
     screen: Screen,
     opening: Option<(String, Instant)>,
-    song_size: Size,
-    song_maximized: bool,
     templates: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     cache: Cache,
@@ -680,8 +675,6 @@ impl App {
             dirty: false,
             screen: Screen::Song,
             opening: None,
-            song_size: START_SIZE,
-            song_maximized: false,
             templates: Vec::new(),
             recent: Vec::new(),
             cache: Cache::new(),
@@ -766,7 +759,7 @@ impl App {
             }
             None if audio.is_empty() => {
                 app.screen = Screen::Home;
-                app.window = Size::new(HOME_SIZE.width, HOME_SIZE.height);
+                app.window = START_SIZE;
                 app.refresh_home();
                 Task::none()
             }
@@ -792,25 +785,11 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        let before = self.screen;
         let task = self.handle(message);
         let task = Task::batch([task, self.stretch_waiting()]);
         self.keep_safe();
         self.aim_keys();
-        match (before, self.screen) {
-            (Screen::Song, Screen::Home) => Task::batch([
-                task,
-                window::get_maximized(self.main_window)
-                    .map(|maximized| Message::LeftSong { maximized }),
-            ]),
-            (Screen::Home, Screen::Song) => {
-                let (size, maximized) = (self.song_size, self.song_maximized);
-                let id = self.main_window;
-                let fit = if maximized { window::maximize(id, true) } else { window::resize(id, size) };
-                Task::batch([task, fit])
-            }
-            _ => task,
-        }
+        task
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -1892,15 +1871,6 @@ impl App {
                 return unfocus();
             }
             Message::ScaleReset => self.apply_scale(1.0),
-            Message::LeftSong { maximized } => {
-                self.song_maximized = maximized;
-                if !maximized {
-                    self.song_size = scaled(self.window, self.scale);
-                }
-                let home = scaled(HOME_SIZE, self.scale);
-                let id = self.main_window;
-                return Task::batch([window::maximize(id, false), window::resize(id, home)]);
-            }
             Message::PickFolder => {
                 let start_in = settings::home_folder(self.folder.as_deref());
                 return Task::perform(
@@ -3102,10 +3072,6 @@ impl std::fmt::Display for CountIn {
             bars => write!(f, "{bars} bars"),
         }
     }
-}
-
-fn scaled(size: Size, scale: f64) -> Size {
-    Size::new(size.width * scale as f32, size.height * scale as f32)
 }
 
 fn format_scale(scale: f64) -> String {
