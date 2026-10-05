@@ -541,7 +541,6 @@ struct App {
     exporting: bool,
     stop_export: Arc<AtomicBool>,
     export_began: Option<Instant>,
-    export_left: Arc<AtomicU32>,
     export_progress: Arc<AtomicU32>,
     startup_problem: Option<String>,
     scale: f64,
@@ -655,7 +654,6 @@ impl App {
             exporting: false,
             stop_export: Arc::new(AtomicBool::new(false)),
             export_began: None,
-            export_left: Arc::new(AtomicU32::new(0)),
             export_progress: Arc::new(AtomicU32::new(0)),
             startup_problem: no_sound.or(no_folder),
             bpm: format_bpm(project.bpm),
@@ -2739,13 +2737,11 @@ impl App {
         let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
         let spent = self.export_began.map(|began| began.elapsed()).unwrap_or_default();
         let (minutes, seconds) = (spent.as_secs() / 60, spent.as_secs() % 60);
-        let waiting = self.export_left.load(Ordering::Relaxed);
-        let left = (done > 0.02 && waiting > 0).then(|| format!("  ·  about {} left", said_as(Duration::from_secs(waiting as u64)))).unwrap_or_default();
         let notice = column![
             text("Exporting").size(15).font(palette.medium),
             progress_bar(0.0..=1.0, done).width(300).height(8),
             text(format!("{:.0}%", done * 100.0)).size(13).font(palette.mono).color(palette.text_dim),
-            text(format!("{minutes}:{seconds:02} gone{left}")).size(12).color(palette.text_dim),
+            text(format!("{minutes}:{seconds:02}")).size(12).font(palette.mono).color(palette.text_dim),
             button(text(if self.stop_export.load(Ordering::Relaxed) { "Stopping…" } else { "Stop" }).size(13).font(palette.medium))
                 .padding([7, 18])
                 .style(move |_, status| palette.outlined(status))
@@ -3312,17 +3308,3 @@ impl App {
     }
 }
 
-fn said_as(span: std::time::Duration) -> String {
-    let seconds = span.as_secs();
-    let rounded = match seconds {
-        0..=14 => return "a few seconds".to_string(),
-        15..=59 => seconds.div_ceil(15) * 15,
-        60..=599 => seconds.div_ceil(30) * 30,
-        _ => seconds.div_ceil(60) * 60,
-    };
-    match (rounded / 60, rounded % 60) {
-        (0, seconds) => format!("{seconds}s"),
-        (minutes, 0) => format!("{minutes}m"),
-        (minutes, seconds) => format!("{minutes}m {seconds}s"),
-    }
-}
