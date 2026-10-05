@@ -28,6 +28,7 @@ mod chains;
 mod chainwin;
 mod keying;
 mod recording;
+mod performance;
 mod resources;
 mod takes;
 mod selection;
@@ -182,6 +183,8 @@ pub enum Message {
     ChainDrop,
     OpenFileMenu,
     OpenHelpMenu,
+    OpenViewMenu,
+    OpenPerformance,
     OpenScriptsMenu,
     RunScript(PathBuf),
     OpenScriptsFolder,
@@ -423,6 +426,8 @@ pub enum Overlay {
     Settings,
     FileMenu,
     HelpMenu,
+    ViewMenu,
+    Performance,
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
@@ -1266,6 +1271,11 @@ impl App {
             Message::ChainDrop => self.drop_chain(),
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
+            Message::OpenViewMenu => self.overlay = Overlay::ViewMenu,
+            Message::OpenPerformance => {
+                self.resources.look();
+                self.overlay = Overlay::Performance;
+            }
             Message::OpenScriptsMenu => {
                 self.find_scripts();
                 self.overlay = Overlay::ScriptsMenu;
@@ -2246,7 +2256,7 @@ impl App {
         }
     }
 
-    fn peek_at(&self, spot: racks::Spot) -> racks::Peek {
+    pub(crate) fn peek_at(&self, spot: racks::Spot) -> racks::Peek {
         self.peeks.lock().ok().and_then(|held| held.get(&spot).cloned()).unwrap_or_default()
     }
 
@@ -2727,6 +2737,16 @@ impl App {
         .into()
     }
 
+    pub(crate) fn view_button(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let view_menu_open = self.overlay == Overlay::ViewMenu;
+        button(text("View").size(13).font(palette.medium))
+            .padding([6, 10])
+            .style(move |_, status| palette.toggled(view_menu_open, status))
+            .on_press(Message::OpenViewMenu)
+            .into()
+    }
+
     pub(crate) fn help_button(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let help_menu_open = self.overlay == Overlay::HelpMenu;
@@ -2858,7 +2878,7 @@ impl App {
             (BarItem::Settings, icon_button(palette, "settings", Some(Message::OpenSettings))),
             (BarItem::Import, import.into()),
         ];
-        let mut bar = row![self.file_button(), scripts, self.help_button(), Space::with_width(6)].spacing(8).align_y(Alignment::Center);
+        let mut bar = row![self.file_button(), scripts, self.view_button(), self.help_button(), Space::with_width(6)].spacing(8).align_y(Alignment::Center);
         for item in palette.top_bar_items() {
             let piece = match item {
                 BarItem::Gap => Some(horizontal_space().into()),
@@ -3059,6 +3079,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("z", true, false) => Some(Message::Undo),
                 ("z", true, true) | ("y", true, _) => Some(Message::Redo),
                 ("i", true, _) => Some(Message::Import),
+                ("p", true, _) if modifiers.alt() => Some(Message::OpenPerformance),
                 _ if modifiers.command() || modifiers.alt() => Some(Message::ScriptKey(c.to_lowercase(), modifiers)),
                 _ => None,
             }

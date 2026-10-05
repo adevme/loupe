@@ -15,7 +15,7 @@ mod resample;
 mod source;
 mod wav;
 
-pub use audio::{bar_frames, Engine, Output, TapedKey, METERS};
+pub use audio::{bar_frames, Engine, Load, Output, TapedKey, METERS};
 pub use chain::{chain_from, chain_text};
 pub use devices::{choices, default_driver, drivers, milliseconds, outputs, Choices, Device, Running, BUFFERS, RATES};
 pub use encode::Format;

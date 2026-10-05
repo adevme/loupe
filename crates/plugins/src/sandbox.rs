@@ -37,6 +37,10 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn start(host: &Path) -> Result<Self, String> {
         if !host.is_file() {
             return Err(format!("Loupe cannot find its plugin host at {}. Install Loupe again to put it back.", host.display()));

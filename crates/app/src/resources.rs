@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
@@ -12,12 +13,19 @@ pub struct Resources {
     looked: Option<Instant>,
     pub cpu: Option<f32>,
     pub memory: Option<u64>,
+    each: HashMap<u32, Usage>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub cpu: Option<f32>,
+    pub memory: u64,
 }
 
 impl Resources {
     pub fn new() -> Self {
         let cores = std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1) as f32;
-        Self { system: System::new(), me: sysinfo::get_current_pid().ok(), cores, looked: None, cpu: None, memory: None }
+        Self { system: System::new(), me: sysinfo::get_current_pid().ok(), cores, looked: None, cpu: None, memory: None, each: HashMap::new() }
     }
 
     pub fn look(&mut self) {
@@ -28,10 +36,25 @@ impl Resources {
         self.looked = Some(Instant::now());
         let Some(me) = self.me else { return };
         self.system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_cpu().with_memory());
-        let ours = self.system.processes().values().filter(|process| process.thread_kind().is_none() && (process.pid() == me || process.parent() == Some(me)));
-        let (cpu, memory) = ours.fold((0.0f32, 0u64), |(cpu, memory), process| (cpu + process.cpu_usage(), memory + process.memory()));
+        let cores = self.cores;
+        self.each = self
+            .system
+            .processes()
+            .values()
+            .filter(|process| process.thread_kind().is_none() && (process.pid() == me || process.parent() == Some(me)))
+            .map(|process| (process.pid().as_u32(), Usage { cpu: (!first).then(|| (process.cpu_usage() / cores).clamp(0.0, 100.0)), memory: process.memory() }))
+            .collect();
+        let (cpu, memory) = self.each.values().fold((0.0f32, 0u64), |(cpu, memory), usage| (cpu + usage.cpu.unwrap_or(0.0), memory + usage.memory));
         self.memory = Some(memory);
-        self.cpu = (!first).then(|| (cpu / self.cores).clamp(0.0, 100.0));
+        self.cpu = (!first).then(|| cpu.clamp(0.0, 100.0));
+    }
+
+    pub fn of(&self, pid: u32) -> Option<Usage> {
+        self.each.get(&pid).copied()
+    }
+
+    pub fn own(&self) -> Option<Usage> {
+        self.of(self.me?.as_u32())
     }
 
     pub fn summary(&self) -> String {

@@ -259,6 +259,10 @@ impl Rack {
         }
     }
 
+    pub fn host_pid(&self, slot: usize) -> Option<u32> {
+        self.slots.get(slot)?.host.as_ref().map(Sandbox::pid)
+    }
+
     pub fn built_at(&self, slot: usize) -> Option<&dyn loupe_stock::Effect> {
         self.slots.get(slot)?.built.as_deref()
     }

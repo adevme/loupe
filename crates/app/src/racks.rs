@@ -16,6 +16,7 @@ pub struct Peek {
     pub meter: Option<Arc<Readings>>,
     pub findings: Option<Arc<Findings>>,
     pub knobs: Vec<String>,
+    pub host: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -190,7 +191,7 @@ impl Racks {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
                     None => (None, None, None, None),
                 };
-                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, knobs }));
+                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, knobs, host: rack.host_pid(slot) }));
             }
         }
         for (id, rack) in self.clips.iter_mut() {
@@ -200,7 +201,7 @@ impl Racks {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
                     None => (None, None, None, None),
                 };
-                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, knobs }));
+                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, knobs, host: rack.host_pid(slot) }));
             }
         }
         if let Some(rack) = self.master.as_mut() {
@@ -210,7 +211,7 @@ impl Racks {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings()),
                     None => (None, None, None, None),
                 };
-                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, knobs }));
+                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, knobs, host: rack.host_pid(slot) }));
             }
         }
         let Ok(mut held) = self.peeks.lock() else { return };
