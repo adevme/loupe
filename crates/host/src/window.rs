@@ -819,6 +819,10 @@ mod real {
             }
         }
 
+        pub fn screen_scale(&self) -> f32 {
+            SCALED.with(Cell::get)
+        }
+
         pub fn fit_around(&self, width: i32, height: i32) {
             unsafe {
                 let mut rect = [0, 0, width, height + grown(BAR)];
@@ -906,6 +910,10 @@ mod real {
         pub fn show(&self) {}
 
         pub fn hide(&self) {}
+
+        pub fn screen_scale(&self) -> f32 {
+            1.0
+        }
 
         pub fn fit_around(&self, _width: i32, _height: i32) {}
 

@@ -542,7 +542,17 @@ fn show(
     if let Some(folder) = preset_folder(name) {
         pane.presets(&loupe_plugins::presets::list(&folder), None);
     }
+    let scale = pane.screen_scale();
+    let listened = scale > 1.01 && made.told_its_scale(scale);
     unsafe { made.attach(pane.inner(), kind) }?;
+    let asked = made.size();
+    let settled = match listened || scale <= 1.01 || asked != (width, height) {
+        true => asked,
+        false => ((width as f32 * scale).round() as i32, (height as f32 * scale).round() as i32),
+    };
+    if settled != (width, height) && settled.0 > 0 && settled.1 > 0 {
+        pane.fit_around(settled.0, settled.1);
+    }
     let following = std::rc::Rc::clone(&made);
     pane.follow(Box::new(move |width, height| {
         following.resized(width, height);
