@@ -188,8 +188,10 @@ pub(crate) fn stages_of(project: &Project, plan: &ExportPlan, span: Frames, stem
     stages
 }
 
+pub const STOPPED: &str = "the export was stopped";
+
 pub(crate) struct Pacer<'a> {
-    report: &'a dyn Fn(f32),
+    report: &'a dyn Fn(f32) -> bool,
     stages: Vec<Stage>,
     at: usize,
     done: Frames,
@@ -197,10 +199,11 @@ pub(crate) struct Pacer<'a> {
     stage_begun: Instant,
     nanoseconds_a_unit: f64,
     highest: f32,
+    stopped: bool,
 }
 
 impl<'a> Pacer<'a> {
-    pub fn new(report: &'a dyn Fn(f32), stages: Vec<Stage>) -> Self {
+    pub fn new(report: &'a dyn Fn(f32) -> bool, stages: Vec<Stage>) -> Self {
         Self {
             report,
             stages,
@@ -210,6 +213,7 @@ impl<'a> Pacer<'a> {
             stage_begun: Instant::now(),
             nanoseconds_a_unit: RENDER_NANOSECONDS_A_UNIT,
             highest: 0.0,
+            stopped: false,
         }
     }
 
@@ -246,13 +250,17 @@ impl<'a> Pacer<'a> {
         let whole = spent + self.left();
         let fraction = if whole > 0.0 { (spent / whole) as f32 } else { 0.0 };
         self.highest = self.highest.max(fraction.clamp(0.0, 1.0));
-        (self.report)(self.highest);
+        self.stopped |= !(self.report)(self.highest);
     }
 
     pub fn wrote(&mut self, frames: Frames) {
         self.done += frames;
         self.time_the_render();
         self.tell();
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.stopped
     }
 
     pub fn finished_a_stage(&mut self) {
@@ -264,14 +272,14 @@ impl<'a> Pacer<'a> {
     }
 }
 
-pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32)) -> Result<Option<String>, String> {
+pub fn export(project: &Project, plan: &ExportPlan, progress: &dyn Fn(f32) -> bool) -> Result<Option<String>, String> {
     export_through(project, plan, progress, None)
 }
 
 pub fn export_through(
     project: &Project,
     plan: &ExportPlan,
-    progress: &dyn Fn(f32),
+    progress: &dyn Fn(f32) -> bool,
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
 ) -> Result<Option<String>, String> {
     let (from, to) = plan.range.unwrap_or((0, project.length()));
@@ -347,7 +355,7 @@ pub fn render_to_wav_through(
     if to <= from {
         return Err("there is nothing to write".into());
     }
-    let quiet = |_: f32| {};
+    let quiet = |_: f32| true;
     let span = to - from;
     let mut pacer = Pacer::new(&quiet, vec![Stage {
         frames: span,
@@ -408,6 +416,9 @@ fn render_into(
         take(&mut block[..count])?;
         pos += count as Frames;
         pacer.wrote(count as Frames);
+        if pacer.stopped() {
+            return Err(io::Error::other(STOPPED));
+        }
     }
     Ok(())
 }
@@ -494,6 +505,9 @@ fn write_mixdown(
                 amplify(&mut block[..part.len()], gain);
                 writer.push(&block[..part.len()])?;
                 pacer.wrote(part.len() as Frames);
+                if pacer.stopped() {
+                    return Err(io::Error::other(STOPPED));
+                }
             }
         }
         Mixed::Spilt(held) => {
@@ -515,6 +529,9 @@ fn write_mixdown(
                 writer.push(&block[..count])?;
                 left -= count as Frames;
                 pacer.wrote(count as Frames);
+                if pacer.stopped() {
+                    return Err(io::Error::other(STOPPED));
+                }
             }
         }
     }
@@ -602,7 +619,7 @@ mod tests {
         let project = song();
         let folder = scratch("mix");
         let plan = ExportPlan { project_file: "saved".into(), ..plan_for(&folder) };
-        export(&project, &plan, &|_| {}).unwrap();
+        export(&project, &plan, &|_| true).unwrap();
         let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         assert_eq!(read.frames, heard(&project));
         assert_eq!(fs::read_to_string(folder.join("Song.lp")).unwrap(), "saved");
@@ -616,7 +633,7 @@ mod tests {
         let folder = scratch("split");
         let plan =
             ExportPlan { split: true, ..plan_for(&folder) };
-        export(&project, &plan, &|_| {}).unwrap();
+        export(&project, &plan, &|_| true).unwrap();
         let stems = folder.join(STEMS_FOLDER);
         let vox = Source::load(&stems.join("Lead vox.wav"), 48_000).unwrap();
         let beat = Source::load(&stems.join("Beat.wav"), 48_000).unwrap();
@@ -696,7 +713,7 @@ mod tests {
         let folder = scratch("pace");
         let plan = ExportPlan { format: Format::Mp3Cbr320, normalise: Normalise::Loudness(-14.0), ..plan_for(&folder) };
         let seen = std::cell::RefCell::new(Vec::new());
-        export(&project, &plan, &|fraction| seen.borrow_mut().push(fraction)).unwrap();
+        export(&project, &plan, &|fraction| { seen.borrow_mut().push(fraction); true }).unwrap();
         let seen = seen.into_inner();
         let rendered = project.length() as usize / BLOCK;
         let after_the_render = seen[rendered.saturating_sub(1)];
@@ -711,7 +728,7 @@ mod tests {
         let plan =
             ExportPlan { split: true, ..plan_for(&folder) };
         let seen = std::cell::RefCell::new(Vec::new());
-        export(&project, &plan, &|fraction| seen.borrow_mut().push(fraction)).unwrap();
+        export(&project, &plan, &|fraction| { seen.borrow_mut().push(fraction); true }).unwrap();
         let seen = seen.into_inner();
         assert!(seen.len() >= 3, "one report per file at least");
         assert!(seen.windows(2).all(|pair| pair[1] >= pair[0]));
@@ -724,7 +741,7 @@ mod tests {
         let project = song();
         let folder = scratch("range");
         let plan = ExportPlan { range: Some((1500, 2500)), ..plan_for(&folder) };
-        export(&project, &plan, &|_| {}).unwrap();
+        export(&project, &plan, &|_| true).unwrap();
         let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         assert_eq!(read.frames, heard(&project)[1500..2500]);
         fs::remove_dir_all(folder).unwrap();
@@ -786,7 +803,7 @@ mod tests {
         let project = tone_song(0.05, 6);
         let folder = scratch("lufs");
         let plan = ExportPlan { normalise: Normalise::Loudness(-14.0), format: Format::Wav24, dither: true, ..plan_for(&folder) };
-        let note = export(&project, &plan, &|_| {}).unwrap().unwrap();
+        let note = export(&project, &plan, &|_| true).unwrap().unwrap();
         assert!(note.starts_with("Normalised to -14 LUFS"), "{note}");
         let levels = measured(&folder.join("Song.wav"));
         assert!((levels.loudness + 14.0).abs() < 0.1, "{levels:?}");
@@ -799,7 +816,7 @@ mod tests {
         let project = tone_song(0.05, 3);
         let folder = scratch("peak");
         let plan = ExportPlan { normalise: Normalise::Peak(-1.0), format: Format::Flac16, dither: true, ..plan_for(&folder) };
-        export(&project, &plan, &|_| {}).unwrap();
+        export(&project, &plan, &|_| true).unwrap();
         let levels = measured(&folder.join("Song.flac"));
         assert!((levels.true_peak + 1.0).abs() < 0.1, "{levels:?}");
         fs::remove_dir_all(folder).unwrap();
@@ -810,7 +827,7 @@ mod tests {
         let project = tone_song(0.05, 3);
         let folder = scratch("ceiling");
         let plan = ExportPlan { normalise: Normalise::Loudness(0.0), ..plan_for(&folder) };
-        let note = export(&project, &plan, &|_| {}).unwrap().unwrap();
+        let note = export(&project, &plan, &|_| true).unwrap().unwrap();
         assert!(note.starts_with("Reached "), "{note}");
         let levels = measured(&folder.join("Song.wav"));
         assert!((levels.true_peak - TRUE_PEAK_CEILING).abs() < 0.1, "{levels:?}");
@@ -823,7 +840,7 @@ mod tests {
         let project = tone_song(0.05, 2);
         let folder = scratch("stems");
         let plan = ExportPlan { split: true, normalise: Normalise::Peak(-3.0), ..plan_for(&folder) };
-        export(&project, &plan, &|_| {}).unwrap();
+        export(&project, &plan, &|_| true).unwrap();
         let mix = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         let low = Source::load(&folder.join(STEMS_FOLDER).join("Low.wav"), 48_000).unwrap();
         let high = Source::load(&folder.join(STEMS_FOLDER).join("High.wav"), 48_000).unwrap();
@@ -847,7 +864,7 @@ mod tests {
         let project = song();
         let folder = scratch("stem-format");
         let plan = ExportPlan { split: true, format: Format::Mp3Cbr320, ..plan_for(&folder) };
-        export(&project, &plan, &|_| {}).unwrap();
+        export(&project, &plan, &|_| true).unwrap();
         assert!(folder.join("Song.mp3").exists());
         assert!(folder.join(STEMS_FOLDER).join("Beat.mp3").exists());
         assert!(folder.join(STEMS_FOLDER).join("Lead vox.mp3").exists());

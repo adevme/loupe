@@ -44,7 +44,7 @@ mod versions;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -173,6 +173,7 @@ pub enum Message {
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
     MixerMenu { at: Point },
+    StopExport,
     OpenChain(stockwin::Spot),
     SetFxMix(stockwin::Spot, usize, f32),
     ChainGrab(stockwin::Spot, usize),
@@ -530,6 +531,8 @@ struct App {
     export_range_only: bool,
     export_elsewhere: Option<PathBuf>,
     exporting: bool,
+    stop_export: Arc<AtomicBool>,
+    export_began: Option<Instant>,
     export_progress: Arc<AtomicU32>,
     startup_problem: Option<String>,
     scale: f64,
@@ -640,6 +643,8 @@ impl App {
             export_range_only: false,
             export_elsewhere: None,
             exporting: false,
+            stop_export: Arc::new(AtomicBool::new(false)),
+            export_began: None,
             export_progress: Arc::new(AtomicU32::new(0)),
             startup_problem: no_sound.or(no_folder),
             bpm: format_bpm(project.bpm),
@@ -1250,6 +1255,7 @@ impl App {
             Message::DeleteClip(clip) => self.delete_clips(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
+            Message::StopExport => self.stop_export.store(true, Ordering::Relaxed),
             Message::OpenChain(spot) => self.overlay = Overlay::Chain(spot),
             Message::SetFxMix(spot, slot, mix) => self.set_fx_mix(spot, slot, mix),
             Message::ChainGrab(spot, slot) => {
@@ -1849,8 +1855,10 @@ impl App {
             Message::StartExport => return self.start_export(),
             Message::Exported(result) => {
                 self.exporting = false;
+                self.export_began = None;
                 match result {
                     Ok((folder, note)) => self.overlay = Overlay::Exported(folder, note),
+                    Err(why) if why.contains(loupe_engine::STOPPED) => self.stop_export.store(false, Ordering::Relaxed),
                     Err(why) => self.problem = Some(format!("Could not export: {why}")),
                 }
             }
@@ -2688,10 +2696,18 @@ impl App {
             return Space::new(0, 0).into();
         }
         let done = self.export_progress.load(Ordering::Relaxed) as f32 / EXPORT_PROGRESS_STEPS as f32;
+        let spent = self.export_began.map(|began| began.elapsed()).unwrap_or_default();
+        let (minutes, seconds) = (spent.as_secs() / 60, spent.as_secs() % 60);
+        let left = (done > 0.01).then(|| spent.mul_f32((1.0 - done) / done)).map(|rest| format!("  ·  about {} left", said_as(rest))).unwrap_or_default();
         let notice = column![
             text("Exporting").size(15).font(palette.medium),
             progress_bar(0.0..=1.0, done).width(300).height(8),
             text(format!("{:.0}%", done * 100.0)).size(13).font(palette.mono).color(palette.text_dim),
+            text(format!("{minutes}:{seconds:02} gone{left}")).size(12).color(palette.text_dim),
+            button(text(if self.stop_export.load(Ordering::Relaxed) { "Stopping…" } else { "Stop" }).size(13).font(palette.medium))
+                .padding([7, 18])
+                .style(move |_, status| palette.outlined(status))
+                .on_press_maybe((!self.stop_export.load(Ordering::Relaxed)).then_some(Message::StopExport)),
         ]
         .spacing(14)
         .align_x(Alignment::Center);

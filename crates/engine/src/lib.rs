@@ -19,7 +19,7 @@ pub use audio::{bar_frames, Engine, Output, TapedKey, METERS};
 pub use chain::{chain_from, chain_text};
 pub use devices::{choices, default_driver, drivers, milliseconds, outputs, Choices, Device, Running, BUFFERS, RATES};
 pub use encode::Format;
-pub use export::{export, export_through, next_version_folder, render_to_wav, render_to_wav_through, ExportPlan, Gain, Levels, Normalise, TRUE_PEAK_CEILING};
+pub use export::{export, STOPPED, export_through, next_version_folder, render_to_wav, render_to_wav_through, ExportPlan, Gain, Levels, Normalise, TRUE_PEAK_CEILING};
 pub use file::{SavedClip, SavedFx, SavedProject, SavedTrack};
 pub use input::{input_count, input_devices, Input, InputChoice, Take, MOST_INPUTS};
 pub use midi_in::{KeyEvent, KeySender, MidiKeys};
