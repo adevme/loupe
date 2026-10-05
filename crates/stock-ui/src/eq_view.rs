@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::{button, column, container, horizontal_space, pick_list, row, slider, text};
 use iced::{keyboard, mouse, Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
-use loupe_stock::{band_design, knob, BandShape, Effect, Equalizer, Knob, Param, Scopes, BANDS, OUTPUT_KNOB, PLACES, SHAPES, SLOPES};
+use loupe_stock::{band_design, dynamic_knob, knob, BandShape, Dynamic, Effect, Equalizer, Knob, Param, Scopes, ATTACK_KNOB, BANDS, OUTPUT_KNOB, PLACES, RELEASE_KNOB, SHAPES, SLOPES};
 
 use crate::look::{fade, Look};
 use crate::kit::{hertz, put_text};
@@ -14,6 +14,10 @@ const LOWEST_HZ: f32 = 10.0;
 const HIGHEST_HZ: f32 = 30_000.0;
 const NODE_RADIUS: f32 = 6.5;
 const NODE_REACH: f32 = 12.0;
+const RANGE_BAR: f32 = 3.0;
+const OUTPUT_SLIDER: f32 = 120.0;
+const DYNAMIC_SLIDER: f32 = 90.0;
+const DYNAMIC_READOUT: f32 = 58.0;
 const EDGE_PAD: f32 = 16.0;
 const SPECTRUM_FLOOR_DB: f32 = -84.0;
 const SPECTRUM_CEILING_DB: f32 = 18.0;
@@ -100,6 +104,17 @@ impl EqEditor {
         BandShape::from_index(self.get(band, Knob::Shape))
     }
 
+    fn dynamic(&self, band: usize) -> bool {
+        self.values[dynamic_knob(band, Dynamic::On)] > 0.5 && self.shape(band).has_gain()
+    }
+
+    fn moved_db(&self, band: usize) -> f32 {
+        match (&self.scopes, self.dynamic(band)) {
+            (Some(scopes), true) => scopes.moved_db(band),
+            _ => 0.0,
+        }
+    }
+
     fn apply(&mut self, changes: &[(usize, f32)]) -> Vec<(usize, f32)> {
         changes
             .iter()
@@ -164,22 +179,7 @@ impl EqEditor {
         let range = pick_list(&RANGES[..], Some(RANGES[self.range]), EqMessage::Range).text_size(12).padding([4, 8]);
         let output_row = row![
             text("Output").size(12).color(look.text_dim),
-            slider(-36.0..=36.0, output, |db| EqMessage::Set(vec![(OUTPUT_KNOB, (db * 10.0).round() / 10.0)]))
-                .step(0.1)
-                .width(120)
-                .style(move |_, _| slider::Style {
-                    rail: slider::Rail {
-                        backgrounds: (look.curve.into(), look.grid_strong.into()),
-                        width: 3.0,
-                        border: iced::Border::default().rounded(2),
-                    },
-                    handle: slider::Handle {
-                        shape: slider::HandleShape::Circle { radius: 6.0 },
-                        background: look.text.into(),
-                        border_width: 0.0,
-                        border_color: Color::TRANSPARENT,
-                    },
-                }),
+            thin_slider(look, OUTPUT_SLIDER, -36.0..=36.0, output, |db| EqMessage::Set(vec![(OUTPUT_KNOB, (db * 10.0).round() / 10.0)])),
             text(format!("{output:+.1} dB")).size(12).width(64),
             range,
         ]
@@ -221,7 +221,48 @@ impl EqEditor {
         readout.push_str(&format!("   Q {:.2}", self.get(band, Knob::Q)));
         band_row = band_row.push(text(readout).size(12).color(look.text_dim));
         let remove = button(text("Remove").size(12)).padding([4, 10]).on_press(EqMessage::Remove(band));
-        row![band_row, horizontal_space(), remove, output_row].spacing(16).align_y(Alignment::Center).into()
+        if shape.has_gain() {
+            let on = self.dynamic(band);
+            let toggle = button(text("Dynamic").size(12))
+                .padding([4, 10])
+                .style(move |_, _| button::Style {
+                    background: Some(if on { look.curve } else { look.raised }.into()),
+                    text_color: if on { look.background } else { look.text },
+                    border: iced::Border::default().rounded(6),
+                    ..Default::default()
+                })
+                .on_press(EqMessage::Set(vec![(dynamic_knob(band, Dynamic::On), if on { 0.0 } else { 1.0 })]));
+            band_row = band_row.push(toggle);
+            if on {
+                band_row = band_row.push(text(format!("now {:+.1} dB", self.moved_db(band))).size(12).color(look.text_dim).wrapping(iced::widget::text::Wrapping::None));
+            }
+        }
+        let top = row![band_row, horizontal_space(), remove, output_row].spacing(16).align_y(Alignment::Center);
+        if !self.dynamic(band) {
+            return top.into();
+        }
+        let knob_of = |label: &'static str, index: usize, low: f32, high: f32, shown: String| {
+            row![
+                text(label).size(12).color(look.text_dim),
+                thin_slider(look, DYNAMIC_SLIDER, low..=high, self.values[index], move |value| EqMessage::Set(vec![(index, (value * 10.0).round() / 10.0)])),
+                text(shown).size(12).width(DYNAMIC_READOUT).wrapping(iced::widget::text::Wrapping::None),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+        };
+        let threshold = self.values[dynamic_knob(band, Dynamic::Threshold)];
+        let range = self.values[dynamic_knob(band, Dynamic::Range)];
+        let attack = self.values[ATTACK_KNOB];
+        let release = self.values[RELEASE_KNOB];
+        let dynamics = row![
+            knob_of("Threshold", dynamic_knob(band, Dynamic::Threshold), -60.0, 0.0, format!("{threshold:.1} dB")),
+            knob_of("Range", dynamic_knob(band, Dynamic::Range), -30.0, 30.0, format!("{range:+.1} dB")),
+            knob_of("Attack", ATTACK_KNOB, 0.1, 200.0, format!("{attack:.1} ms")),
+            knob_of("Release", RELEASE_KNOB, 5.0, 2000.0, format!("{release:.0} ms")),
+        ]
+        .spacing(14)
+        .align_y(Alignment::Center);
+        column![top, dynamics].spacing(10).into()
     }
 
     fn designs(&self, band: usize) -> ([loupe_stock::Coefficients; 8], usize) {
@@ -229,14 +270,14 @@ impl EqEditor {
             self.shape(band),
             self.rate,
             self.get(band, Knob::Freq),
-            self.get(band, Knob::Gain),
+            self.get(band, Knob::Gain) + self.moved_db(band),
             self.get(band, Knob::Q),
             self.get(band, Knob::Slope) as usize,
         )
     }
 
     fn band_audible(&self, band: usize) -> bool {
-        self.in_use(band) && !(self.shape(band).has_gain() && self.get(band, Knob::Gain) == 0.0)
+        self.in_use(band) && !(self.shape(band).has_gain() && self.get(band, Knob::Gain) == 0.0 && !self.dynamic(band))
     }
 }
 
@@ -530,6 +571,14 @@ impl canvas::Program<EqMessage> for Graph<'_> {
             let colour = look.band(band);
             let lit = hovered == Some(band) || grip.drag.as_ref().is_some_and(|drag| drag.band == band);
             let radius = if lit { NODE_RADIUS + 1.5 } else { NODE_RADIUS };
+            if editor.dynamic(band) {
+                let gain = editor.get(band, Knob::Gain);
+                let reach = self.range_db();
+                let y_at = |db: f32| self.y_of(size.height, db.clamp(-reach, reach));
+                let end = y_at(gain + editor.values[dynamic_knob(band, Dynamic::Range)]);
+                frame.fill_rectangle(Point::new(at.x - RANGE_BAR / 2.0, at.y.min(end)), Size::new(RANGE_BAR, (end - at.y).abs()), fade(colour, 0.45));
+                frame.stroke(&Path::circle(Point::new(at.x, y_at(gain + editor.moved_db(band))), NODE_RADIUS - 2.0), Stroke::default().with_color(colour).with_width(1.5));
+            }
             let dot = Path::circle(at, radius);
             frame.fill(&dot, if editor.band_audible(band) { colour } else { fade(colour, 0.45) });
             if editor.selected == Some(band) {
@@ -575,3 +624,19 @@ impl canvas::Program<EqMessage> for Graph<'_> {
     }
 }
 
+
+fn thin_slider<'a>(look: Look, width: f32, range: std::ops::RangeInclusive<f32>, value: f32, on_change: impl Fn(f32) -> EqMessage + 'a) -> iced::widget::Slider<'a, f32, EqMessage> {
+    slider(range, value, on_change).step(0.1).width(width).style(move |_, _| slider::Style {
+        rail: slider::Rail {
+            backgrounds: (look.curve.into(), look.grid_strong.into()),
+            width: 3.0,
+            border: iced::Border::default().rounded(2),
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 6.0 },
+            background: look.text.into(),
+            border_width: 0.0,
+            border_color: Color::TRANSPARENT,
+        },
+    })
+}

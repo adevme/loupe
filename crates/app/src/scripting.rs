@@ -202,11 +202,13 @@ fn knob_index(knob: &Value, names: &[String]) -> Option<usize> {
 
 fn built_in_values(effect: &dyn loupe_stock::Effect, state: &[u8]) -> Vec<f32> {
     let count = effect.params().len();
-    if state.len() == count * 4 {
-        state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect()
-    } else {
-        (0..count).map(|i| effect.value(i)).collect()
+    let mut values: Vec<f32> = (0..count).map(|i| effect.value(i)).collect();
+    if state.len() % 4 == 0 && state.len() <= count * 4 {
+        for (slot, four) in values.iter_mut().zip(state.chunks_exact(4)) {
+            *slot = f32::from_le_bytes([four[0], four[1], four[2], four[3]]);
+        }
     }
+    values
 }
 
 fn hosted_readings(h: &mut Host<'_>, track: u64, slot: usize, name: &str) -> mlua::Result<Vec<(String, f32, String)>> {
