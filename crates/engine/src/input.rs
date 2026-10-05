@@ -137,7 +137,8 @@ pub fn input_count(choice: &InputChoice) -> Option<u16> {
     if *choice == InputChoice::Practice {
         return Some(PRACTICE_INPUTS);
     }
-    let channels = find_device(choice).ok()?.default_input_config().ok()?.channels();
+    let first = devices_to_try(choice).ok()?.into_iter().next()?;
+    let channels = settings_for(&first).ok()?.channels();
     Some(channels.clamp(1, MOST_INPUTS as u16))
 }
 
@@ -397,17 +398,35 @@ fn practice_tone(channel: u16) -> f32 {
     PRACTICE_TONE_HZ * (channel + 1) as f32
 }
 
-fn find_device(choice: &InputChoice) -> Result<cpal::Device, String> {
+fn named_of(device: &cpal::Device) -> String {
+    device.name().unwrap_or_else(|_| "an unnamed input".to_string())
+}
+
+fn devices_to_try(choice: &InputChoice) -> Result<Vec<cpal::Device>, String> {
     let host = crate::devices::host();
-    match choice {
-        InputChoice::Named(wanted) => host
-            .input_devices()
-            .map_err(|why| why.to_string())?
-            .find(|device| device.name().is_ok_and(|name| &name == wanted))
-            .or_else(|| host.default_input_device())
-            .ok_or_else(|| format!("the input \"{wanted}\" is not connected, and there is no other recording input")),
-        _ => host.default_input_device().ok_or_else(|| "no recording input found".to_string()),
+    let listed: Vec<cpal::Device> = host.input_devices().map_err(|why| why.to_string())?.collect();
+    let mut order = Vec::new();
+    if let InputChoice::Named(wanted) = choice {
+        if let Some(found) = listed.iter().position(|device| device.name().is_ok_and(|name| &name == wanted)) {
+            order.push(listed[found].clone());
+        }
     }
+    if let Some(usual) = host.default_input_device() {
+        let name = named_of(&usual);
+        if !order.iter().any(|device| named_of(device) == name) {
+            order.push(usual);
+        }
+    }
+    for device in listed {
+        let name = named_of(&device);
+        if !order.iter().any(|already| named_of(already) == name) {
+            order.push(device);
+        }
+    }
+    if order.is_empty() {
+        return Err("no recording input found".to_string());
+    }
+    Ok(order)
 }
 
 fn settings_for(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
@@ -422,16 +441,26 @@ fn settings_for(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, St
 }
 
 fn open_device(choice: &InputChoice, heard: Arc<Heard>) -> Result<(cpal::Stream, Opened), String> {
-    let device = find_device(choice)?;
-    let supported = settings_for(&device)?;
+    let mut refused = Vec::new();
+    for device in devices_to_try(choice)? {
+        match open_one(&device, heard.clone()) {
+            Ok(working) => return Ok(working),
+            Err(why) => refused.push(format!("{}: {why}", named_of(&device))),
+        }
+    }
+    Err(format!("no recording input would open. {}", refused.join("; ")))
+}
+
+fn open_one(device: &cpal::Device, heard: Arc<Heard>) -> Result<(cpal::Stream, Opened), String> {
+    let supported = settings_for(device)?;
     let format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
     let (tap, ends) = tap_for(heard, config.sample_rate.0, (config.channels as usize).clamp(1, MOST_INPUTS));
     let stream = match format {
-        cpal::SampleFormat::F32 => stream::<f32>(&device, &config, tap),
-        cpal::SampleFormat::I16 => stream::<i16>(&device, &config, tap),
-        cpal::SampleFormat::U16 => stream::<u16>(&device, &config, tap),
-        cpal::SampleFormat::I32 => stream::<i32>(&device, &config, tap),
+        cpal::SampleFormat::F32 => stream::<f32>(device, &config, tap),
+        cpal::SampleFormat::I16 => stream::<i16>(device, &config, tap),
+        cpal::SampleFormat::U16 => stream::<u16>(device, &config, tap),
+        cpal::SampleFormat::I32 => stream::<i32>(device, &config, tap),
         other => return Err(format!("the input uses a format Loupe cannot read ({other})")),
     }
     .map_err(|why| why.to_string())?;
