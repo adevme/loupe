@@ -411,12 +411,12 @@ impl Rt {
             return;
         }
         if ear.filling {
-            if waiting < wanted * 2 {
+            if waiting < wanted {
                 return;
             }
             ear.filling = false;
-        } else if waiting > wanted * 4 {
-            if let Ok(old) = feed.read_chunk((waiting - wanted * 2) * width) {
+        } else if waiting > wanted * 2 {
+            if let Ok(old) = feed.read_chunk((waiting - wanted) * width) {
                 old.commit_all();
             }
         }
