@@ -366,15 +366,15 @@ fn strip_title(palette: crate::theme::Palette, number: &str, name: String, hidde
             .into(),
         None => Space::new(HIDDEN_MARK, 0).into(),
     };
-    hrow![
+    let line = hrow![
         text(number.to_string()).size(10).font(palette.mono).color(palette.text_faint),
         text(name).size(12).font(palette.semibold).wrapping(iced::widget::text::Wrapping::None).width(Length::Fill),
         mark,
     ]
     .spacing(5)
     .width(Length::Fill)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    container(line).height(TITLE_LINE).clip(true).align_y(Alignment::Center).into()
 }
 
 fn peak_text(palette: crate::theme::Palette, level: f32) -> Element<'static, Message> {
@@ -389,6 +389,7 @@ fn peak_text(palette: crate::theme::Palette, level: f32) -> Element<'static, Mes
 
 pub const METER_W: f32 = 32.0;
 const HIDDEN_MARK: f32 = 14.0;
+const TITLE_LINE: f32 = 18.0;
 const FADER_W: f32 = 20.0;
 const SCALE_W: f32 = 20.0;
 const FLOOR_DB: f32 = -60.0;

@@ -21,6 +21,9 @@ const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
 const ARM_BUTTON: f32 = 22.0;
 const ARM_GAP: f32 = 8.0;
+const NAME_GAP: f32 = 10.0;
+const NAME_NARROWEST: f32 = 26.0;
+const NAME_LETTER: f32 = 7.0;
 const PAN_KNOB: f32 = 24.0;
 const PAN_PER_PX: f32 = 0.01;
 const ARM_DOT_RADIUS: f32 = 5.0;
@@ -1979,15 +1982,20 @@ impl Timeline<'_> {
                     ..Text::default()
                 });
             }
-            frame.fill_text(Text {
-                content: shorten(&track.name, if height >= ROOMY_HEADER_H { 20 } else { 14 }),
-                position: Point::new(16.0 + indent + if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) { 14.0 } else { 0.0 }, top + 20.0),
-                color: if track.muted { p.text_dim } else { p.text },
-                size: p.track_title_size.into(),
-                font: p.medium,
-                vertical_alignment: alignment::Vertical::Center,
-                ..Text::default()
-            });
+            let name_left = 16.0 + indent + if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) { 14.0 } else { 0.0 };
+            let roomy = height >= ROOMY_HEADER_H;
+            let room_for_name = if roomy { self.header_right() - self.header_left() - name_left - NAME_GAP } else { self.fx_button(i).x - self.header_left() - name_left - NAME_GAP };
+            if room_for_name >= NAME_NARROWEST {
+                frame.fill_text(Text {
+                    content: shorten(&track.name, (room_for_name / NAME_LETTER) as usize),
+                    position: Point::new(name_left, top + 20.0),
+                    color: if track.muted { p.text_dim } else { p.text },
+                    size: p.track_title_size.into(),
+                    font: p.medium,
+                    vertical_alignment: alignment::Vertical::Center,
+                    ..Text::default()
+                });
+            }
 
             let remove = self.remove_button(i);
             frame.fill_text(Text {

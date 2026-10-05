@@ -323,8 +323,6 @@ impl App {
             text(concat!("Version ", env!("CARGO_PKG_VERSION"))).size(12).font(palette.mono).color(palette.text_dim),
             rule(palette),
             credit("Made by ash."),
-            credit("Built with Rust, Iced, cpal and Symphonia."),
-            credit("Typefaces: Inter and JetBrains Mono. Icons: Lucide."),
             rule(palette),
             self.updates_block(),
         ]
