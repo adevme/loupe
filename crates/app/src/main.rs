@@ -28,6 +28,7 @@ mod chains;
 mod chainwin;
 mod keying;
 mod recording;
+mod resources;
 mod takes;
 mod selection;
 mod sampler_sheet;
@@ -132,6 +133,7 @@ pub enum Message {
     ToStart,
     Seek(Frames),
     Tick,
+    LookAround,
     Import,
     Picked(Vec<PathBuf>),
     Dropped(PathBuf),
@@ -580,6 +582,7 @@ struct App {
     usage: usage::Usage,
     metronome: bool,
     count_in_bars: u32,
+    resources: resources::Resources,
     preroll_bars: u32,
     punch: bool,
     hear_input: bool,
@@ -704,6 +707,7 @@ impl App {
             usage: usage_now,
             metronome: settings.metronome,
             count_in_bars: settings.count_in_bars,
+            resources: resources::Resources::new(),
             preroll_bars: settings.preroll_bars,
             punch: settings.punch,
             hear_input: settings.hear_input,
@@ -871,6 +875,7 @@ impl App {
             }
             Message::ToStart => self.seek(0),
             Message::Seek(to) => self.seek(to),
+            Message::LookAround => self.resources.look(),
             Message::Tick => {
                 let punched_out = self.recording.as_ref().and_then(|recording| recording.punch).is_some_and(|(_, to)| self.engine.position() >= to);
                 if punched_out {
@@ -2086,7 +2091,8 @@ impl App {
         } else {
             Subscription::none()
         };
-        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys])
+        let looking_around = iced::time::every(Duration::from_secs(1)).map(|_| Message::LookAround);
+        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -2996,6 +3002,8 @@ impl App {
         } else {
             text(self.hint.unwrap_or_default()).size(12).color(palette.text_dim).into()
         };
+        let usage = text(self.resources.summary()).size(12).font(palette.mono).color(palette.text_dim);
+        let line = row![container(line).width(Length::Fill).clip(true), usage].spacing(16).align_y(Alignment::Center);
         Some(
             container(line)
                 .padding([0, 16])

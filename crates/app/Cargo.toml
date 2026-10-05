@@ -15,6 +15,7 @@ ureq = "2"
 mlua = { version = "0.12", features = ["lua54", "vendored"] }
 sha2 = "0.10"
 iced_runtime = "0.13"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [build-dependencies]
 winresource = "0.1"
