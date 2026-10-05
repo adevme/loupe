@@ -5,6 +5,9 @@ use crate::ceiling::{Ceiling, Seat};
 use crate::sandbox::Sandbox;
 use crate::wire::{Ask, Region, Reply};
 
+const SETTLING_BLOCKS: usize = 50;
+const SETTLING_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
+
 type Arrived = Result<Opened, (String, bool)>;
 
 struct Dry {
@@ -288,11 +291,20 @@ impl Rack {
     }
 
     pub fn turn_and_save(&mut self, slot: usize, knob: usize, value: f32) -> Option<Vec<u8>> {
+        let before = self.save(slot)?;
         self.tweak(slot, knob, value);
         let quiet = self.block.max(1);
-        let host = self.slots.get_mut(slot)?.host.as_mut()?;
-        host.run(&mut vec![[0.0; 2]; quiet]).ok()?;
-        self.save(slot)
+        let mut saved = before.clone();
+        for _ in 0..SETTLING_BLOCKS {
+            let host = self.slots.get_mut(slot)?.host.as_mut()?;
+            host.run(&mut vec![[0.0; 2]; quiet]).ok()?;
+            saved = self.save(slot)?;
+            if saved != before {
+                break;
+            }
+            std::thread::sleep(SETTLING_WAIT);
+        }
+        Some(saved)
     }
 
     pub fn readings(&mut self, slot: usize) -> Vec<crate::wire::Reading> {
@@ -1121,7 +1133,7 @@ mod real_plugin_tests {
 
     fn real(state: Vec<u8>) -> Option<(Rack, Wanted)> {
         let plugin = PathBuf::from(std::env::var_os("LOUPE_TEST_VST3")?);
-        let host = crate::sandbox::host_beside_us().parent()?.parent()?.join("loupe-host");
+        let host = crate::sandbox::host_beside_us().parent()?.parent()?.join(format!("loupe-host{}", std::env::consts::EXE_SUFFIX));
         let wanted = Wanted { path: plugin, index: 0, name: "Test".into(), bypassed: false, state, record: false, mix: 1.0 };
         let mut rack = Rack::new(host, 48_000, 64);
         assert!(rack.reconcile(&[wanted.clone()]).is_empty());
@@ -1141,12 +1153,18 @@ mod real_plugin_tests {
         let Some((mut rack, mut wanted)) = real(Vec::new()) else { return };
         let first = rack.readings(0);
         assert!(!first.is_empty(), "the plugin shows no knobs");
-        let knob = first.len() - 1;
-        let target = rack.from_text(0, knob, "0.5").unwrap_or(0.5);
+        let named = std::env::var("LOUPE_TEST_KNOB").ok();
+        let knob = named.as_deref().and_then(|name| first.iter().position(|reading| reading.name == name)).unwrap_or(first.len() - 1);
+        let asked = std::env::var("LOUPE_TEST_TEXT").unwrap_or_else(|_| "0.5".into());
+        let target = rack.from_text(0, knob, &asked).unwrap_or(0.5);
         let before = rack.save(0).unwrap();
         let after = rack.turn_and_save(0, knob, target).unwrap();
         assert_ne!(before, after, "the saved settings carry the turn");
         assert!((rack.readings(0)[knob].value - target).abs() < 0.01);
+        if named.is_some() {
+            let shown = rack.readings(0)[knob].text.clone();
+            assert_eq!(crate::wording::number_in(&shown), crate::wording::number_in(&asked), "{asked} shows as {shown}");
+        }
         wanted.state = before;
         assert!(rack.reconcile(&[wanted]).is_empty());
         assert!((rack.readings(0)[knob].value - first[knob].value).abs() < 0.01, "undo puts the knob back");

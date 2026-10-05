@@ -144,6 +144,7 @@ pub struct Effect {
     side_right: Vec<f32>,
     ids: Vec<u32>,
     ranges: Vec<(f64, f64)>,
+    steps: Vec<u32>,
     waiting: Vec<clap_sys::events::clap_event_param_value>,
     _library: Library,
 }
@@ -194,6 +195,7 @@ impl Effect {
                 side_right: vec![0.0; block],
                 ids: Vec::new(),
                 ranges: Vec::new(),
+                steps: Vec::new(),
                 waiting: Vec::new(),
                 _library: library,
             })
@@ -266,6 +268,7 @@ impl Effect {
         let mut out = Vec::new();
         let mut seen = Vec::new();
         let mut spans = Vec::new();
+        let mut stepped = Vec::new();
         unsafe {
             let Some(get) = (*self.plugin).get_extension else { return out };
             let found = get(self.plugin, clap_sys::ext::params::CLAP_EXT_PARAMS.as_ptr());
@@ -275,7 +278,7 @@ impl Effect {
             let part = found as *const clap_sys::ext::params::clap_plugin_params;
             let count = (*part).count.map(|count| count(self.plugin)).unwrap_or(0);
             let Some(about) = (*part).get_info else { return out };
-            for index in 0..count.min(512) {
+            for index in 0..count.min(crate::wording::MOST_KNOBS as _) {
                 let mut info: clap_sys::ext::params::clap_param_info = std::mem::zeroed();
                 if !about(self.plugin, index, &mut info) {
                     continue;
@@ -284,10 +287,12 @@ impl Effect {
                 out.push(String::from_utf8_lossy(&raw).into_owned());
                 seen.push(info.id);
                 spans.push((info.min_value, info.max_value));
+                stepped.push(if info.flags & clap_sys::ext::params::CLAP_PARAM_IS_STEPPED != 0 { (info.max_value - info.min_value).round().max(0.0) as u32 } else { 0 });
             }
         }
         self.ids = seen;
         self.ranges = spans;
+        self.steps = stepped;
         out
     }
 
@@ -362,8 +367,20 @@ impl Effect {
         let part = self.params()?;
         let words = std::ffi::CString::new(text).ok()?;
         let mut plain = 0.0f64;
-        let read = unsafe { (*part).text_to_value?(self.plugin, id, words.as_ptr(), &mut plain) };
-        (read && plain.is_finite()).then(|| self.spread(knob, plain))
+        let read = unsafe { (*part).text_to_value.is_some_and(|read| read(self.plugin, id, words.as_ptr(), &mut plain)) };
+        if read && plain.is_finite() {
+            return Some(self.spread(knob, plain));
+        }
+        let (low, high) = self.ranges.get(knob).copied().unwrap_or((0.0, 1.0));
+        let say_text = unsafe { (*part).value_to_text? };
+        let plugin = self.plugin;
+        let say = |value: f64| {
+            let mut words = [0 as std::ffi::c_char; 128];
+            unsafe { say_text(plugin, id, low + (high - low) * value, words.as_mut_ptr(), words.len() as u32) }
+                .then(|| unsafe { std::ffi::CStr::from_ptr(words.as_ptr()) }.to_string_lossy().into_owned())
+        };
+        let steps = self.steps.get(knob).copied().unwrap_or(0);
+        crate::wording::find_value(steps, text, say).map(|value| value as f32)
     }
 
     pub fn latency(&self) -> usize {
