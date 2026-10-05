@@ -2192,7 +2192,7 @@ impl App {
 
     pub(crate) fn offline_racks(&self, project: &Project) -> Box<dyn Chains> {
         let mut racks: Box<dyn Chains> =
-            Box::new(racks::Racks::new(self.engine.rate(), 512, racks::Peeks::default(), self.plugins_off.clone(), self.falls.clone()));
+            Box::new(racks::Racks::new(self.engine.rate(), 512, racks::Peeks::default(), self.plugins_off.clone(), self.falls.clone()).away_from_the_audio_thread());
         racks.follow(project);
         racks
     }

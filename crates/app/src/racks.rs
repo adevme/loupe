@@ -55,6 +55,7 @@ pub struct Racks {
     off: PluginsOff,
     falls: Falls,
     said_held_back: usize,
+    off_the_audio_thread: bool,
 }
 
 impl Racks {
@@ -71,7 +72,13 @@ impl Racks {
             off,
             falls,
             said_held_back: 0,
+            off_the_audio_thread: false,
         }
+    }
+
+    pub fn away_from_the_audio_thread(mut self) -> Self {
+        self.off_the_audio_thread = true;
+        self
     }
 
     fn held_back(&self) -> usize {
@@ -427,6 +434,42 @@ impl Chains for Racks {
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }
 
+    fn whole_waves_at_once(&self) -> bool {
+        self.off_the_audio_thread
+    }
+
+    fn process_wave(&mut self, jobs: &mut [loupe_engine::Job<'_>]) {
+        let mut spare: Vec<&mut loupe_engine::Job<'_>> = jobs.iter_mut().collect();
+        let mut pairs: Vec<(&mut Rack, &mut loupe_engine::Job<'_>)> = Vec::with_capacity(spare.len());
+        for (id, rack) in self.chains.iter_mut() {
+            if rack.is_empty() {
+                continue;
+            }
+            if let Some(at) = spare.iter().position(|job| job.track == *id) {
+                pairs.push((rack, spare.swap_remove(at)));
+            }
+        }
+        if pairs.len() < 2 {
+            for (rack, job) in pairs {
+                run_one(rack, job, &self.falls);
+            }
+            return;
+        }
+        let queue = Mutex::new(pairs);
+        let hands = queue.lock().map(|held| held.len()).unwrap_or(0).min(MOST_TRACKS_AT_ONCE);
+        let falls = &self.falls;
+        std::thread::scope(|scope| {
+            for _ in 0..hands {
+                let queue = &queue;
+                scope.spawn(move || loop {
+                    let next = queue.lock().ok().and_then(|mut held| held.pop());
+                    let Some((rack, job)) = next else { return };
+                    run_one(rack, job, falls);
+                });
+            }
+        });
+    }
+
     fn process_takes(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
         let Some(rack) = self.chains.get_mut(&track) else { return };
         if !rack.has_takes() {
@@ -456,6 +499,19 @@ impl Chains for Racks {
         let shared = self.scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&self.scratch[..shared]);
     }
+}
+
+const MOST_TRACKS_AT_ONCE: usize = 256;
+
+fn run_one(rack: &mut Rack, job: &mut loupe_engine::Job<'_>, falls: &Falls) {
+    let mut held: Vec<[f32; 2]> = job.audio.to_vec();
+    rack.process_with(&mut held, job.side);
+    if rack.has_fallen() {
+        let track = job.track;
+        tell_falls(falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
+    }
+    let shared = held.len().min(job.audio.len());
+    job.audio[..shared].copy_from_slice(&held[..shared]);
 }
 
 fn region_of(project: &Project, clip: &Clip) -> Option<Region> {
@@ -499,6 +555,41 @@ mod tests {
 
     fn racks(off: bool) -> Racks {
         Racks::new(48_000, 512, Peeks::default(), Arc::new(AtomicBool::new(off)), Falls::default())
+    }
+
+    fn six_tracks_with_a_stock_plugin() -> Project {
+        let mut project = Project::new(48_000);
+        for at in 0..6 {
+            let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: format!("T{at}") }) else {
+                panic!("no track")
+            };
+            let level = 0.1 + at as f32 / 10.0;
+            let source = Arc::new(Source::from_frames("take", vec![[level, -level]; 4_800]));
+            project.apply(Command::AddClip { track, source, start: 0 }).unwrap();
+            project.apply(Command::AddFx { track, fx: fx(loupe_plugins::BUILT_IN, 1, &[]) }).unwrap();
+        }
+        project
+    }
+
+    #[test]
+    fn a_whole_wave_of_racks_at_once_sounds_like_one_rack_at_a_time() {
+        let project = six_tracks_with_a_stock_plugin();
+        let mut both = Vec::new();
+        for at_once in [false, true] {
+            let mut racks = racks(false);
+            if at_once {
+                racks = racks.away_from_the_audio_thread();
+            }
+            assert_eq!(racks.whole_waves_at_once(), at_once);
+            racks.follow(&project);
+            assert_eq!(racks.chains.len(), 6);
+            let mut out = vec![[0.0f32; 2]; 512];
+            let mut scratch = loupe_engine::Mixdown::default();
+            loupe_engine::render_through(&project, 0, &mut out, &mut scratch, Some(&mut racks));
+            both.push(out);
+        }
+        assert_eq!(both[0], both[1], "the racks gave a different mix when they ran together");
+        assert!(both[0][200][0].abs() > 1e-6, "the mix is silent, so it proves nothing");
     }
 
     fn project_with_clip(path: &str) -> (Project, ClipId) {

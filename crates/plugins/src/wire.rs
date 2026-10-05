@@ -162,13 +162,20 @@ pub fn next_line(from: &mut BufReader<impl Read>) -> Option<String> {
     }
 }
 
+const BYTES_A_FRAME: usize = 8;
+const FRAMES_A_TRIP: usize = 2_048;
+
 pub fn write_block(out: &mut impl Write, audio: &[[f32; 2]]) -> std::io::Result<()> {
     let frames = audio.len() as u32;
     out.write_all(b"B")?;
     out.write_all(&frames.to_le_bytes())?;
-    for frame in audio {
-        out.write_all(&frame[0].to_le_bytes())?;
-        out.write_all(&frame[1].to_le_bytes())?;
+    let mut bytes = [0u8; FRAMES_A_TRIP * BYTES_A_FRAME];
+    for lot in audio.chunks(FRAMES_A_TRIP) {
+        for (frame, room) in lot.iter().zip(bytes.chunks_exact_mut(BYTES_A_FRAME)) {
+            room[..4].copy_from_slice(&frame[0].to_le_bytes());
+            room[4..].copy_from_slice(&frame[1].to_le_bytes());
+        }
+        out.write_all(&bytes[..lot.len() * BYTES_A_FRAME])?;
     }
     out.flush()
 }
@@ -184,12 +191,17 @@ pub fn read_block(from: &mut impl Read, audio: &mut Vec<[f32; 2]>) -> std::io::R
     let frames = u32::from_le_bytes(count) as usize;
     audio.clear();
     audio.reserve(frames);
-    let mut pair = [0u8; 8];
-    for _ in 0..frames {
-        from.read_exact(&mut pair)?;
-        let left = f32::from_le_bytes([pair[0], pair[1], pair[2], pair[3]]);
-        let right = f32::from_le_bytes([pair[4], pair[5], pair[6], pair[7]]);
-        audio.push([left, right]);
+    let mut bytes = [0u8; FRAMES_A_TRIP * BYTES_A_FRAME];
+    let mut left = frames;
+    while left > 0 {
+        let lot = left.min(FRAMES_A_TRIP);
+        from.read_exact(&mut bytes[..lot * BYTES_A_FRAME])?;
+        for pair in bytes[..lot * BYTES_A_FRAME].chunks_exact(BYTES_A_FRAME) {
+            let one = f32::from_le_bytes([pair[0], pair[1], pair[2], pair[3]]);
+            let two = f32::from_le_bytes([pair[4], pair[5], pair[6], pair[7]]);
+            audio.push([one, two]);
+        }
+        left -= lot;
     }
     Ok(())
 }
@@ -252,6 +264,44 @@ mod tests {
             let text = String::from_utf8(written).unwrap();
             assert_eq!(Ask::read(&text), Some(ask));
         }
+    }
+
+    struct Counting {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+
+    impl Write for Counting {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_block_of_any_length_survives_the_wire() {
+        for frames in [0, 1, 2, FRAMES_A_TRIP - 1, FRAMES_A_TRIP, FRAMES_A_TRIP + 1, 16_384] {
+            let audio: Vec<[f32; 2]> = (0..frames).map(|at| [at as f32 * 0.5, -(at as f32)]).collect();
+            let mut written = Counting { bytes: Vec::new(), writes: 0 };
+            write_block(&mut written, &audio).unwrap();
+            let mut back = vec![[9.0f32; 2]; 3];
+            read_block(&mut &written.bytes[..], &mut back).unwrap();
+            assert_eq!(back, audio, "{frames} frames came back changed");
+        }
+    }
+
+    #[test]
+    fn a_block_goes_down_the_pipe_in_a_handful_of_writes() {
+        let audio = vec![[0.25f32, -0.25]; 16_384];
+        let mut written = Counting { bytes: Vec::new(), writes: 0 };
+        write_block(&mut written, &audio).unwrap();
+        assert!(written.writes <= 2 + audio.len() / FRAMES_A_TRIP, "it took {} writes", written.writes);
+        assert_eq!(written.bytes.len(), 5 + audio.len() * BYTES_A_FRAME);
     }
 
     #[test]

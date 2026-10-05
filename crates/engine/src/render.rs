@@ -1,6 +1,12 @@
 use crate::instrument::{Instrument, Note};
 use crate::model::{Clip, ClipId, Frames, Project, Track, TrackId};
 
+pub struct Job<'a> {
+    pub track: TrackId,
+    pub audio: &'a mut [[f32; 2]],
+    pub side: &'a [[f32; 2]],
+}
+
 pub trait Chains: Send {
     fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
         self.process_with(track, audio, &[]);
@@ -9,6 +15,16 @@ pub trait Chains: Send {
     fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         let _ = side;
         self.process(track, audio);
+    }
+
+    fn whole_waves_at_once(&self) -> bool {
+        false
+    }
+
+    fn process_wave(&mut self, jobs: &mut [Job<'_>]) {
+        for job in jobs.iter_mut() {
+            self.process_with(job.track, job.audio, job.side);
+        }
     }
 
     fn process_master(&mut self, audio: &mut [[f32; 2]]) {
@@ -164,6 +180,9 @@ pub struct Mixdown {
     index: Vec<usize>,
     shape: Vec<Shape>,
     ahead: Vec<Frames>,
+    waves: Vec<(usize, usize)>,
+    depth: Vec<usize>,
+    wanted: Vec<usize>,
     ordered: bool,
 }
 
@@ -188,10 +207,33 @@ impl Mixdown {
                 for id in &self.order {
                     self.index.push(project.tracks.iter().position(|t| t.id == *id).unwrap_or(usize::MAX));
                 }
+                self.work_out_waves(project);
                 true
             }
             None => false,
         };
+    }
+
+    fn work_out_waves(&mut self, project: &Project) {
+        self.depth.clear();
+        self.depth.resize(self.order.len(), 0);
+        self.waves.clear();
+        for step in 0..self.order.len() {
+            let Some(track) = project.tracks.iter().find(|t| t.id == self.order[step]) else { continue };
+            let next = self.depth[step] + 1;
+            for fed in track.parent.into_iter().chain(track.sends.iter().map(|send| send.to)) {
+                if let Some(at) = self.order.iter().position(|id| *id == fed) {
+                    self.depth[at] = self.depth[at].max(next);
+                }
+            }
+        }
+        let mut from = 0;
+        for step in 1..=self.order.len() {
+            if step == self.order.len() || self.depth[step] != self.depth[from] {
+                self.waves.push((from, step));
+                from = step;
+            }
+        }
     }
 }
 
@@ -258,76 +300,116 @@ pub fn mix_tracks_metered(
         }
         lay_clips(project, track, pos + scratch.ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
     }
-    for step in 0..scratch.order.len() {
-        let index = scratch.index[step];
-        if index == usize::MAX {
-            continue;
-        }
-        let track = &project.tracks[index];
-        if let Some(racks) = chains.as_deref_mut() {
-            if !track.fx.is_empty() {
-                let (mains, sides) = (&mut scratch.buffers, &scratch.sides);
-                racks.process_with(track.id, &mut mains[index][..len], &sides[index][..len]);
+    let in_waves = chains.as_deref().is_some_and(|racks| racks.whole_waves_at_once());
+    for wave in 0..scratch.waves.len() {
+        let (wave_from, wave_to) = scratch.waves[wave];
+        if in_waves {
+            if let Some(racks) = chains.as_deref_mut() {
+                run_a_wave(project, scratch, racks, wave_from, wave_to, len);
             }
         }
-        let silent = track.muted && only.is_none();
-        let keep_pre = track.sends.iter().any(|send| send.pre_fader);
-        if keep_pre {
-            scratch.pre[..len].copy_from_slice(&scratch.buffers[index][..len]);
-        }
-        let target = crate::envelope::Target::TrackGain(track.id);
-        let opens = automated(project, target, pos, track.gain);
-        let closes = automated(project, target, pos + len as Frames, track.gain);
-        let (opens, closes) = if silent { (0.0, 0.0) } else { (opens, closes) };
-        let step = (closes - opens) / len.max(1) as f32;
-        let written_pan = automated(project, crate::envelope::Target::TrackPan(track.id), pos, track.pan);
-        let (left, right) = pan_gains(written_pan);
-        for (i, frame) in scratch.buffers[index][..len].iter_mut().enumerate() {
-            let gain = opens + step * (i + 1) as f32;
-            frame[0] *= gain * left;
-            frame[1] *= gain * right;
-        }
-        if let Some(slot) = peaks.as_deref_mut().and_then(|p| p.get_mut(index)) {
-            let mut top = 0.0f32;
-            for frame in &scratch.buffers[index][..len] {
-                top = top.max(frame[0].abs()).max(frame[1].abs());
-            }
-            *slot = top;
-        }
-        for send in &track.sends {
-            let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
+        for step in wave_from..wave_to {
+            let index = scratch.index[step];
+            if index == usize::MAX {
                 continue;
-            };
-            let gain = automated(
-                project,
-                crate::envelope::Target::SendGain { from: track.id, to: send.to },
-                pos,
-                send.gain,
-            );
-            for i in 0..len {
-                let from = if send.pre_fader { scratch.pre[i] } else { scratch.buffers[index][i] };
-                let dest = if send.sidechain { &mut scratch.sides[target][i] } else { &mut scratch.buffers[target][i] };
-                dest[0] += from[0] * gain;
-                dest[1] += from[1] * gain;
             }
-        }
-        match track.parent.and_then(|parent| project.tracks.iter().position(|t| t.id == parent)) {
-            Some(target) => {
-                for i in 0..len {
-                    let from = scratch.buffers[index][i];
-                    let dest = &mut scratch.buffers[target][i];
-                    dest[0] += from[0];
-                    dest[1] += from[1];
+            let track = &project.tracks[index];
+            if !in_waves {
+                if let Some(racks) = chains.as_deref_mut() {
+                    if !track.fx.is_empty() {
+                        let (mains, sides) = (&mut scratch.buffers, &scratch.sides);
+                        racks.process_with(track.id, &mut mains[index][..len], &sides[index][..len]);
+                    }
                 }
             }
-            None => {
-                for (dest, from) in out.iter_mut().zip(&scratch.buffers[index][..len]) {
-                    dest[0] += from[0];
-                    dest[1] += from[1];
+            let silent = track.muted && only.is_none();
+            let keep_pre = track.sends.iter().any(|send| send.pre_fader);
+            if keep_pre {
+                scratch.pre[..len].copy_from_slice(&scratch.buffers[index][..len]);
+            }
+            let target = crate::envelope::Target::TrackGain(track.id);
+            let opens = automated(project, target, pos, track.gain);
+            let closes = automated(project, target, pos + len as Frames, track.gain);
+            let (opens, closes) = if silent { (0.0, 0.0) } else { (opens, closes) };
+            let step = (closes - opens) / len.max(1) as f32;
+            let written_pan = automated(project, crate::envelope::Target::TrackPan(track.id), pos, track.pan);
+            let (left, right) = pan_gains(written_pan);
+            for (i, frame) in scratch.buffers[index][..len].iter_mut().enumerate() {
+                let gain = opens + step * (i + 1) as f32;
+                frame[0] *= gain * left;
+                frame[1] *= gain * right;
+            }
+            if let Some(slot) = peaks.as_deref_mut().and_then(|p| p.get_mut(index)) {
+                let mut top = 0.0f32;
+                for frame in &scratch.buffers[index][..len] {
+                    top = top.max(frame[0].abs()).max(frame[1].abs());
+                }
+                *slot = top;
+            }
+            for send in &track.sends {
+                let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
+                    continue;
+                };
+                let gain = automated(
+                    project,
+                    crate::envelope::Target::SendGain { from: track.id, to: send.to },
+                    pos,
+                    send.gain,
+                );
+                for i in 0..len {
+                    let from = if send.pre_fader { scratch.pre[i] } else { scratch.buffers[index][i] };
+                    let dest = if send.sidechain { &mut scratch.sides[target][i] } else { &mut scratch.buffers[target][i] };
+                    dest[0] += from[0] * gain;
+                    dest[1] += from[1] * gain;
+                }
+            }
+            match track.parent.and_then(|parent| project.tracks.iter().position(|t| t.id == parent)) {
+                Some(target) => {
+                    for i in 0..len {
+                        let from = scratch.buffers[index][i];
+                        let dest = &mut scratch.buffers[target][i];
+                        dest[0] += from[0];
+                        dest[1] += from[1];
+                    }
+                }
+                None => {
+                    for (dest, from) in out.iter_mut().zip(&scratch.buffers[index][..len]) {
+                        dest[0] += from[0];
+                        dest[1] += from[1];
+                    }
                 }
             }
         }
     }
+}
+
+fn run_a_wave(
+    project: &Project,
+    scratch: &mut Mixdown,
+    racks: &mut (dyn Chains + '_),
+    wave_from: usize,
+    wave_to: usize,
+    len: usize,
+) {
+    scratch.wanted.clear();
+    for step in wave_from..wave_to {
+        let index = scratch.index[step];
+        if index != usize::MAX && !project.tracks[index].fx.is_empty() {
+            scratch.wanted.push(index);
+        }
+    }
+    if scratch.wanted.is_empty() {
+        return;
+    }
+    let Mixdown { buffers, sides, wanted, .. } = scratch;
+    let mut jobs: Vec<Job<'_>> = Vec::with_capacity(wanted.len());
+    for (index, buffer) in buffers.iter_mut().enumerate() {
+        if !wanted.contains(&index) {
+            continue;
+        }
+        jobs.push(Job { track: project.tracks[index].id, audio: &mut buffer[..len], side: &sides[index][..len] });
+    }
+    racks.process_wave(&mut jobs);
 }
 
 pub fn pan_gains(pan: f32) -> (f32, f32) {
@@ -823,6 +905,91 @@ mod tests {
     fn flat(p: &mut Project, track: TrackId, level: f32, frames: usize) {
         let source = Arc::new(Source::from_frames("flat", vec![[level, level]; frames + 2]));
         clip(p, track, source, 0);
+    }
+
+    struct Colouring {
+        in_waves: bool,
+        seen: Vec<TrackId>,
+    }
+
+    impl Chains for Colouring {
+        fn whole_waves_at_once(&self) -> bool {
+            self.in_waves
+        }
+
+        fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+            self.seen.push(track);
+            let tint = 1.0 + track.0 as f32 / 8.0;
+            for (at, frame) in audio.iter_mut().enumerate() {
+                let from_the_side = side.get(at).map(|one| one[0]).unwrap_or(0.0);
+                frame[0] = frame[0] * tint + from_the_side;
+                frame[1] = frame[1] * tint - from_the_side;
+            }
+        }
+    }
+
+    fn a_song_of_groups_and_sends() -> Project {
+        let mut p = Project::new(48_000);
+        let bus = track(&mut p);
+        let verb = track(&mut p);
+        let vox = track(&mut p);
+        let beat = track(&mut p);
+        flat(&mut p, vox, 0.25, 64);
+        flat(&mut p, beat, 0.5, 64);
+        flat(&mut p, verb, 0.1, 64);
+        p.apply(Command::SetTrackParent { track: vox, parent: Some(bus) }).unwrap();
+        p.apply(Command::SetTrackParent { track: beat, parent: Some(bus) }).unwrap();
+        p.apply(Command::AddSend { from: vox, to: verb }).unwrap();
+        p.apply(Command::SetSendGain { from: vox, to: verb, gain: 0.7 }).unwrap();
+        p.apply(Command::AddSend { from: beat, to: verb }).unwrap();
+        p.apply(Command::SetSendSidechain { from: beat, to: verb, sidechain: true }).unwrap();
+        for track in [bus, verb, vox, beat] {
+            let fx = crate::model::Fx {
+                mix: 1.0,
+                path: std::path::PathBuf::from("x.vst3"),
+                index: 0,
+                name: "x".into(),
+                bypassed: false,
+                state: Vec::new(),
+                record: false,
+            };
+            p.apply(Command::AddFx { track, fx }).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn handing_a_whole_wave_over_at_once_sounds_the_same_as_one_track_at_a_time() {
+        let p = a_song_of_groups_and_sends();
+        let mut both = Vec::new();
+        for in_waves in [false, true] {
+            let mut racks = Colouring { in_waves, seen: Vec::new() };
+            let mut out = vec![[0.0; 2]; 32];
+            let mut scratch = Mixdown::default();
+            mix_tracks_metered(&p, 1, &mut out, None, None, &mut scratch, Some(&mut racks));
+            assert_eq!(racks.seen.len(), 4, "every chain ran once");
+            both.push(out);
+        }
+        assert_eq!(both[0], both[1], "waves and one at a time give the same mix");
+        assert!(both[0][8][0].abs() > 1e-6, "the mix is not silent");
+    }
+
+    #[test]
+    fn a_wave_never_holds_a_track_that_feeds_another_in_it() {
+        let p = a_song_of_groups_and_sends();
+        let mut scratch = Mixdown::default();
+        scratch.work_out_order(&p);
+        for (from, to) in scratch.waves.clone() {
+            for step in from..to {
+                let one = p.tracks.iter().find(|t| t.id == scratch.order[step]).expect("the track is there");
+                for other in from..to {
+                    let them = scratch.order[other];
+                    assert_ne!(one.parent, Some(them), "a child sits in its parent's wave");
+                    assert!(!one.sends.iter().any(|send| send.to == them), "a send lands inside its own wave");
+                }
+            }
+        }
+        assert!(scratch.waves.len() > 1, "groups and sends make more than one wave");
     }
 
     #[test]

@@ -199,7 +199,7 @@ impl App {
                 !stop.load(Ordering::Relaxed)
             };
             let mut racks: Box<dyn loupe_engine::Chains> =
-                Box::new(crate::racks::Racks::new(rate, 512, crate::racks::Peeks::default(), plugins_off, crate::racks::Falls::default()));
+                Box::new(crate::racks::Racks::new(rate, 512, crate::racks::Peeks::default(), plugins_off, crate::racks::Falls::default()).away_from_the_audio_thread());
             racks.follow(&project);
             let went = loupe_engine::export_through(&project, &plan, &report, Some(racks.as_mut()));
             drop(racks);
