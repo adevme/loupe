@@ -1,6 +1,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 mod scan;
+pub mod blend;
+pub mod chain;
 pub mod ara;
 pub mod ara_audio;
 pub mod ara_document;

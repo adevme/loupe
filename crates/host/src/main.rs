@@ -1,10 +1,12 @@
+mod blame;
 mod channel;
 mod window;
 
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Region, Reply};
+use loupe_plugins::blend::Dry;
+use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Link, Region, Reply};
 use loupe_plugins::{clap, lv2, vst3};
 
 #[cfg(windows)]
@@ -195,6 +197,77 @@ enum Came {
     Done,
 }
 
+struct Seated {
+    open: Open,
+    name: String,
+    latency: usize,
+    dry: Dry,
+}
+
+struct Seats {
+    taken: Vec<Option<Seated>>,
+    at: usize,
+}
+
+impl Seats {
+    fn empty() -> Self {
+        Self { taken: Vec::new(), at: 0 }
+    }
+
+    fn here(&mut self) -> Option<&mut Seated> {
+        self.taken.get_mut(self.at)?.as_mut()
+    }
+
+    fn at(&mut self, seat: usize) -> Option<&mut Seated> {
+        self.taken.get_mut(seat)?.as_mut()
+    }
+
+    fn move_to(&mut self, seat: usize) {
+        if self.taken.len() <= seat {
+            self.taken.resize_with(seat + 1, || None);
+        }
+        self.at = seat;
+    }
+
+    fn put_here(&mut self, seated: Seated) {
+        self.move_to(self.at);
+        self.taken[self.at] = Some(seated);
+    }
+
+    fn clear(&mut self, seat: usize) {
+        if let Some(room) = self.taken.get_mut(seat) {
+            *room = None;
+        }
+    }
+
+    fn anyone_is_ara(&self) -> bool {
+        self.taken.iter().flatten().any(|seated| seated.open.is_ara())
+    }
+
+    fn all_idle(&self) {
+        for seated in self.taken.iter().flatten() {
+            seated.open.idle();
+        }
+    }
+
+    fn run(&mut self, links: &[Link], audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+        for link in links {
+            let Some(seated) = self.at(link.seat) else { continue };
+            let blending = link.mix < 1.0;
+            if blending {
+                seated.dry.room_for(seated.latency, audio.len());
+                seated.dry.remember(audio);
+            }
+            blame::working_on(link.seat);
+            seated.open.process_with(audio, side);
+            blame::finished();
+            if blending {
+                seated.dry.blend(audio, link.mix);
+            }
+        }
+    }
+}
+
 fn main() {
     com::start();
     let (sends, came) = std::sync::mpsc::channel::<Came>();
@@ -207,10 +280,11 @@ fn main() {
                 }
                 continue;
             };
-            let blocks = match ask {
+            let blocks = match &ask {
                 Ask::Process => 1,
                 Ask::ProcessWithSide => 2,
                 Ask::ProcessAt(_) => 1,
+                Ask::Chain { side, .. } => 1 + *side as usize,
                 _ => 0,
             };
             if sends.send(Came::Ask(ask)).is_err() {
@@ -229,17 +303,19 @@ fn main() {
         let _ = sends.send(Came::Done);
     });
 
-    let mut out = channel::take_stdout();
-    let mut open: Option<Open> = None;
-    let mut editor: Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window)> = None;
-    let mut loaded_name = String::new();
+    let (mut out, telling) = channel::take_stdout();
+    blame::tell_on_a_crash(telling);
+    let mut seats = Seats::empty();
+    let mut editor: Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)> = None;
     let mut was_sized = (0, 0);
     let mut region: Option<Region> = None;
     let mut idled = std::time::Instant::now();
     'living: loop {
-        if let Some((made, pane)) = editor.as_ref() {
+        if let Some((made, pane, seat)) = editor.as_ref() {
+            let seat = *seat;
             for asked in pane.pump() {
-                use_preset(asked, open.as_mut(), pane, &loaded_name);
+                let name = seats.at(seat).map(|seated| seated.name.clone()).unwrap_or_default();
+                use_preset(asked, seats.at(seat).map(|seated| &mut seated.open), pane, &name);
             }
             if let Some((width, height)) = made.wanted_size() {
                 pane.fit_around(width, height);
@@ -256,11 +332,9 @@ fn main() {
         }
         if idled.elapsed() >= std::time::Duration::from_millis(30) {
             idled = std::time::Instant::now();
-            if let Some(effect) = open.as_ref() {
-                effect.idle();
-            }
+            seats.all_idle();
         }
-        let ticking = editor.is_some() || open.as_ref().is_some_and(Open::is_ara);
+        let ticking = editor.is_some() || seats.anyone_is_ara();
         let next = if ticking {
             match came.recv_timeout(std::time::Duration::from_millis(8)) {
                 Ok(next) => next,
@@ -301,16 +375,49 @@ fn main() {
                 } else {
                     Vec::new()
                 };
-                if let Some(effect) = open.as_mut() {
-                    effect.process_at(&mut audio, &side, at);
+                let here = seats.at;
+                if let Some(seated) = seats.here() {
+                    blame::working_on(here);
+                    seated.open.process_at(&mut audio, &side, at);
+                    blame::finished();
                 }
                 if write_block(&mut out, &audio).is_err() {
                     break;
                 }
                 continue;
             }
+            Ask::Chain { side: wants_side, links } => {
+                let mut audio = match came.recv() {
+                    Ok(Came::Audio(audio)) => audio,
+                    _ => break 'living,
+                };
+                let side = if wants_side {
+                    match came.recv() {
+                        Ok(Came::Audio(side)) => side,
+                        _ => break 'living,
+                    }
+                } else {
+                    Vec::new()
+                };
+                seats.run(&links, &mut audio, &side);
+                if write_block(&mut out, &audio).is_err() {
+                    break;
+                }
+                continue;
+            }
+            Ask::Seat(seat) => {
+                seats.move_to(seat);
+                Reply::Fine
+            }
+            Ask::Unload(seat) => {
+                if editor.as_ref().is_some_and(|(_, _, held)| *held == seat) {
+                    editor = None;
+                }
+                seats.clear(seat);
+                Reply::Fine
+            }
             Ask::Quit => break,
-            Ask::Region(wanted) => match open.as_mut().filter(|effect| effect.is_ara()) {
+            Ask::Region(wanted) => match seats.here().map(|seated| &mut seated.open).filter(|effect| effect.is_ara()) {
                 Some(effect) => match effect.place(&wanted) {
                     Ok(()) => Reply::Fine,
                     Err(why) => Reply::Trouble(why),
@@ -320,12 +427,16 @@ fn main() {
                     Reply::Fine
                 }
             },
-            Ask::Show => match show(open.as_mut(), &mut editor, &loaded_name) {
-                Ok(()) => Reply::Fine,
-                Err(why) => Reply::Trouble(why),
-            },
+            Ask::Show => {
+                let here = seats.at;
+                let name = seats.here().map(|seated| seated.name.clone()).unwrap_or_default();
+                match show(seats.here().map(|seated| &mut seated.open), &mut editor, &name, here) {
+                    Ok(()) => Reply::Fine,
+                    Err(why) => Reply::Trouble(why),
+                }
+            }
             Ask::Hide => {
-                if let Some((_, pane)) = editor.as_ref() {
+                if let Some((_, pane, _)) = editor.as_ref() {
                     pane.hide();
                 }
                 Reply::Fine
@@ -335,68 +446,86 @@ fn main() {
                 Err(why) => Reply::Trouble(why),
             },
             Ask::Load { path, index, rate, block } => {
-                editor = None;
-                loaded_name = names_in(&PathBuf::from(&path)).ok().and_then(|names| names.get(index).cloned()).unwrap_or_default();
-                match open_one(&PathBuf::from(&path), index, rate as f64, block, region.as_ref()) {
+                let here = seats.at;
+                if editor.as_ref().is_some_and(|(_, _, held)| *held == here) {
+                    editor = None;
+                }
+                let name = names_in(&PathBuf::from(&path)).ok().and_then(|names| names.get(index).cloned()).unwrap_or_default();
+                blame::working_on(here);
+                let made = open_one(&PathBuf::from(&path), index, rate as f64, block, region.as_ref());
+                blame::finished();
+                match made {
                     Ok(effect) => {
                         let latency = effect.latency();
                         let ara = effect.is_ara();
-                        open = Some(effect);
+                        seats.put_here(Seated { open: effect, name, latency, dry: Dry::empty() });
                         Reply::Loaded { inputs: 2, outputs: 2, latency, ara }
                     }
                     Err(why) => Reply::Trouble(why),
                 }
             }
-            Ask::Knobs => match open.as_mut() {
-                Some(effect) => Reply::Knobs(effect.knobs()),
+            Ask::Knobs => match seats.here() {
+                Some(seated) => Reply::Knobs(seated.open.knobs()),
                 None => Reply::Trouble("no plugin is open".into()),
             },
-            Ask::Readings => match open.as_mut() {
-                Some(effect) => Reply::Readings(effect.readings()),
+            Ask::Readings => match seats.here() {
+                Some(seated) => Reply::Readings(seated.open.readings()),
                 None => Reply::Trouble("no plugin is open".into()),
             },
-            Ask::FromText { knob, text } => match open.as_mut().map(|effect| effect.from_text(knob, &text)) {
+            Ask::FromText { knob, text } => match seats.here().map(|seated| seated.open.from_text(knob, &text)) {
                 Some(Some(value)) => Reply::Value(value),
                 Some(None) => Reply::Trouble(format!("the plugin did not understand \"{text}\"")),
                 None => Reply::Trouble("no plugin is open".into()),
             },
             Ask::Turn { knob, value } => {
-                if let Some(effect) = open.as_mut() {
-                    effect.turn(knob, value);
+                if let Some(seated) = seats.here() {
+                    seated.open.turn(knob, value);
                 }
                 Reply::Fine
             }
-            Ask::Save => match open.as_ref() {
-                Some(effect) => match effect.save() {
+            Ask::Save => match seats.here() {
+                Some(seated) => match seated.open.save() {
                     Ok(state) => Reply::State(state),
                     Err(why) => Reply::Trouble(why),
                 },
                 None => Reply::Trouble("no plugin is open".into()),
             },
-            Ask::Restore(state) => match open.as_mut() {
-                Some(effect) => match effect.restore(&state) {
-                    Ok(()) => Reply::Fine,
-                    Err(why) => Reply::Trouble(why),
-                },
-                None => Reply::Trouble("no plugin is open".into()),
-            },
+            Ask::Restore(state) => {
+                let here = seats.at;
+                match seats.here() {
+                    Some(seated) => {
+                        blame::working_on(here);
+                        let put = seated.open.restore(&state);
+                        blame::finished();
+                        match put {
+                            Ok(()) => Reply::Fine,
+                            Err(why) => Reply::Trouble(why),
+                        }
+                    }
+                    None => Reply::Trouble("no plugin is open".into()),
+                }
+            }
         };
         let _ = reply.write(&mut out);
     }
     drop(editor);
-    drop(open);
+    drop(seats);
     let _ = out.flush();
     com::stop();
 }
 
 fn show(
     open: Option<&mut Open>,
-    editor: &mut Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window)>,
+    editor: &mut Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)>,
     name: &str,
+    seat: usize,
 ) -> Result<(), String> {
-    if let Some((_, pane)) = editor.as_ref() {
-        pane.show();
-        return Ok(());
+    if let Some((_, pane, held)) = editor.as_ref() {
+        if *held == seat {
+            pane.show();
+            return Ok(());
+        }
+        return Err("this plugin host already has a window open".into());
     }
     let Some(Open::Vst3(effect)) = open else {
         return Err("only VST3 plugins have a window so far".into());
@@ -419,7 +548,7 @@ fn show(
         following.resized(width, height);
     }));
     pane.show();
-    *editor = Some((made, pane));
+    *editor = Some((made, pane, seat));
     Ok(())
 }
 

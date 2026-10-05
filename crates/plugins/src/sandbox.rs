@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::ceiling::{Ceiling, Seat};
-use crate::wire::{next_line, read_block, write_block, Ask, Reply};
+use crate::wire::{next_line, read_block_or_line, write_block, Ask, Came, Link, Reply};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 const BLOCK_PATIENCE: Duration = Duration::from_millis(2_000);
@@ -36,6 +36,7 @@ pub struct Sandbox {
     late: u16,
     owed: bool,
     seat: Option<Seat>,
+    fell_at: Option<usize>,
 }
 
 impl Sandbox {
@@ -74,7 +75,19 @@ impl Sandbox {
         let (wants, asked) = channel::<Want>();
         let (sends, gets) = channel::<Got>();
         let reader = std::thread::spawn(move || read_for(out, asked, sends));
-        Ok(Self { child, writing, wants: Some(wants), gets, reader: Some(reader), lost: false, ran: false, late: 0, owed: false, seat: Some(seat) })
+        Ok(Self {
+            child,
+            writing,
+            wants: Some(wants),
+            gets,
+            reader: Some(reader),
+            lost: false,
+            ran: false,
+            late: 0,
+            owed: false,
+            seat: Some(seat),
+            fell_at: None,
+        })
     }
 
     pub fn ask(&mut self, ask: Ask) -> Result<Reply, String> {
@@ -88,7 +101,11 @@ impl Sandbox {
             return Err(self.give_up("the plugin host stopped listening"));
         }
         match self.gets.recv_timeout(PATIENCE) {
-            Ok(Got::Line(line)) => Reply::read(&line).ok_or_else(|| format!("the plugin host said {}", line.trim())),
+            Ok(Got::Line(line)) => match Reply::read(&line) {
+                Some(Reply::Fell(seat)) => Err(self.name_the_fall(seat)),
+                Some(reply) => Ok(reply),
+                None => Err(format!("the plugin host said {}", line.trim())),
+            },
             Ok(Got::Block(_)) => Err(self.give_up("the plugin host answered out of turn")),
             Ok(Got::Gone) => Err(self.give_up("the plugin crashed")),
             Err(RecvTimeoutError::Timeout) => Err(self.give_up("the plugin host went quiet")),
@@ -107,6 +124,14 @@ impl Sandbox {
 
     pub fn run_at(&mut self, audio: &mut Vec<[f32; 2]>, at: i64) -> Result<(), String> {
         self.exchange(Ask::ProcessAt(at), audio, &[])
+    }
+
+    pub fn run_chain(&mut self, links: &[Link], audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) -> Result<(), String> {
+        if links.is_empty() {
+            return Ok(());
+        }
+        let ask = Ask::Chain { side: !side.is_empty(), links: links.to_vec() };
+        self.exchange(ask, audio, side)
     }
 
     fn exchange(&mut self, ask: Ask, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) -> Result<(), String> {
@@ -134,7 +159,7 @@ impl Sandbox {
                 audio.extend_from_slice(&came);
                 Ok(())
             }
-            Ok(Got::Line(line)) => Err(self.give_up(&format!("the plugin host said {}", line.trim()))),
+            Ok(Got::Line(line)) => Err(self.took_it_badly(&line)),
             Ok(Got::Gone) => Err(self.give_up("the plugin crashed")),
             Err(RecvTimeoutError::Timeout) => {
                 self.owed = true;
@@ -151,7 +176,7 @@ impl Sandbox {
                 self.late = 0;
                 Ok(())
             }
-            Ok(Got::Line(line)) => Err(self.give_up(&format!("the plugin host said {}", line.trim()))),
+            Ok(Got::Line(line)) => Err(self.took_it_badly(&line)),
             Ok(Got::Gone) => Err(self.give_up("the plugin crashed")),
             Err(RecvTimeoutError::Timeout) => self.fell_behind(),
             Err(RecvTimeoutError::Disconnected) => Err(self.give_up("the plugin crashed")),
@@ -164,6 +189,22 @@ impl Sandbox {
             return Err(self.give_up("the plugin stopped answering, so the song carried on without it"));
         }
         Ok(())
+    }
+
+    fn took_it_badly(&mut self, line: &str) -> String {
+        match Reply::read(line) {
+            Some(Reply::Fell(seat)) => self.name_the_fall(seat),
+            _ => self.give_up(&format!("the plugin host said {}", line.trim())),
+        }
+    }
+
+    fn name_the_fall(&mut self, seat: usize) -> String {
+        self.fell_at = Some(seat);
+        self.give_up("the plugin crashed")
+    }
+
+    pub fn fell_at(&self) -> Option<usize> {
+        self.fell_at
     }
 
     pub fn gone(&self) -> bool {
@@ -205,8 +246,9 @@ fn read_for(out: ChildStdout, asked: Receiver<Want>, sends: Sender<Got>) {
                 Some(line) => Got::Line(line),
                 None => Got::Gone,
             },
-            Want::Block => match read_block(&mut reading, &mut audio) {
-                Ok(()) => Got::Block(std::mem::take(&mut audio)),
+            Want::Block => match read_block_or_line(&mut reading, &mut audio) {
+                Ok(Came::Block) => Got::Block(std::mem::take(&mut audio)),
+                Ok(Came::Line(line)) => Got::Line(line),
                 Err(_) => Got::Gone,
             },
         };

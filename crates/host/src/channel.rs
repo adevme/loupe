@@ -26,7 +26,7 @@ mod names {
     pub const WRITE_ONLY: i32 = 1;
 }
 
-pub fn take_stdout() -> Box<dyn Write + Send> {
+pub fn take_stdout() -> (Box<dyn Write + Send>, i32) {
     unsafe {
         let mine = names::dup(1);
         let nowhere = names::open(names::NOWHERE.as_ptr() as *const i8, names::WRITE_ONLY);
@@ -34,9 +34,9 @@ pub fn take_stdout() -> Box<dyn Write + Send> {
             names::dup2(nowhere, 1);
         }
         if mine < 0 {
-            return Box::new(std::io::stdout());
+            return (Box::new(std::io::stdout()), -1);
         }
-        Box::new(from_fd(mine))
+        (Box::new(from_fd(mine)), mine)
     }
 }
 

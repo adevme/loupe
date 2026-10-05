@@ -16,7 +16,22 @@ pub enum Ask {
     Readings,
     FromText { knob: usize, text: String },
     Restore(Vec<u8>),
+    Seat(usize),
+    Unload(usize),
+    Chain { side: bool, links: Vec<Link> },
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Link {
+    pub seat: usize,
+    pub mix: f32,
+}
+
+impl Link {
+    pub fn wet(seat: usize) -> Self {
+        Self { seat, mix: 1.0 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +43,7 @@ pub enum Reply {
     Readings(Vec<Reading>),
     Value(f32),
     Fine,
+    Fell(usize),
     Trouble(String),
 }
 
@@ -36,6 +52,19 @@ pub struct Reading {
     pub name: String,
     pub value: f32,
     pub text: String,
+}
+
+fn links_text(links: &[Link]) -> String {
+    links.iter().map(|link| format!("{}\x1e{}", link.seat, link.mix)).collect::<Vec<_>>().join("\x1f")
+}
+
+fn links_from(text: &str) -> Option<Vec<Link>> {
+    let mut links = Vec::new();
+    for entry in text.split('\x1f').filter(|entry| !entry.is_empty()) {
+        let mut bits = entry.split('\x1e');
+        links.push(Link { seat: bits.next()?.parse().ok()?, mix: bits.next()?.parse().ok()? });
+    }
+    Some(links)
 }
 
 fn tidy(text: &str) -> String {
@@ -98,6 +127,9 @@ impl Ask {
             Ask::Readings => "readings".to_string(),
             Ask::FromText { knob, text } => format!("fromtext\t{knob}\t{}", tidy(text)),
             Ask::Restore(state) => format!("restore\t{}", hex_of(state)),
+            Ask::Seat(seat) => format!("seat\t{seat}"),
+            Ask::Unload(seat) => format!("unload\t{seat}"),
+            Ask::Chain { side, links } => format!("chain\t{}\t{}", *side as u8, links_text(links)),
             Ask::Quit => "quit".to_string(),
         };
         writeln!(out, "{line}")?;
@@ -126,6 +158,9 @@ impl Ask {
             "readings" => Some(Ask::Readings),
             "fromtext" => Some(Ask::FromText { knob: parts.next()?.parse().ok()?, text: parts.next().unwrap_or("").to_string() }),
             "restore" => Some(Ask::Restore(bytes_of(parts.next().unwrap_or(""))?)),
+            "seat" => Some(Ask::Seat(parts.next()?.parse().ok()?)),
+            "unload" => Some(Ask::Unload(parts.next()?.parse().ok()?)),
+            "chain" => Some(Ask::Chain { side: parts.next()? == "1", links: links_from(parts.next().unwrap_or(""))? }),
             "quit" => Some(Ask::Quit),
             _ => None,
         }
@@ -142,6 +177,7 @@ impl Reply {
             Reply::Readings(found) => format!("readings\t{}", found.iter().map(|reading| format!("{}\x1e{}\x1e{}", tidy(&reading.name), reading.value, tidy(&reading.text))).collect::<Vec<_>>().join("\x1f")),
             Reply::Value(value) => format!("value\t{value}"),
             Reply::Fine => "fine".to_string(),
+            Reply::Fell(seat) => format!("{FELL}\t{seat}"),
             Reply::Trouble(why) => format!("trouble\t{}", why.replace('\n', " ")),
         };
         writeln!(out, "{line}")?;
@@ -179,10 +215,30 @@ impl Reply {
             }
             "value" => Some(Reply::Value(parts.next()?.parse().ok()?)),
             "fine" => Some(Reply::Fine),
+            FELL => Some(Reply::Fell(parts.next()?.parse().ok()?)),
             "trouble" => Some(Reply::Trouble(parts.next().unwrap_or("something went wrong").to_string())),
             _ => None,
         }
     }
+}
+
+pub const FELL: &str = "fell";
+
+pub enum Came {
+    Block,
+    Line(String),
+}
+
+pub fn read_block_or_line(from: &mut BufReader<impl Read>, audio: &mut Vec<[f32; 2]>) -> std::io::Result<Came> {
+    let mut mark = [0u8; 1];
+    from.read_exact(&mut mark)?;
+    if mark[0] == b'B' {
+        read_frames(from, audio)?;
+        return Ok(Came::Block);
+    }
+    let mut rest = String::new();
+    from.read_line(&mut rest)?;
+    Ok(Came::Line(format!("{}{rest}", mark[0] as char)))
 }
 
 pub fn next_line(from: &mut BufReader<impl Read>) -> Option<String> {
@@ -217,6 +273,10 @@ pub fn read_block(from: &mut impl Read, audio: &mut Vec<[f32; 2]>) -> std::io::R
     if mark[0] != b'B' {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "that was not a block of audio"));
     }
+    read_frames(from, audio)
+}
+
+fn read_frames(from: &mut impl Read, audio: &mut Vec<[f32; 2]>) -> std::io::Result<()> {
     let mut count = [0u8; 4];
     from.read_exact(&mut count)?;
     let frames = u32::from_le_bytes(count) as usize;
@@ -289,6 +349,10 @@ mod tests {
             Ask::Readings,
             Ask::FromText { knob: 2, text: "-6 dB".into() },
             Ask::Restore(vec![0, 15, 16, 255]),
+            Ask::Seat(7),
+            Ask::Unload(3),
+            Ask::Chain { side: false, links: Vec::new() },
+            Ask::Chain { side: true, links: vec![Link::wet(0), Link { seat: 4, mix: 0.35 }, Link::wet(2)] },
             Ask::Quit,
         ];
         for ask in asks {
@@ -338,6 +402,20 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_report_is_told_apart_from_a_block() {
+        let audio = vec![[0.5f32, -0.5]; 32];
+        let mut written = Vec::new();
+        write_block(&mut written, &audio).unwrap();
+        Reply::Fell(9).write(&mut written).unwrap();
+        let mut reading = BufReader::new(&written[..]);
+        let mut back = Vec::new();
+        assert!(matches!(read_block_or_line(&mut reading, &mut back), Ok(Came::Block)));
+        assert_eq!(back, audio);
+        let Ok(Came::Line(line)) = read_block_or_line(&mut reading, &mut back) else { panic!("the crash report did not come back") };
+        assert_eq!(Reply::read(&line), Some(Reply::Fell(9)));
+    }
+
+    #[test]
     fn every_reply_survives_the_wire() {
         let replies = [
             Reply::Classes(vec!["One".into(), "Two".into()]),
@@ -352,6 +430,7 @@ mod tests {
             Reply::Readings(Vec::new()),
             Reply::Value(0.75),
             Reply::Fine,
+            Reply::Fell(5),
             Reply::Trouble("it broke".into()),
         ];
         for reply in replies {
