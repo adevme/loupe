@@ -228,11 +228,7 @@ impl App {
             .padding([7, 16])
             .style(move |_, status| palette.outlined(status))
             .on_press(Message::CopyText(where_it_went));
-        let close = button(text("Done").size(13).font(palette.medium))
-            .padding([7, 16])
-            .style(move |_, status| palette.solid(status))
-            .on_press(Message::CloseOverlay);
-        body = body.push(row![open, copy, Space::with_width(Length::Fill), close].spacing(10).align_y(Alignment::Center));
+        body = body.push(row![open, copy, Space::with_width(Length::Fill)].spacing(10).align_y(Alignment::Center));
         self.window("Exported".to_string(), body.into(), 520.0)
     }
 }
