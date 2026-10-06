@@ -323,7 +323,7 @@ fn main() {
                 was_sized = (width, height);
             }
             let now = pane.inside();
-            if now != was_sized && now.0 > 0 && now.1 > 0 {
+            if now != was_sized && now.0 > 0 && now.1 > 0 && made.can_resize() {
                 let settled = made.resized(now.0, now.1);
                 was_sized = settled;
                 if settled != now {
@@ -435,7 +435,12 @@ fn main() {
                     false => seated.shown_as.clone(),
                 }).unwrap_or_default();
                 match show(seats.here().map(|seated| &mut seated.open), &mut editor, &name, here) {
-                    Ok(()) => Reply::Fine,
+                    Ok(()) => {
+                        if let Some((_, pane, _)) = editor.as_ref() {
+                            was_sized = pane.inside();
+                        }
+                        Reply::Fine
+                    }
                     Err(why) => Reply::Trouble(why),
                 }
             }
