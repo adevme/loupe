@@ -319,6 +319,13 @@ fn main() {
                 use_preset(asked, seats.at(seat).map(|seated| &mut seated.open), pane, &name);
             }
             if let Some((width, height)) = made.wanted_size() {
+                let scale = pane.screen_scale();
+                let own = made.size();
+                let behind = scale > 1.01 && (width, height) == own && (width as f32) < was_sized.0 as f32 * ALREADY_SCALED;
+                let (width, height) = match behind {
+                    true => ((width as f32 * scale).round() as i32, (height as f32 * scale).round() as i32),
+                    false => (width, height),
+                };
                 pane.fit_around(width, height);
                 was_sized = (width, height);
             }
