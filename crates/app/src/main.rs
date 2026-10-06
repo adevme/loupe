@@ -215,6 +215,10 @@ pub enum Message {
     ToggleCollapsed(loupe_engine::TrackId),
     SetTrackHidden { track: loupe_engine::TrackId, hidden: bool },
     ShowHiddenTracks,
+    ScaleTrackHeights(f32),
+    ChooseTrack { track: loupe_engine::TrackId, as_well: bool },
+    MoveTrack { track: loupe_engine::TrackId, to: usize, parent: Option<loupe_engine::TrackId> },
+    NudgeTracks { down: bool },
     SetTrackParent { track: TrackId, parent: Option<TrackId> },
     OpenRouting(TrackId),
     OpenPlugins(TrackId),
@@ -487,6 +491,7 @@ struct App {
     input: Option<Input>,
     input_levels: Vec<f32>,
     taking_shape: Vec<f32>,
+    chosen_tracks: std::collections::HashSet<loupe_engine::TrackId>,
     track_levels: [f32; loupe_engine::METERS],
     master_level: f32,
     input_name: Option<String>,
@@ -642,6 +647,7 @@ impl App {
             input: None,
             input_levels: Vec::new(),
             taking_shape: Vec::new(),
+            chosen_tracks: std::collections::HashSet::new(),
             track_levels: [0.0; loupe_engine::METERS],
             master_level: 0.0,
             input_name: settings.input.clone(),
@@ -1015,7 +1021,17 @@ impl App {
             }
             Message::SetLoop(range) => self.set_loop(range),
             Message::ResizeTrack { track, height } => {
-                self.heights.insert(track, height);
+                match self.chosen_tracks.contains(&track) {
+                    true => {
+                        let together: Vec<TrackId> = self.chosen_tracks.iter().copied().collect();
+                        for chosen in together {
+                            self.heights.insert(chosen, height);
+                        }
+                    }
+                    false => {
+                        self.heights.insert(track, height);
+                    }
+                }
                 self.cache.clear();
             }
             Message::MoveClip { clip, track, start } => self.move_clips(clip, track, start),
@@ -1600,6 +1616,62 @@ impl App {
                     let name = self.project.track(track).map(|found| found.name.clone()).unwrap_or_default();
                     self.notice = Some(format!("{name} is hidden. Bring it back from the mixer, or the View menu."));
                 }
+            }
+            Message::NudgeTracks { down } => {
+                let mut order: Vec<usize> = self
+                    .project
+                    .tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| self.chosen_tracks.contains(&track.id))
+                    .map(|(at, _)| at)
+                    .collect();
+                if down {
+                    order.reverse();
+                }
+                for at in order {
+                    let Some(track) = self.project.tracks.get(at).map(|found| found.id) else {
+                        continue;
+                    };
+                    let span = self.project.run_from(at);
+                    let to = match down {
+                        true => at + span + self.project.run_from(at + span),
+                        false => self.project.tracks[..at].iter().rposition(|above| above.parent == self.project.track(track).and_then(|found| found.parent)).unwrap_or(0),
+                    };
+                    let parent = self.project.track(track).and_then(|found| found.parent);
+                    self.edit(None, Command::MoveTrack { track, to, parent });
+                }
+                self.cache.clear();
+            }
+            Message::MoveTrack { track, to, parent } => {
+                self.edit(None, Command::MoveTrack { track, to, parent });
+                self.cache.clear();
+            }
+            Message::ChooseTrack { track, as_well } => {
+                match as_well {
+                    true if self.chosen_tracks.contains(&track) => {
+                        self.chosen_tracks.remove(&track);
+                    }
+                    true => {
+                        self.chosen_tracks.insert(track);
+                    }
+                    false => {
+                        self.chosen_tracks.clear();
+                        self.chosen_tracks.insert(track);
+                    }
+                }
+                self.cache.clear();
+            }
+            Message::ScaleTrackHeights(by) => {
+                let shortest = theme::MIN_TRACK_HEIGHT;
+                let tallest = theme::MAX_TRACK_HEIGHT;
+                let standard = self.palette.track_height;
+                for track in &self.project.tracks {
+                    let was = self.heights.get(&track.id).copied().unwrap_or(standard);
+                    self.heights.insert(track.id, (was * by).clamp(shortest, tallest));
+                }
+                self.dirty = true;
+                self.cache.clear();
             }
             Message::ShowHiddenTracks => {
                 self.overlay = Overlay::None;
@@ -2713,6 +2785,7 @@ impl App {
             armed: &self.armed,
             recording_from: self.recording.as_ref().map(|recording| recording.from),
             taking_shape: &self.taking_shape,
+            chosen_tracks: &self.chosen_tracks,
             input_levels: &self.input_levels,
             opening: self.opening.is_some(),
             width: self.canvas_width(),
@@ -3107,6 +3180,8 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::Space) => Some(Message::TogglePlay),
         keyboard::Key::Named(Named::Home) => Some(Message::ToStart),
         keyboard::Key::Named(Named::Escape) => Some(Message::CloseOverlay),
+        keyboard::Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::NudgeTracks { down: false }),
+        keyboard::Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::NudgeTracks { down: true }),
         keyboard::Key::Named(Named::F6) => Some(Message::ToggleMixer),
         keyboard::Key::Named(Named::F7) => Some(Message::OpenMatrix),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),

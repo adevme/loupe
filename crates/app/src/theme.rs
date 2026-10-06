@@ -158,7 +158,7 @@ const NEUTRAL: Palette = Palette {
     medium: Font { weight: font::Weight::Medium, ..Font::with_name("Inter") },
     semibold: Font { weight: font::Weight::Semibold, ..Font::with_name("Inter") },
     mono: Font::with_name("JetBrains Mono"),
-    track_height: 92.0,
+    track_height: 85.0,
     header_width: 200.0,
     ruler_height: 30.0,
     scrollbar_height: 18.0,

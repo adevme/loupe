@@ -290,6 +290,7 @@ pub enum Command {
     SetTrackParent { track: TrackId, parent: Option<TrackId> },
     ToggleCollapsed(TrackId),
     SetTrackHidden { track: TrackId, hidden: bool },
+    MoveTrack { track: TrackId, to: usize, parent: Option<TrackId> },
     AddSend { from: TrackId, to: TrackId },
     RemoveSend { from: TrackId, to: TrackId },
     SetSendGain { from: TrackId, to: TrackId, gain: f32 },
@@ -769,6 +770,30 @@ impl Project {
                 self.tracks[t].collapsed = !self.tracks[t].collapsed;
                 Ok(Outcome::Done)
             }
+            Command::MoveTrack { track, to, parent } => {
+                let from = self.track_index(track)?;
+                if let Some(parent) = parent {
+                    self.track_index(parent)?;
+                    if parent == track || self.descends_from(parent, track) {
+                        return Err(CommandError::InvalidValue);
+                    }
+                }
+                let span = self.run_from(from);
+                if to > from && to < from + span {
+                    return Err(CommandError::InvalidValue);
+                }
+                let moved: Vec<Track> = self.tracks.drain(from..from + span).collect();
+                let landing = match to > from {
+                    true => (to - span).min(self.tracks.len()),
+                    false => to.min(self.tracks.len()),
+                };
+                for (step, one) in moved.into_iter().enumerate() {
+                    self.tracks.insert(landing + step, one);
+                }
+                let now = self.track_index(track)?;
+                self.tracks[now].parent = parent;
+                Ok(Outcome::Done)
+            }
             Command::SetTrackHidden { track, hidden } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].hidden = hidden;
@@ -1028,6 +1053,20 @@ impl Project {
         depth
     }
 
+    pub fn run_from(&self, at: usize) -> usize {
+        let Some(head) = self.tracks.get(at).map(|track| track.id) else {
+            return 0;
+        };
+        let mut span = 1;
+        while let Some(next) = self.tracks.get(at + span) {
+            if !self.descends_from(next.id, head) {
+                break;
+            }
+            span += 1;
+        }
+        span
+    }
+
     pub fn descends_from(&self, track: TrackId, ancestor: TrackId) -> bool {
         let mut at = self.tracks.iter().find(|t| t.id == track).and_then(|t| t.parent);
         let mut steps = 0;
@@ -1262,4 +1301,67 @@ fn valid_mix(mix: f32) -> Result<f32, CommandError> {
         return Err(CommandError::InvalidValue);
     }
     Ok(mix)
+}
+
+#[cfg(test)]
+mod moving_tracks {
+    use super::*;
+
+    fn named(project: &Project) -> Vec<String> {
+        project.tracks.iter().map(|track| track.name.clone()).collect()
+    }
+
+    fn four() -> (Project, Vec<TrackId>) {
+        let mut project = Project::new(48_000);
+        let ids = ["One", "Two", "Three", "Four"]
+            .into_iter()
+            .map(|name| match project.apply(Command::AddTrack { name: name.into() }) {
+                Ok(Outcome::Track(id)) => id,
+                _ => panic!("no track"),
+            })
+            .collect();
+        (project, ids)
+    }
+
+    #[test]
+    fn a_track_moves_down_the_list() {
+        let (mut project, ids) = four();
+        project.apply(Command::MoveTrack { track: ids[0], to: 3, parent: None }).unwrap();
+        assert_eq!(named(&project), ["Two", "Three", "One", "Four"]);
+    }
+
+    #[test]
+    fn a_track_moves_up_the_list() {
+        let (mut project, ids) = four();
+        project.apply(Command::MoveTrack { track: ids[3], to: 1, parent: None }).unwrap();
+        assert_eq!(named(&project), ["One", "Four", "Two", "Three"]);
+    }
+
+    #[test]
+    fn a_folder_takes_its_tracks_with_it() {
+        let (mut project, ids) = four();
+        project.apply(Command::SetTrackParent { track: ids[1], parent: Some(ids[0]) }).unwrap();
+        project.apply(Command::SetTrackParent { track: ids[2], parent: Some(ids[0]) }).unwrap();
+        project.apply(Command::MoveTrack { track: ids[0], to: 4, parent: None }).unwrap();
+        assert_eq!(named(&project), ["Four", "One", "Two", "Three"]);
+        assert_eq!(project.track(ids[1]).unwrap().parent, Some(ids[0]), "the children stay with it");
+    }
+
+    #[test]
+    fn landing_inside_a_folder_joins_it() {
+        let (mut project, ids) = four();
+        project.apply(Command::SetTrackParent { track: ids[1], parent: Some(ids[0]) }).unwrap();
+        project.apply(Command::MoveTrack { track: ids[3], to: 2, parent: Some(ids[0]) }).unwrap();
+        assert_eq!(named(&project), ["One", "Two", "Four", "Three"]);
+        assert_eq!(project.track(ids[3]).unwrap().parent, Some(ids[0]));
+    }
+
+    #[test]
+    fn a_folder_cannot_be_put_inside_itself() {
+        let (mut project, ids) = four();
+        project.apply(Command::SetTrackParent { track: ids[1], parent: Some(ids[0]) }).unwrap();
+        assert!(project.apply(Command::MoveTrack { track: ids[0], to: 2, parent: Some(ids[1]) }).is_err());
+        assert!(project.apply(Command::MoveTrack { track: ids[0], to: 1, parent: None }).is_err(), "nor landed in its own run");
+        assert_eq!(named(&project), ["One", "Two", "Three", "Four"]);
+    }
 }

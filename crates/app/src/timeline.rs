@@ -22,6 +22,10 @@ const ROOMY_HEADER_H: f32 = 72.0;
 const ARM_BUTTON: f32 = 22.0;
 const ARM_GAP: f32 = 8.0;
 const NAME_GAP: f32 = 10.0;
+const CHOSEN_EDGE: f32 = 4.0;
+const REORDER_STARTS_AT: f32 = 6.0;
+const LANDING_LINE: f32 = 3.0;
+const LANDING_DOT: f32 = 4.0;
 const NAME_NARROWEST: f32 = 26.0;
 const NAME_LETTER: f32 = 7.0;
 const PAN_KNOB: f32 = 24.0;
@@ -106,6 +110,7 @@ pub struct Timeline<'a> {
     pub armed: &'a HashSet<TrackId>,
     pub recording_from: Option<Frames>,
     pub taking_shape: &'a [f32],
+    pub chosen_tracks: &'a HashSet<TrackId>,
     pub input_levels: &'a [f32],
     pub opening: bool,
     pub width: f32,
@@ -126,6 +131,7 @@ enum Drag {
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool, lane: Option<usize> },
     Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
     Resize { track: TrackId, top: f32 },
+    Reorder { track: TrackId, from: Point, at: Option<usize> },
     Scroll { grab_x: f32, span: f64 },
     Slice { from: Point, to: Point },
     Marquee { from: Point, to: Point },
@@ -514,6 +520,29 @@ impl Timeline<'_> {
         }
     }
 
+    fn folder_at(&self, to: usize, moving: TrackId) -> Option<TrackId> {
+        let above = self.project.tracks[..to.min(self.project.tracks.len())].iter().rev().find(|track| track.id != moving)?;
+        let parent = match self.project.tracks.iter().any(|track| track.parent == Some(above.id)) {
+            true => Some(above.id),
+            false => above.parent,
+        };
+        parent.filter(|id| *id != moving && !self.project.descends_from(*id, moving))
+    }
+
+    fn landing_at(&self, y: f32) -> usize {
+        let mut nearest = 0;
+        let mut gap = f32::MAX;
+        for index in 0..=self.project.tracks.len() {
+            let edge = self.track_top(index);
+            let how_far = (edge - y).abs();
+            if how_far < gap {
+                gap = how_far;
+                nearest = index;
+            }
+        }
+        nearest
+    }
+
     fn track_header_at(&self, p: Point) -> Option<&Track> {
         if !self.in_header(p.x) {
             return None;
@@ -851,6 +880,13 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Resize { track: track.id, top });
                         None
                     }
+                    (_, Hit::Nothing | Hit::Lane) if self.in_header(p.x) => match self.track_header_at(p) {
+                        Some(track) => {
+                            state.drag = Some(Drag::Reorder { track: track.id, from: p, at: None });
+                            Some(Message::ChooseTrack { track: track.id, as_well: state.modifiers.command() })
+                        }
+                        None => None,
+                    },
                     (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
                     (_, Hit::Solo(track)) => Some(Message::ToggleSolo(track.id)),
                     (_, Hit::Fx(track)) => Some(Message::OpenChain(crate::stockwin::Spot::Track(track.id))),
@@ -1068,6 +1104,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let view = self.scrolled_to_thumb_left(p.x - *grab_x, *span);
                         (Captured, (view != self.view).then_some(Message::SetView(view)))
                     }
+                    Drag::Reorder { from, at, .. } => {
+                        let moved = (p.y - from.y).abs() > REORDER_STARTS_AT;
+                        *at = moved.then(|| self.landing_at(p.y));
+                        (Captured, None)
+                    }
                     Drag::Resize { track, top } => {
                         let height = (p.y - *top).clamp(theme::MIN_TRACK_HEIGHT, theme::MAX_TRACK_HEIGHT).round();
                         let current = self.project.track(*track).map(|t| self.height_of(t));
@@ -1077,6 +1118,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                 }
             }
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
+                Some(Drag::Reorder { track, at: Some(to), .. }) => {
+                    (Captured, Some(Message::MoveTrack { track, to, parent: self.folder_at(to, track) }))
+                }
                 Some(Drag::Clip { id, moving: false, lane: Some(take), .. }) => (Captured, Some(Message::UseTake(id, take))),
                 Some(Drag::Comp { clip, track, take, from, to, .. }) => {
                     let message = match from == to {
@@ -1116,6 +1160,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                     mouse::ScrollDelta::Lines { x, y } => (-x * 60.0, -y * 46.0, 1.2f64.powf(y as f64)),
                     mouse::ScrollDelta::Pixels { x, y } => (-x, -y, (y as f64 * 0.005).exp()),
                 };
+                if state.modifiers.command() && p.x < self.lanes_left() && !self.project.tracks.is_empty() {
+                    return (Captured, Some(Message::ScaleTrackHeights(zoom as f32)));
+                }
                 let overflows = self.content_height() > bounds.height;
                 let view = if state.modifiers.command() {
                     self.zoomed(zoom, p.x)
@@ -1262,6 +1309,13 @@ impl canvas::Program<Message> for Timeline<'_> {
                 overlay.stroke(&Path::rectangle(Point::new(left, *top), Size::new(right - left, *height)), Stroke::default().with_color(p.accent).with_width(1.0));
             }
         }
+        if let Some(Drag::Reorder { at: Some(landing), .. }) = &state.drag {
+            let y = self.track_top(*landing).max(self.lanes_top());
+            if y <= bounds.height {
+                overlay.fill_rectangle(Point::new(self.header_left(), y - LANDING_LINE / 2.0), Size::new(p.header_width, LANDING_LINE), p.accent);
+                overlay.fill(&Path::circle(Point::new(self.header_left() + LANDING_DOT, y), LANDING_DOT), p.accent);
+            }
+        }
         if let Some(from) = self.recording_from {
             let left = self.x_of(from as f64).max(self.lanes_left());
             let right = self.x_of(self.playhead as f64).min(self.lanes_right());
@@ -1355,6 +1409,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         match state.drag {
             Some(Drag::Clip { moving: true, .. }) => return mouse::Interaction::Grabbing,
             Some(Drag::Resize { .. }) => return mouse::Interaction::ResizingVertically,
+            Some(Drag::Reorder { at: Some(_), .. }) => return mouse::Interaction::Grabbing,
             Some(Drag::Grip { grip, .. }) => return grip.pointer(),
             Some(Drag::Trim { .. }) => return mouse::Interaction::ResizingHorizontally,
             Some(Drag::Stretch { .. }) => return mouse::Interaction::ResizingHorizontally,
@@ -1961,6 +2016,10 @@ impl Timeline<'_> {
                 theme::mix(p.panel, self.colour_of(i), tint),
             );
             frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, height - 1.0), sheen_fill(p, top, height - 1.0));
+            if self.chosen_tracks.contains(&track.id) {
+                frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, height - 1.0), theme::alpha(p.accent, 0.14));
+                frame.fill_rectangle(Point::new(0.0, top), Size::new(CHOSEN_EDGE, height - 1.0), p.accent);
+            }
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
             let depth = self.project.depth_of(track.id).min(4) as f32;
             let indent = depth * INDENT_W;

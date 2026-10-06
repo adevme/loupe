@@ -212,7 +212,16 @@ impl App {
         self.gather_fx_state();
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
         let written = std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&file, saved.to_text()));
-        self.problem = written.err().map(|why| format!("Could not save the template {}: {why}", file.display()));
+        match written {
+            Err(why) => self.problem = Some(format!("Could not save the template {}: {why}", file.display())),
+            Ok(()) => {
+                self.templates = settings::templates(self.folder.as_deref());
+                self.notice = Some(match self.path.is_some() {
+                    true => format!("{name} is saved as a template."),
+                    false => format!("{name} is saved as a template. This song still has nowhere of its own, so save it too."),
+                });
+            }
+        }
     }
 
     pub(crate) fn replace_project(&mut self, project: Project, heights: HashMap<TrackId, f32>) {
