@@ -52,9 +52,12 @@ pub enum EqMessage {
     Remove(usize),
     Select(Option<usize>),
     Range(&'static str),
+    Typing { knob: usize, text: String },
+    Typed(usize),
 }
 
 pub struct EqEditor {
+    typing: Option<(usize, String)>,
     params: &'static [Param],
     values: Vec<f32>,
     rate: f32,
@@ -71,6 +74,7 @@ impl EqEditor {
         let params = Equalizer::new().params();
         Self {
             params,
+            typing: None,
             values: params.iter().map(|param| param.default).collect(),
             rate,
             selected: None,
@@ -131,6 +135,22 @@ impl EqEditor {
 
     pub fn update(&mut self, message: EqMessage) -> Vec<(usize, f32)> {
         match message {
+            EqMessage::Typing { knob, text } => {
+                self.typing = Some((knob, text));
+                Vec::new()
+            }
+            EqMessage::Typed(knob) => {
+                let Some((which, text)) = self.typing.take() else {
+                    return Vec::new();
+                };
+                if which != knob {
+                    return Vec::new();
+                }
+                match crate::kit::read_value(&text, &self.params[knob]) {
+                    Some(value) => self.apply(&[(knob, value)]),
+                    None => Vec::new(),
+                }
+            }
             EqMessage::Set(changes) => self.apply(&changes),
             EqMessage::Add { band, changes } => {
                 self.selected = Some(band);
@@ -214,12 +234,33 @@ impl EqEditor {
             band_row = band_row.push(choose(Knob::Slope, &SLOPES));
         }
         band_row = band_row.push(choose(Knob::Place, &PLACES));
-        let mut readout = format!("{}", hertz(self.get(band, Knob::Freq)));
+        let typed_in = |which: Knob, shown: String, wide: f32| {
+            let slot = knob(band, which);
+            let showing = match &self.typing {
+                Some((at, text)) if *at == slot => text.clone(),
+                _ => shown,
+            };
+            iced::widget::text_input("", &showing)
+                .size(12)
+                .padding([2, 6])
+                .width(wide)
+                .on_input(move |text| EqMessage::Typing { knob: slot, text })
+                .on_submit(EqMessage::Typed(slot))
+                .style(move |_, _| iced::widget::text_input::Style {
+                    background: look.raised.into(),
+                    border: iced::Border::default().rounded(5),
+                    icon: look.text_dim,
+                    placeholder: look.text_dim,
+                    value: look.text,
+                    selection: look.accent,
+                })
+        };
+        band_row = band_row.push(typed_in(Knob::Freq, hertz(self.get(band, Knob::Freq)), 78.0));
         if shape.has_gain() {
-            readout.push_str(&format!("   {:+.1} dB", self.get(band, Knob::Gain)));
+            band_row = band_row.push(typed_in(Knob::Gain, format!("{:+.1} dB", self.get(band, Knob::Gain)), 68.0));
         }
-        readout.push_str(&format!("   Q {:.2}", self.get(band, Knob::Q)));
-        band_row = band_row.push(text(readout).size(12).color(look.text_dim));
+        band_row = band_row.push(text("Q").size(12).color(look.text_dim));
+        band_row = band_row.push(typed_in(Knob::Q, format!("{:.2}", self.get(band, Knob::Q)), 56.0));
         let remove = button(text("Remove").size(12)).padding([4, 10]).on_press(EqMessage::Remove(band));
         if shape.has_gain() {
             let on = self.dynamic(band);

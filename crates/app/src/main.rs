@@ -1934,11 +1934,19 @@ impl App {
                 match result {
                     Ok(opened) => {
                         self.set_plugins_off(safely);
+                        let from_template = as_template && self.recovering.is_none();
+                        let called = crate::home::stem(&path);
                         self.adopt(path, opened, as_template);
                         if let Some(original) = self.recovering.take() {
                             self.path = original;
                             self.dirty = true;
                             self.revision += 1;
+                        }
+                        if from_template {
+                            let asked = self.save_as();
+                            self.entry = called;
+                            self.entry_problem = Some("Name this song. The template itself stays as it is.".to_string());
+                            return asked;
                         }
                     }
                     Err(why) => {

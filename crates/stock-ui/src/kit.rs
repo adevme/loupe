@@ -273,3 +273,73 @@ pub fn graph_frame(renderer: &Renderer, size: Size, look: &Look) -> Frame {
     frame.fill_rectangle(Point::ORIGIN, size, look.background);
     frame
 }
+
+pub fn read_value(typed: &str, param: &Param) -> Option<f32> {
+    let cleaned: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
+    let lower = cleaned.to_lowercase();
+    let body = lower
+        .trim_end_matches("hz")
+        .trim_end_matches("db")
+        .trim_end_matches("ms")
+        .trim_end_matches('%')
+        .trim_end_matches("st")
+        .trim_end_matches(':')
+        .trim_end_matches('1')
+        .trim_end_matches(':');
+    let body = if body.is_empty() { lower.as_str() } else { body };
+    let (digits, times) = match body.strip_suffix('k') {
+        Some(rest) => (rest, 1000.0),
+        None => match body.strip_suffix('s') {
+            Some(rest) if param.unit == Unit::Milliseconds => (rest, 1000.0),
+            _ => (body, 1.0),
+        },
+    };
+    let digits = digits.trim_start_matches('+');
+    let read: f32 = digits.parse().ok()?;
+    let found = read * times;
+    found.is_finite().then(|| found.clamp(param.min, param.max))
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    fn hz() -> Param {
+        Param::new("freq", "Frequency", 20.0, 20_000.0, 1000.0, Unit::Hertz)
+    }
+
+    fn db() -> Param {
+        Param::new("gain", "Gain", -30.0, 30.0, 0.0, Unit::Decibels)
+    }
+
+    #[test]
+    fn a_k_means_a_thousand() {
+        assert_eq!(read_value("10k", &hz()), Some(10_000.0));
+        assert_eq!(read_value("1.5k", &hz()), Some(1500.0));
+        assert_eq!(read_value("10K", &hz()), Some(10_000.0));
+        assert_eq!(read_value(" 4.5 k ", &hz()), Some(4500.0));
+    }
+
+    #[test]
+    fn the_unit_can_be_typed_or_left_out() {
+        assert_eq!(read_value("440", &hz()), Some(440.0));
+        assert_eq!(read_value("440hz", &hz()), Some(440.0));
+        assert_eq!(read_value("440 Hz", &hz()), Some(440.0));
+        assert_eq!(read_value("-6 dB", &db()), Some(-6.0));
+        assert_eq!(read_value("+3dB", &db()), Some(3.0));
+    }
+
+    #[test]
+    fn what_is_typed_stays_inside_the_knob() {
+        assert_eq!(read_value("99k", &hz()), Some(20_000.0));
+        assert_eq!(read_value("1", &hz()), Some(20.0));
+        assert_eq!(read_value("-99", &db()), Some(-30.0));
+    }
+
+    #[test]
+    fn nonsense_is_refused() {
+        assert_eq!(read_value("", &hz()), None);
+        assert_eq!(read_value("loud", &hz()), None);
+        assert_eq!(read_value("k", &hz()), None);
+    }
+}

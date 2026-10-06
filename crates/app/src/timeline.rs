@@ -2082,10 +2082,10 @@ impl Timeline<'_> {
                 });
             }
             let (name_left, room_for_name, name_top) = self.name_spot(i);
-            if room_for_name >= NAME_NARROWEST && name_top + NAME_LINE / 2.0 <= top + height {
+            if room_for_name >= NAME_NARROWEST && name_top + NAME_LINE / 2.0 - self.lanes_top() <= top + height {
                 frame.fill_text(Text {
                     content: shorten(&track.name, (room_for_name / NAME_LETTER) as usize),
-                    position: Point::new(name_left, name_top),
+                    position: Point::new(name_left, name_top - self.lanes_top()),
                     color: if track.muted { p.text_dim } else { p.text },
                     size: p.track_title_size.into(),
                     font: p.medium,
