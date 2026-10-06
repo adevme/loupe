@@ -1727,6 +1727,8 @@ impl App {
                     self.overlay = Overlay::None;
                     self.plugin_uses.reached_for(&plugin.name);
                     self.edit(None, Command::AddFx { track, fx });
+                    let landed = self.project.track(track).map_or(0, |found| found.fx.len().saturating_sub(1));
+                    self.open_plugin_window(track, landed);
                 }
             }
             Message::RemovePlugin(track, slot) => {
@@ -2361,6 +2363,21 @@ impl App {
         self.take_falls();
     }
 
+    fn fx_label(&self, track: TrackId, slot: usize) -> String {
+        let Some(found) = self.project.tracks.iter().find(|t| t.id == track) else {
+            return String::new();
+        };
+        let Some(fx) = found.fx.get(slot) else {
+            return String::new();
+        };
+        let same: Vec<usize> = found.fx.iter().enumerate().filter(|(_, other)| other.name == fx.name).map(|(at, _)| at).collect();
+        let which = same.iter().position(|at| *at == slot).unwrap_or(0) + 1;
+        match same.len() > 1 {
+            true => format!("{} {which} — {}", fx.name, found.name),
+            false => format!("{} — {}", fx.name, found.name),
+        }
+    }
+
     fn open_plugin_window(&mut self, track: TrackId, slot: usize) {
         if self.plugins_are_off() {
             self.problem = Some(safe_mode::PLUGINS_OFF_PROBLEM.into());
@@ -2369,9 +2386,11 @@ impl App {
         let Some(fx) = self.project.tracks.iter().find(|t| t.id == track).and_then(|t| t.fx.get(slot)).cloned() else {
             return;
         };
+        let label = self.fx_label(track, slot);
         if !loupe_plugins::rack::is_built_in(&fx.path) {
             if let Some(mut racks) = self.borrow_racks() {
                 racks.follow(&self.project);
+                let _ = racks.called(track, slot, &label);
                 if let Err(why) = racks.show(track, slot) {
                     self.problem = Some(why);
                 }

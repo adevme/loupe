@@ -78,6 +78,11 @@ pub trait Chains: Send {
         Err("plugin windows are not wired up".into())
     }
 
+    fn called(&mut self, track: TrackId, slot: usize, label: &str) -> Result<(), String> {
+        let _ = (track, slot, label);
+        Ok(())
+    }
+
     fn load(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
         let _ = (track, slot);
         Err("plugins are not wired up".into())

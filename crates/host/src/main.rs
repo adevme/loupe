@@ -200,6 +200,7 @@ enum Came {
 struct Seated {
     open: Open,
     name: String,
+    shown_as: String,
     latency: usize,
     dry: Dry,
 }
@@ -429,11 +430,20 @@ fn main() {
             },
             Ask::Show => {
                 let here = seats.at;
-                let name = seats.here().map(|seated| seated.name.clone()).unwrap_or_default();
+                let name = seats.here().map(|seated| match seated.shown_as.is_empty() {
+                    true => seated.name.clone(),
+                    false => seated.shown_as.clone(),
+                }).unwrap_or_default();
                 match show(seats.here().map(|seated| &mut seated.open), &mut editor, &name, here) {
                     Ok(()) => Reply::Fine,
                     Err(why) => Reply::Trouble(why),
                 }
+            }
+            Ask::Called(called) => {
+                if let Some(seated) = seats.here() {
+                    seated.shown_as = called;
+                }
+                Reply::Fine
             }
             Ask::Hide => {
                 if let Some((_, pane, _)) = editor.as_ref() {
@@ -458,7 +468,7 @@ fn main() {
                     Ok(effect) => {
                         let latency = effect.latency();
                         let ara = effect.is_ara();
-                        seats.put_here(Seated { open: effect, name, latency, dry: Dry::empty() });
+                        seats.put_here(Seated { open: effect, name, shown_as: String::new(), latency, dry: Dry::empty() });
                         Reply::Loaded { inputs: 2, outputs: 2, latency, ara }
                     }
                     Err(why) => Reply::Trouble(why),
@@ -545,9 +555,10 @@ fn show(
     unsafe { made.attach(pane.inner(), kind) }?;
     let scale = pane.screen_scale();
     let asked = made.size();
-    let settled = match scale <= 1.01 || asked != (width, height) {
+    let grew_itself = asked.0 as f32 >= width as f32 * scale * ALREADY_SCALED;
+    let settled = match scale <= 1.01 || grew_itself {
         true => asked,
-        false => ((width as f32 * scale).round() as i32, (height as f32 * scale).round() as i32),
+        false => ((asked.0 as f32 * scale).round() as i32, (asked.1 as f32 * scale).round() as i32),
     };
     if settled != (width, height) && settled.0 > 0 && settled.1 > 0 {
         pane.fit_around(settled.0, settled.1);
@@ -561,6 +572,8 @@ fn show(
     Ok(())
 }
 
+
+const ALREADY_SCALED: f32 = 0.9;
 
 fn preset_folder(plugin: &str) -> Option<PathBuf> {
     let root = std::env::var_os(loupe_plugins::presets::FOLDER_VARIABLE)?;

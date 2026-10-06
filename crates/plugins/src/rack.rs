@@ -466,6 +466,10 @@ impl Rack {
         self.tell(slot, Ask::Show)
     }
 
+    pub fn called(&mut self, slot: usize, label: &str) -> Result<(), String> {
+        self.tell(slot, Ask::Called(label.to_string()))
+    }
+
     pub fn hide(&mut self, slot: usize) -> Result<(), String> {
         self.tell(slot, Ask::Hide)
     }

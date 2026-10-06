@@ -351,6 +351,13 @@ impl Chains for Racks {
         }
     }
 
+    fn called(&mut self, track: TrackId, slot: usize, label: &str) -> Result<(), String> {
+        match self.chains.get_mut(&track) {
+            Some(rack) => rack.called(slot, label),
+            None => Err("that track has no plugins".into()),
+        }
+    }
+
     fn load(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
         match self.chains.get_mut(&track) {
             Some(rack) => rack.load_held_back(slot),
