@@ -1947,7 +1947,7 @@ impl App {
                         if from_template {
                             let asked = self.save_as();
                             self.entry = called;
-                            self.entry_problem = Some("Name this song. The template itself stays as it is.".to_string());
+                            self.notice = Some("Name this song. The template itself stays as it is.".to_string());
                             return asked;
                         }
                     }

@@ -269,6 +269,7 @@ impl Effect {
                 }
             }
         }?;
+        made.passes_edits_to(self.turns.clone());
         if let Some(document) = self.ara.as_ref() {
             document.select();
         }

@@ -820,6 +820,7 @@ mod real {
         }
 
         pub fn screen_scale(&self) -> f32 {
+            unsafe { measure_screen(self.handle) };
             SCALED.with(Cell::get)
         }
 

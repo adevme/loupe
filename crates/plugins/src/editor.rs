@@ -31,7 +31,25 @@ impl vst3::Steinberg::IPlugFrameTrait for Frame {
 }
 
 
-pub struct Quiet;
+pub struct Quiet {
+    turns: std::cell::RefCell<Option<vst3::ComWrapper<crate::changes::Turns>>>,
+}
+
+impl Quiet {
+    pub fn new() -> Self {
+        Self { turns: std::cell::RefCell::new(None) }
+    }
+
+    pub fn passes_edits_to(&self, turns: vst3::ComWrapper<crate::changes::Turns>) {
+        *self.turns.borrow_mut() = Some(turns);
+    }
+}
+
+impl Default for Quiet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Class for Quiet {
     type Interfaces = (IComponentHandler,);
@@ -42,7 +60,10 @@ impl IComponentHandlerTrait for Quiet {
         kResultOk
     }
 
-    unsafe fn performEdit(&self, _id: u32, _value: f64) -> i32 {
+    unsafe fn performEdit(&self, id: u32, value: f64) -> i32 {
+        if let Some(turns) = self.turns.borrow().as_ref() {
+            turns.set(id, value);
+        }
         kResultOk
     }
 
@@ -97,7 +118,7 @@ impl Editor {
         links: Option<(ComPtr<IConnectionPoint>, ComPtr<IConnectionPoint>)>,
     ) -> Result<Self, String> {
         unsafe {
-            let handler = ComWrapper::new(Quiet);
+            let handler = ComWrapper::new(Quiet::new());
             if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
                 controller.setComponentHandler(reference.as_ptr());
             }
@@ -115,6 +136,10 @@ impl Editor {
             }
             Ok(Self { view, _controller: controller, _handler: handler, links, frame })
         }
+    }
+
+    pub fn passes_edits_to(&self, turns: vst3::ComWrapper<crate::changes::Turns>) {
+        self._handler.passes_edits_to(turns);
     }
 
     pub fn fits(&self, kind: &[u8]) -> bool {
@@ -187,7 +212,7 @@ impl Editor {
         context: *mut vst3::Steinberg::FUnknown,
     ) -> Result<Self, String> {
         unsafe {
-            let handler = ComWrapper::new(Quiet);
+            let handler = ComWrapper::new(Quiet::new());
             if let Some(reference) = handler.as_com_ref::<IComponentHandler>() {
                 controller.setComponentHandler(reference.as_ptr());
             }
