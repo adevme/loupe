@@ -193,6 +193,7 @@ pub enum Message {
     ScriptKey(String, keyboard::Modifiers),
     OpenAbout,
     StartRename(TrackId),
+    RenameTrackAt { track: TrackId, at: Point },
     StartColour(TrackId),
     EntryTyped(String),
     ClipNameTyped(String),
@@ -1335,6 +1336,13 @@ impl App {
                 if let (Overlay::TrackMenu { at, .. }, Some(found)) = (&self.overlay, self.project.track(track)) {
                     self.entry = found.name.clone();
                     self.overlay = Overlay::Rename { track, at: *at };
+                    return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
+                }
+            }
+            Message::RenameTrackAt { track, at } => {
+                if let Some(found) = self.project.track(track) {
+                    self.entry = found.name.clone();
+                    self.overlay = Overlay::Rename { track, at };
                     return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
                 }
             }

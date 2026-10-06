@@ -124,6 +124,7 @@ pub struct Interaction {
     drag: Option<Drag>,
     last_press: Option<(ClipId, Instant)>,
     last_pan_press: Option<(TrackId, Instant)>,
+    last_name_press: Option<(TrackId, Instant)>,
     modifiers: keyboard::Modifiers,
 }
 
@@ -544,6 +545,34 @@ impl Timeline<'_> {
         nearest
     }
 
+    fn name_spot(&self, index: usize) -> (f32, f32, f32) {
+        let track = &self.project.tracks[index];
+        let has_children = self.project.tracks.iter().any(|t| t.parent == Some(track.id));
+        let indent = self.project.depth_of(track.id).min(4) as f32 * INDENT_W;
+        let name_left = 16.0 + indent + if has_children { 14.0 } else { 0.0 };
+        let top = self.track_top(index);
+        let whole_width = self.header_right() - self.header_left() - name_left - NAME_GAP;
+        if self.height_of(track) >= ROOMY_HEADER_H {
+            return (name_left, whole_width, top + 20.0);
+        }
+        let beside = self.fx_button(index).x - self.header_left() - name_left - NAME_GAP;
+        if beside >= NAME_NARROWEST {
+            return (name_left, beside, top + 20.0);
+        }
+        let buttons = self.mute_button(index);
+        (name_left, whole_width, buttons.y + buttons.height + NAME_GAP + NAME_LINE / 2.0)
+    }
+
+    fn name_box(&self, index: usize) -> Option<Rectangle> {
+        let (name_left, room, middle) = self.name_spot(index);
+        (self.height_of(&self.project.tracks[index]) > 0.0 && room >= NAME_NARROWEST).then(|| Rectangle {
+            x: self.header_left() + name_left,
+            y: middle - NAME_LINE / 2.0,
+            width: room,
+            height: 20.0,
+        })
+    }
+
     fn track_header_at(&self, p: Point) -> Option<&Track> {
         if !self.in_header(p.x) {
             return None;
@@ -817,6 +846,16 @@ impl canvas::Program<Message> for Timeline<'_> {
                     state.last_press = (!pressed_twice).then(|| (clip.id, Instant::now()));
                     if pressed_twice {
                         return (Captured, Some(Message::OpenClip(clip.id)));
+                    }
+                }
+                if let (Hit::Nothing, Some(i)) = (self.hit(p), self.track_at(p.y)) {
+                    if self.name_box(i).is_some_and(|name| name.contains(p)) {
+                        let track = self.project.tracks[i].id;
+                        let pressed_twice = state.last_name_press.is_some_and(|(last, at)| last == track && at.elapsed() < DOUBLE_CLICK);
+                        state.last_name_press = (!pressed_twice).then(|| (track, Instant::now()));
+                        if pressed_twice {
+                            return (Captured, Some(Message::RenameTrackAt { track, at: Point::new(bounds.x + p.x, bounds.y + p.y) }));
+                        }
                     }
                 }
                 let message = match (self.tool, self.hit(p)) {
@@ -2042,18 +2081,8 @@ impl Timeline<'_> {
                     ..Text::default()
                 });
             }
-            let name_left = 16.0 + indent + if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) { 14.0 } else { 0.0 };
-            let roomy = height >= ROOMY_HEADER_H;
-            let buttons = self.mute_button(i);
-            let under_the_buttons = buttons.y - self.lanes_top() + buttons.height + NAME_GAP;
-            let beside = self.fx_button(i).x - self.header_left() - name_left - NAME_GAP;
-            let (room_for_name, name_top) = match (roomy, beside >= NAME_NARROWEST) {
-                (true, _) => (self.header_right() - self.header_left() - name_left - NAME_GAP, top + 20.0),
-                (false, true) => (beside, top + 20.0),
-                (false, false) => (self.header_right() - self.header_left() - name_left - NAME_GAP, under_the_buttons + NAME_LINE / 2.0),
-            };
-            let fits = room_for_name >= NAME_NARROWEST && name_top + NAME_LINE / 2.0 <= top + height;
-            if fits {
+            let (name_left, room_for_name, name_top) = self.name_spot(i);
+            if room_for_name >= NAME_NARROWEST && name_top + NAME_LINE / 2.0 <= top + height {
                 frame.fill_text(Text {
                     content: shorten(&track.name, (room_for_name / NAME_LETTER) as usize),
                     position: Point::new(name_left, name_top),
