@@ -42,7 +42,7 @@ impl App {
             let percent = send.gain * 100.0;
             rows = rows.push(
                 row![
-                    text(target.name.clone()).size(13).width(Length::Fill),
+                    text(target.name.clone()).size(13).width(SEND_NAME).wrapping(iced::widget::text::Wrapping::None),
                     text(format!("{percent:.0}%")).size(11.5).font(palette.mono).color(palette.text_dim),
                     slider(0.0..=125.0, percent, move |percent| Message::SendGain { from, to, gain: percent / 100.0 })
                         .step(1.0)
@@ -126,7 +126,7 @@ impl App {
             .spacing(12),
         )
         .padding(16)
-        .width(460)
+        .width(720)
         .style(move |_| palette.sheet())
         .into()
     }
@@ -134,6 +134,7 @@ impl App {
 
 const CELL: f32 = 30.0;
 const NAME_COL: f32 = 130.0;
+const SEND_NAME: f32 = 150.0;
 
 impl App {
     pub(crate) fn matrix_sheet(&self) -> Element<'_, Message> {

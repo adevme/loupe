@@ -28,6 +28,7 @@ const LANDING_LINE: f32 = 3.0;
 const LANDING_DOT: f32 = 4.0;
 const NAME_NARROWEST: f32 = 26.0;
 const NAME_LETTER: f32 = 7.0;
+const NAME_LINE: f32 = 16.0;
 const PAN_KNOB: f32 = 24.0;
 const PAN_PER_PX: f32 = 0.01;
 const ARM_DOT_RADIUS: f32 = 5.0;
@@ -2043,11 +2044,19 @@ impl Timeline<'_> {
             }
             let name_left = 16.0 + indent + if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) { 14.0 } else { 0.0 };
             let roomy = height >= ROOMY_HEADER_H;
-            let room_for_name = if roomy { self.header_right() - self.header_left() - name_left - NAME_GAP } else { self.fx_button(i).x - self.header_left() - name_left - NAME_GAP };
-            if room_for_name >= NAME_NARROWEST {
+            let buttons = self.mute_button(i);
+            let under_the_buttons = buttons.y - self.lanes_top() + buttons.height + NAME_GAP;
+            let beside = self.fx_button(i).x - self.header_left() - name_left - NAME_GAP;
+            let (room_for_name, name_top) = match (roomy, beside >= NAME_NARROWEST) {
+                (true, _) => (self.header_right() - self.header_left() - name_left - NAME_GAP, top + 20.0),
+                (false, true) => (beside, top + 20.0),
+                (false, false) => (self.header_right() - self.header_left() - name_left - NAME_GAP, under_the_buttons + NAME_LINE / 2.0),
+            };
+            let fits = room_for_name >= NAME_NARROWEST && name_top + NAME_LINE / 2.0 <= top + height;
+            if fits {
                 frame.fill_text(Text {
                     content: shorten(&track.name, (room_for_name / NAME_LETTER) as usize),
-                    position: Point::new(name_left, top + 20.0),
+                    position: Point::new(name_left, name_top),
                     color: if track.muted { p.text_dim } else { p.text },
                     size: p.track_title_size.into(),
                     font: p.medium,

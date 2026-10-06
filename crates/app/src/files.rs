@@ -218,7 +218,13 @@ impl App {
                 self.templates = settings::templates(self.folder.as_deref());
                 self.notice = Some(match self.path.is_some() {
                     true => format!("{name} is saved as a template."),
-                    false => format!("{name} is saved as a template. This song still has nowhere of its own, so save it too."),
+                    false => {
+                        self.save_named(typed);
+                        match self.path.is_some() {
+                            true => format!("{name} is saved as a template, and as a song you can carry on in."),
+                            false => format!("{name} is saved as a template. Save the song itself under another name."),
+                        }
+                    }
                 });
             }
         }
