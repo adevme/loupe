@@ -74,6 +74,7 @@ const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
 const LOOK_IN_EVERY: u8 = 12;
 pub const MASTER_OWNER: u64 = u64::MAX;
+const SETTLES_IN: std::time::Duration = std::time::Duration::from_millis(180);
 const METER_FALL_PER_TICK: f32 = 0.86;
 const FADER_STEP_DB: f32 = 0.5;
 const MASTER_STEP_PERCENT: f32 = 1.0;
@@ -216,6 +217,7 @@ pub enum Message {
     ToggleCollapsed(loupe_engine::TrackId),
     SetTrackHidden { track: loupe_engine::TrackId, hidden: bool },
     ShowHiddenTracks,
+    ClickedAway,
     ScaleTrackHeights(f32),
     ChooseTrack { track: loupe_engine::TrackId, as_well: bool },
     MoveTrack { track: loupe_engine::TrackId, to: usize, parent: Option<loupe_engine::TrackId> },
@@ -556,6 +558,7 @@ struct App {
     pending_scale: f64,
     scale_text: String,
     overlay: Overlay,
+    overlay_since: Option<Instant>,
     settings_tab: SettingsTab,
     entry: String,
     clip_name: String,
@@ -685,6 +688,7 @@ impl App {
             pending_scale: scale,
             scale_text: format_scale(scale),
             overlay: Overlay::None,
+            overlay_since: None,
             settings_tab: SettingsTab::default(),
             entry: String::new(),
             clip_name: String::new(),
@@ -815,6 +819,15 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let was = std::mem::discriminant(&self.overlay);
+        let task = self.with_overlay_time(message);
+        if std::mem::discriminant(&self.overlay) != was {
+            self.overlay_since = matches!(self.overlay, Overlay::None).then_some(None).unwrap_or(Some(Instant::now()));
+        }
+        task
+    }
+
+    fn with_overlay_time(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
         let task = Task::batch([task, self.stretch_waiting()]);
         self.keep_safe();
@@ -1299,6 +1312,12 @@ impl App {
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
             Message::StopExport => self.stop_export.store(true, Ordering::Relaxed),
+            Message::ClickedAway => {
+                let settled = self.overlay_since.is_none_or(|at| at.elapsed() > SETTLES_IN);
+                if settled {
+                    return self.update(Message::CloseOverlay);
+                }
+            }
             Message::OpenChain(spot) => self.overlay = Overlay::Chain(spot),
             Message::SetFxMix(spot, slot, mix) => self.set_fx_mix(spot, slot, mix),
             Message::ChainGrab(spot, slot) => {
@@ -1936,19 +1955,11 @@ impl App {
                 match result {
                     Ok(opened) => {
                         self.set_plugins_off(safely);
-                        let from_template = as_template && self.recovering.is_none();
-                        let called = crate::home::stem(&path);
                         self.adopt(path, opened, as_template);
                         if let Some(original) = self.recovering.take() {
                             self.path = original;
                             self.dirty = true;
                             self.revision += 1;
-                        }
-                        if from_template {
-                            let asked = self.save_as();
-                            self.entry = called;
-                            self.notice = Some("Name this song. The template itself stays as it is.".to_string());
-                            return asked;
                         }
                     }
                     Err(why) => {

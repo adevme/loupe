@@ -473,7 +473,8 @@ impl Timeline<'_> {
     fn pan_knob(&self, index: usize) -> Option<Rectangle> {
         let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
         let route = self.route_button(index);
-        let left = route.x + route.width + ARM_GAP;
+        let after_fx = self.fx_button(index);
+        let left = after_fx.x + after_fx.width + ARM_GAP;
         (roomy && left + PAN_KNOB <= self.header_right() - 6.0).then(|| Rectangle::new(Point::new(left, route.center_y() - PAN_KNOB / 2.0), Size::new(PAN_KNOB, PAN_KNOB)))
     }
 

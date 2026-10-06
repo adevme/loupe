@@ -68,7 +68,7 @@ impl App {
         let palette = self.palette;
         opaque(
             mouse_area(center(opaque(sheet)).padding(16).style(move |_| palette.backdrop()))
-                .on_press(Message::CloseOverlay),
+                .on_press(Message::ClickedAway),
         )
     }
 
