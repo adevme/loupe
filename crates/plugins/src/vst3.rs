@@ -448,10 +448,11 @@ impl Effect {
         crate::wording::find_value(steps, text, say).map(|value| value as f32)
     }
 
-    pub fn save(&self) -> Result<Vec<u8>, String> {
+    pub fn save(&mut self) -> Result<Vec<u8>, String> {
+        let settings = self.settings()?;
         match self.ara.as_ref() {
-            Some(document) => Ok(pack(&self.settings().unwrap_or_default(), &document.archive_id(), &document.store()?)),
-            None => self.settings(),
+            Some(document) => Ok(pack(&settings, &document.archive_id(), &document.store()?)),
+            None => Ok(settings),
         }
     }
 
@@ -476,7 +477,11 @@ impl Effect {
         }
     }
 
-    pub fn settings(&self) -> Result<Vec<u8>, String> {
+    pub fn settings(&mut self) -> Result<Vec<u8>, String> {
+        if self.turns.waiting() {
+            let mut quiet = [[0.0f32; 2]; 64];
+            self.process(&mut quiet);
+        }
         let wrapper = crate::stream::Bytes::empty();
         let stream = wrapper.as_com_ref::<vst3::Steinberg::IBStream>().ok_or("no stream")?;
         unsafe {

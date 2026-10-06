@@ -85,14 +85,14 @@ impl Open {
         }
     }
 
-    fn settings(&self) -> Result<Vec<u8>, String> {
+    fn settings(&mut self) -> Result<Vec<u8>, String> {
         match self {
             Open::Vst3(effect) => effect.settings(),
             other => other.save(),
         }
     }
 
-    fn save(&self) -> Result<Vec<u8>, String> {
+    fn save(&mut self) -> Result<Vec<u8>, String> {
         match self {
             Open::Vst3(effect) => effect.save(),
             Open::Clap(effect) => effect.save(),
