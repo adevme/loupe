@@ -1936,7 +1936,7 @@ impl App {
                 self.overlay = Overlay::None;
                 self.screen = Screen::Song;
             }
-            Message::NewFromTemplate(template) => return self.read_project(template, true, self.wants_safe_open()),
+            Message::NewFromTemplate(template) => return self.read_project(template, false, self.wants_safe_open()),
             Message::OpenRecent(project) => return self.read_project(project, false, self.wants_safe_open()),
             Message::SaveAsTemplate => {
                 self.overlay = Overlay::TemplateName;
