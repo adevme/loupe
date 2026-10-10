@@ -227,13 +227,16 @@ impl EqEditor {
             .text_size(12)
             .padding([4, 8])
         };
-        let mut band_row = row![dot, text(format!("Band {}", band + 1)).size(12), choose(Knob::Shape, &SHAPES)]
-            .spacing(10)
+        fn field<'a>(look: &Look, caption: &'static str, control: Element<'a, EqMessage>) -> Element<'a, EqMessage> {
+            column![control, text(caption).size(9).color(look.text_dim)].spacing(3).align_x(Alignment::Center).into()
+        }
+        let mut band_row = row![dot, text(format!("Band {}", band + 1)).size(12), field(&look, "SHAPE", choose(Knob::Shape, &SHAPES).into())]
+            .spacing(12)
             .align_y(Alignment::Center);
         if shape.has_slope() {
-            band_row = band_row.push(choose(Knob::Slope, &SLOPES));
+            band_row = band_row.push(field(&look, "SLOPE", choose(Knob::Slope, &SLOPES).into()));
         }
-        band_row = band_row.push(choose(Knob::Place, &PLACES));
+        band_row = band_row.push(field(&look, "STEREO", choose(Knob::Place, &PLACES).into()));
         let typed_in = |which: Knob, shown: String, wide: f32| {
             let slot = knob(band, which);
             let showing = match &self.typing {
@@ -255,12 +258,11 @@ impl EqEditor {
                     selection: look.accent,
                 })
         };
-        band_row = band_row.push(typed_in(Knob::Freq, hertz(self.get(band, Knob::Freq)), 78.0));
+        band_row = band_row.push(field(&look, "FREQ", typed_in(Knob::Freq, hertz(self.get(band, Knob::Freq)), 78.0).into()));
         if shape.has_gain() {
-            band_row = band_row.push(typed_in(Knob::Gain, format!("{:+.1} dB", self.get(band, Knob::Gain)), 68.0));
+            band_row = band_row.push(field(&look, "GAIN", typed_in(Knob::Gain, format!("{:+.1} dB", self.get(band, Knob::Gain)), 68.0).into()));
         }
-        band_row = band_row.push(text("Q").size(12).color(look.text_dim));
-        band_row = band_row.push(typed_in(Knob::Q, format!("{:.2}", self.get(band, Knob::Q)), 56.0));
+        band_row = band_row.push(field(&look, "Q", typed_in(Knob::Q, format!("{:.2}", self.get(band, Knob::Q)), 56.0).into()));
         let remove = button(text("Remove").size(12)).padding([4, 10]).on_press(EqMessage::Remove(band));
         if shape.has_gain() {
             let on = self.dynamic(band);
@@ -278,7 +280,15 @@ impl EqEditor {
                 band_row = band_row.push(text(format!("now {:+.1} dB", self.moved_db(band))).size(12).color(look.text_dim).wrapping(iced::widget::text::Wrapping::None));
             }
         }
-        let top = row![band_row, horizontal_space(), remove, output_row].spacing(16).align_y(Alignment::Center);
+        let panel = container(row![band_row, horizontal_space(), remove].spacing(16).align_y(Alignment::Center))
+            .padding([8, 12])
+            .width(Length::Fill)
+            .style(move |_| container::Style {
+                background: Some(look.raised.into()),
+                border: iced::Border::default().rounded(8),
+                ..Default::default()
+            });
+        let top = row![panel, output_row].spacing(16).align_y(Alignment::Center);
         if !self.dynamic(band) {
             return top.into();
         }
