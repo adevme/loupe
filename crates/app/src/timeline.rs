@@ -81,6 +81,15 @@ impl Tool {
             Tool::Comp => "layers-2",
         }
     }
+    fn words(self) -> &'static str {
+        match self {
+            Tool::Pencil => "Pencil: draw and move clips",
+            Tool::Razor => "Razor: click a clip to split it",
+            Tool::Mute => "Mute: click a clip to silence it",
+            Tool::Delete => "Eraser: click a clip to remove it",
+            Tool::Comp => "Comp: pick between stacked takes",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +117,7 @@ pub struct Timeline<'a> {
     pub punch: bool,
     pub tool: Tool,
     pub snap: bool,
+    pub hinting: Option<&'static str>,
     pub armed: &'a HashSet<TrackId>,
     pub recording_from: Option<Frames>,
     pub taking_shape: &'a [f32],
@@ -179,7 +189,6 @@ impl ClipBox {
 
 enum Hit<'a> {
     Tool(Tool),
-    Snap,
     Scrollbar,
     Ruler,
     Resize(&'a Track),
@@ -249,13 +258,6 @@ impl Timeline<'_> {
         )
     }
 
-    fn snap_button(&self) -> Rectangle {
-        let tools = self.tool_button(Tool::ALL.len() - 1);
-        Rectangle::new(
-            Point::new((self.header_right() - TOOLS_LEFT - TOOL_BUTTON).max(tools.x + TOOL_BUTTON + TOOL_GAP), tools.y),
-            tools.size(),
-        )
-    }
 
     fn draw_taking_shape(&self, overlay: &mut Frame, left: f32, right: f32, top: f32, bottom: f32, from: Frames) {
         if self.taking_shape.is_empty() {
@@ -438,6 +440,36 @@ impl Timeline<'_> {
         ((frames / step).round() * step).round().max(0.0) as Frames
     }
 
+    fn hidden_buttons(&self, index: usize) -> usize {
+        let track = &self.project.tracks[index];
+        if self.height_of(track) >= ROOMY_HEADER_H {
+            return 0;
+        }
+        let has_children = self.project.tracks.iter().any(|t| t.parent == Some(track.id));
+        let indent = self.project.depth_of(track.id).min(4) as f32 * INDENT_W;
+        let name_left = 16.0 + indent + if has_children { 14.0 } else { 0.0 };
+        let mute_x = self.header_right() - 68.0;
+        for hidden in 0..=3usize {
+            let leftmost = mute_x - (4 - hidden) as f32 * (ARM_GAP + ARM_BUTTON);
+            if leftmost - self.header_left() - name_left - NAME_GAP >= NAME_NARROWEST {
+                return hidden;
+            }
+        }
+        3
+    }
+
+    fn shows_fx(&self, index: usize) -> bool {
+        self.hidden_buttons(index) < 1
+    }
+
+    fn shows_route(&self, index: usize) -> bool {
+        self.hidden_buttons(index) < 2
+    }
+
+    fn shows_arm(&self, index: usize) -> bool {
+        self.hidden_buttons(index) < 3
+    }
+
     fn mute_button(&self, index: usize) -> Rectangle {
         let top = self.track_top(index);
         let height = self.height_of(&self.project.tracks[index]);
@@ -446,7 +478,7 @@ impl Timeline<'_> {
         } else {
             Point::new(self.header_right() - 68.0, top + 9.0)
         };
-        Rectangle::new(corner, Size::new(28.0, 22.0))
+        Rectangle::new(corner, Size::new(ARM_BUTTON, 22.0))
     }
 
     fn route_button(&self, index: usize) -> Rectangle {
@@ -556,7 +588,13 @@ impl Timeline<'_> {
         if self.height_of(track) >= ROOMY_HEADER_H {
             return (name_left, whole_width, top + 20.0);
         }
-        let beside = self.fx_button(index).x - self.header_left() - name_left - NAME_GAP;
+        let leftmost = match self.hidden_buttons(index) {
+            0 => self.fx_button(index).x,
+            1 => self.route_button(index).x,
+            2 => self.arm_button(index).x,
+            _ => self.solo_button(index).x,
+        };
+        let beside = leftmost - self.header_left() - name_left - NAME_GAP;
         if beside >= NAME_NARROWEST {
             return (name_left, beside, top + 20.0);
         }
@@ -682,7 +720,7 @@ impl Timeline<'_> {
             return match (!self.in_header(p.x), p.y < self.palette.scrollbar_height) {
                 (true, true) => Hit::Scrollbar,
                 (true, false) => Hit::Ruler,
-                (false, _) if self.snap_button().contains(p) => Hit::Snap,
+
                 (false, _) => Tool::ALL
                     .into_iter()
                     .enumerate()
@@ -705,13 +743,13 @@ impl Timeline<'_> {
                 if self.pan_knob(i).is_some_and(|knob| knob.contains(p)) {
                     return Hit::Pan(track);
                 }
-                if self.arm_button(i).contains(p) {
+                if self.shows_arm(i) && self.arm_button(i).contains(p) {
                     return Hit::Arm(track);
                 }
-                if self.route_button(i).contains(p) {
+                if self.shows_route(i) && self.route_button(i).contains(p) {
                     return Hit::Route(track);
                 }
-                if self.fx_button(i).contains(p) {
+                if self.shows_fx(i) && self.fx_button(i).contains(p) {
                     return Hit::Fx(track);
                 }
                 if self.remove_button(i).contains(p) {
@@ -861,7 +899,6 @@ impl canvas::Program<Message> for Timeline<'_> {
                 }
                 let message = match (self.tool, self.hit(p)) {
                     (_, Hit::Tool(tool)) => Some(Message::SetTool(tool)),
-                    (_, Hit::Snap) => Some(Message::ToggleSnap),
                     (_, Hit::Envelope(target, near, at, value)) => {
                         let which = match near {
                             Some(which) => which,
@@ -980,6 +1017,12 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let (Some(p), Some(drag)) = (anywhere, state.drag.as_mut()) else {
+                    if let Some(p) = anywhere {
+                        let over = Tool::ALL.into_iter().enumerate().find(|(i, _)| self.tool_button(*i).contains(p)).map(|(_, tool)| tool.words());
+                        if over != self.hinting {
+                            return (Ignored, Some(Message::Hint(over)));
+                        }
+                    }
                     let aiming = self.tool == Tool::Razor && cursor.is_over(bounds);
                     return (Ignored, aiming.then_some(Message::Refresh));
                 };
@@ -1260,22 +1303,6 @@ impl canvas::Program<Message> for Timeline<'_> {
                     ..Text::default()
                 });
             }
-            let magnet = self.snap_button();
-            if self.snap {
-                let chosen = Path::new(|b| b.rounded_rectangle(magnet.position(), magnet.size(), p.corner.into()));
-                frame.fill(&chosen, p.hover);
-            }
-            frame.fill_text(Text {
-                content: icons::glyph("magnet").to_string(),
-                position: magnet.center(),
-                color: if self.snap { p.text } else { p.text_dim },
-                size: 14.0.into(),
-                font: icons::font("magnet"),
-                horizontal_alignment: alignment::Horizontal::Center,
-                vertical_alignment: alignment::Vertical::Center,
-                shaping: iced::widget::text::Shaping::Advanced,
-                ..Text::default()
-            });
             frame.fill_rectangle(Point::new(0.0, self.lanes_top() - 1.0), Size::new(bounds.width, 1.0), p.line);
             let divider = if p.headers == Side::Left { p.header_width - 1.0 } else { self.header_left() };
             frame.fill_rectangle(Point::new(divider, 0.0), Size::new(1.0, bounds.height), p.line);
@@ -1470,8 +1497,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     | Hit::Fx(_)
                     | Hit::Remove(_)
                     | Hit::AddTrack
-                    | Hit::Tool(_)
-                    | Hit::Snap,
+                    | Hit::Tool(_),
                 ),
             ) => {
                 mouse::Interaction::Pointer
@@ -2159,6 +2185,7 @@ impl Timeline<'_> {
                 frame.stroke(&Path::line(along(radius * 0.25), along(radius - 4.0)), Stroke::default().with_color(p.text).with_width(2.0));
             }
 
+            if self.shows_arm(i) {
             let arm = self.arm_button(i);
             let armed = self.armed.contains(&track.id);
             let surround = Path::new(|b| {
@@ -2178,6 +2205,8 @@ impl Timeline<'_> {
             } else {
                 frame.stroke(&dot, Stroke::default().with_color(p.text_dim).with_width(1.5));
             }
+            }
+            if self.shows_route(i) {
 
             let route = self.route_button(i);
             let wired = !track.sends.is_empty() || track.parent.is_some();
@@ -2195,7 +2224,9 @@ impl Timeline<'_> {
                 vertical_alignment: alignment::Vertical::Center,
                 ..Text::default()
             });
+            }
 
+            if self.shows_fx(i) {
             let fx_at = self.fx_button(i);
             let loaded = track.fx.iter().filter(|fx| !fx.record).count();
             let pad = Path::new(|b| {
@@ -2212,6 +2243,7 @@ impl Timeline<'_> {
                 vertical_alignment: alignment::Vertical::Center,
                 ..Text::default()
             });
+            }
         }
 
         let add = self.add_button();
