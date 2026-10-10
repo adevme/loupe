@@ -470,6 +470,20 @@ impl Rack {
         self.tell(slot, Ask::Called(label.to_string()))
     }
 
+    pub fn was_touched(&mut self, slot: usize) -> bool {
+        let Some(found) = self.slots.get_mut(slot) else {
+            return false;
+        };
+        let Some(host) = found.host.as_mut() else {
+            return false;
+        };
+        matches!(host.ask(Ask::Touched), Ok(Reply::Edited(true)))
+    }
+
+    pub fn on_track(&mut self, slot: usize, name: &str, index: i64) -> Result<(), String> {
+        self.tell(slot, Ask::OnTrack(name.to_string(), index))
+    }
+
     pub fn hide(&mut self, slot: usize) -> Result<(), String> {
         self.tell(slot, Ask::Hide)
     }

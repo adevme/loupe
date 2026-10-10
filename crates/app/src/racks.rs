@@ -358,6 +358,28 @@ impl Chains for Racks {
         }
     }
 
+    fn any_plugin_touched(&mut self) -> bool {
+        let tracks: Vec<TrackId> = self.chains.keys().copied().collect();
+        let mut touched = false;
+        for track in tracks {
+            if let Some(rack) = self.chains.get_mut(&track) {
+                for slot in 0..rack.len() {
+                    if rack.was_touched(slot) {
+                        touched = true;
+                    }
+                }
+            }
+        }
+        touched
+    }
+
+    fn on_track(&mut self, track: TrackId, slot: usize, name: &str, index: i64) -> Result<(), String> {
+        match self.chains.get_mut(&track) {
+            Some(rack) => rack.on_track(slot, name, index),
+            None => Err("that track has no plugins".into()),
+        }
+    }
+
     fn load(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
         match self.chains.get_mut(&track) {
             Some(rack) => rack.load_held_back(slot),

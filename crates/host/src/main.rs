@@ -201,6 +201,8 @@ struct Seated {
     open: Open,
     name: String,
     shown_as: String,
+    on_track: String,
+    seat_index: i64,
     latency: usize,
     dry: Dry,
 }
@@ -441,7 +443,8 @@ fn main() {
                     true => seated.name.clone(),
                     false => seated.shown_as.clone(),
                 }).unwrap_or_default();
-                match show(seats.here().map(|seated| &mut seated.open), &mut editor, &name, here) {
+                let on = seats.here().map(|seated| (seated.on_track.clone(), seated.seat_index)).unwrap_or_default();
+                match show(seats.here().map(|seated| &mut seated.open), &mut editor, &name, here, &on) {
                     Ok(()) => {
                         if let Some((_, pane, _)) = editor.as_ref() {
                             was_sized = pane.inside();
@@ -450,6 +453,14 @@ fn main() {
                     }
                     Err(why) => Reply::Trouble(why),
                 }
+            }
+            Ask::Touched => Reply::Edited(editor.as_ref().map(|(made, _, _)| made.was_touched()).unwrap_or(false)),
+            Ask::OnTrack(name, index) => {
+                if let Some(seated) = seats.here() {
+                    seated.on_track = name;
+                    seated.seat_index = index;
+                }
+                Reply::Fine
             }
             Ask::Called(called) => {
                 if let Some(seated) = seats.here() {
@@ -480,7 +491,7 @@ fn main() {
                     Ok(effect) => {
                         let latency = effect.latency();
                         let ara = effect.is_ara();
-                        seats.put_here(Seated { open: effect, name, shown_as: String::new(), latency, dry: Dry::empty() });
+                        seats.put_here(Seated { open: effect, name, shown_as: String::new(), on_track: String::new(), seat_index: 0, latency, dry: Dry::empty() });
                         Reply::Loaded { inputs: 2, outputs: 2, latency, ara }
                     }
                     Err(why) => Reply::Trouble(why),
@@ -541,6 +552,7 @@ fn show(
     editor: &mut Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)>,
     name: &str,
     seat: usize,
+    on: &(String, i64),
 ) -> Result<(), String> {
     if let Some((_, pane, held)) = editor.as_ref() {
         if *held == seat {
@@ -566,12 +578,14 @@ fn show(
     }
     unsafe { made.attach(pane.inner(), kind) }?;
     let scale = pane.screen_scale();
+    if scale > 1.01 {
+        made.told_its_scale(scale);
+    }
+    if !on.0.is_empty() {
+        made.told_its_track(&on.0, on.1);
+    }
     let asked = made.size();
-    let grew_itself = asked.0 as f32 >= width as f32 * scale * ALREADY_SCALED;
-    let settled = match scale <= 1.01 || grew_itself {
-        true => asked,
-        false => ((asked.0 as f32 * scale).round() as i32, (asked.1 as f32 * scale).round() as i32),
-    };
+    let settled = scaled_to_fit(asked, scale, pane.screen_size());
     if settled != (width, height) && settled.0 > 0 && settled.1 > 0 {
         pane.fit_around(settled.0, settled.1);
     }
@@ -586,6 +600,20 @@ fn show(
 
 
 const ALREADY_SCALED: f32 = 0.9;
+fn scaled_to_fit(asked: (i32, i32), scale: f32, screen: (i32, i32)) -> (i32, i32) {
+    if scale <= 1.01 || asked.0 <= 0 || asked.1 <= 0 {
+        return asked;
+    }
+    let grown = ((asked.0 as f32 * scale).round() as i32, (asked.1 as f32 * scale).round() as i32);
+    let room = (screen.0 as f32 * ROOM_ON_SCREEN) as i32;
+    let tall = (screen.1 as f32 * ROOM_ON_SCREEN) as i32;
+    match grown.0 > room || grown.1 > tall {
+        true => asked,
+        false => grown,
+    }
+}
+
+const ROOM_ON_SCREEN: f32 = 1.0;
 
 fn preset_folder(plugin: &str) -> Option<PathBuf> {
     let root = std::env::var_os(loupe_plugins::presets::FOLDER_VARIABLE)?;

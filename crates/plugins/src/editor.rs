@@ -2,6 +2,8 @@ use vst3::Steinberg::Vst::{
     IComponent, IComponentHandler, IComponentHandlerTrait, IConnectionPoint, IConnectionPointTrait, IEditController, IEditControllerTrait,
 };
 use vst3::Steinberg::{kResultOk, IPlugView, IPlugViewTrait, IPluginBaseTrait, ViewRect};
+use std::ffi::CStr;
+use vst3::Steinberg::kResultFalse;
 use vst3::{Class, ComPtr, ComWrapper};
 
 pub struct Frame {
@@ -33,11 +35,16 @@ impl vst3::Steinberg::IPlugFrameTrait for Frame {
 
 pub struct Quiet {
     turns: std::cell::RefCell<Option<vst3::ComWrapper<crate::changes::Turns>>>,
+    touched: std::cell::Cell<bool>,
 }
 
 impl Quiet {
     pub fn new() -> Self {
-        Self { turns: std::cell::RefCell::new(None) }
+        Self { turns: std::cell::RefCell::new(None), touched: std::cell::Cell::new(false) }
+    }
+
+    pub fn was_touched(&self) -> bool {
+        self.touched.replace(false)
     }
 
     pub fn passes_edits_to(&self, turns: vst3::ComWrapper<crate::changes::Turns>) {
@@ -61,6 +68,7 @@ impl IComponentHandlerTrait for Quiet {
     }
 
     unsafe fn performEdit(&self, id: u32, value: f64) -> i32 {
+        self.touched.set(true);
         if let Some(turns) = self.turns.borrow().as_ref() {
             turns.set(id, value);
         }
@@ -154,6 +162,30 @@ impl Editor {
         ((rect.right - rect.left).max(80), (rect.bottom - rect.top).max(60))
     }
 
+    pub fn was_touched(&self) -> bool {
+        self._handler.was_touched()
+    }
+
+    pub fn told_its_track(&self, name: &str, index: i64) -> bool {
+        use vst3::Steinberg::Vst::ChannelContext::IInfoListenerTrait;
+        let Some(ears) = self._controller.cast::<vst3::Steinberg::Vst::ChannelContext::IInfoListener>() else {
+            return false;
+        };
+        let facts = ComWrapper::new(Facts::new(name, index));
+        let Some(list) = facts.to_com_ptr::<vst3::Steinberg::Vst::IAttributeList>() else {
+            return false;
+        };
+        unsafe { ears.setChannelContextInfos(list.as_ptr()) == kResultOk }
+    }
+
+    pub fn told_its_scale(&self, scale: f32) -> bool {
+        use vst3::Steinberg::IPlugViewContentScaleSupportTrait;
+        let Some(aware) = self.view.cast::<vst3::Steinberg::IPlugViewContentScaleSupport>() else {
+            return false;
+        };
+        unsafe { aware.setContentScaleFactor(scale) == kResultOk }
+    }
+
     pub fn can_resize(&self) -> bool {
         unsafe { self.view.canResize() == kResultOk }
     }
@@ -228,5 +260,84 @@ impl Editor {
             }
             Ok(Self { view, _controller: controller, _handler: handler, links: None, frame })
         }
+    }
+}
+
+pub struct Facts {
+    name: Vec<u16>,
+    index: i64,
+}
+
+impl Facts {
+    pub fn new(name: &str, index: i64) -> Self {
+        let mut wide: Vec<u16> = name.encode_utf16().collect();
+        wide.push(0);
+        Self { name: wide, index }
+    }
+}
+
+impl Class for Facts {
+    type Interfaces = (vst3::Steinberg::Vst::IAttributeList,);
+}
+
+fn key_is(id: vst3::Steinberg::Vst::IAttributeList_::AttrID, want: &str) -> bool {
+    if id.is_null() {
+        return false;
+    }
+    let raw = unsafe { CStr::from_ptr(id) };
+    raw.to_str().map(|text| text == want).unwrap_or(false)
+}
+
+impl vst3::Steinberg::Vst::IAttributeListTrait for Facts {
+    unsafe fn setInt(&self, _id: vst3::Steinberg::Vst::IAttributeList_::AttrID, _value: i64) -> i32 {
+        kResultOk
+    }
+
+    unsafe fn getInt(&self, id: vst3::Steinberg::Vst::IAttributeList_::AttrID, value: *mut i64) -> i32 {
+        if value.is_null() {
+            return kResultFalse;
+        }
+        if key_is(id, "channel index") {
+            *value = self.index;
+            return kResultOk;
+        }
+        if key_is(id, "channel index namespace length") {
+            *value = 0;
+            return kResultOk;
+        }
+        kResultFalse
+    }
+
+    unsafe fn setFloat(&self, _id: vst3::Steinberg::Vst::IAttributeList_::AttrID, _value: f64) -> i32 {
+        kResultOk
+    }
+
+    unsafe fn getFloat(&self, _id: vst3::Steinberg::Vst::IAttributeList_::AttrID, _value: *mut f64) -> i32 {
+        kResultFalse
+    }
+
+    unsafe fn setString(&self, _id: vst3::Steinberg::Vst::IAttributeList_::AttrID, _string: *const u16) -> i32 {
+        kResultOk
+    }
+
+    unsafe fn getString(&self, id: vst3::Steinberg::Vst::IAttributeList_::AttrID, string: *mut u16, size: u32) -> i32 {
+        if string.is_null() || !key_is(id, "channel name") {
+            return kResultFalse;
+        }
+        let room = (size as usize / 2).saturating_sub(1);
+        let count = self.name.len().saturating_sub(1).min(room);
+        for (at, letter) in self.name.iter().take(count).enumerate() {
+            *string.add(at) = *letter;
+        }
+        *string.add(count) = 0;
+        kResultOk
+    }
+
+    unsafe fn setBinary(&self, _id: vst3::Steinberg::Vst::IAttributeList_::AttrID, _data: *const std::ffi::c_void, _size: u32) -> i32 {
+        kResultOk
+    }
+
+    unsafe fn getBinary(&self, _id: vst3::Steinberg::Vst::IAttributeList_::AttrID, _data: *mut *const std::ffi::c_void, _size: *mut u32) -> i32 {
+        kResultFalse
     }
 }

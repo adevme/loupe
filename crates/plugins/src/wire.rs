@@ -9,6 +9,8 @@ pub enum Ask {
     ProcessAt(i64),
     Region(Region),
     Called(String),
+    OnTrack(String, i64),
+    Touched,
     Show,
     Hide,
     Save,
@@ -43,6 +45,7 @@ pub enum Reply {
     Knobs(Vec<String>),
     Readings(Vec<Reading>),
     Value(f32),
+    Edited(bool),
     Fine,
     Fell(usize),
     Trouble(String),
@@ -121,6 +124,8 @@ impl Ask {
             Ask::ProcessAt(at) => format!("processat\t{at}"),
             Ask::Region(region) => format!("region\t{}", region.line()),
             Ask::Called(called) => format!("called\t{}", tidy(called)),
+            Ask::OnTrack(name, index) => format!("ontrack\t{index}\t{}", tidy(name)),
+            Ask::Touched => "touched".to_string(),
             Ask::Show => "show".to_string(),
             Ask::Hide => "hide".to_string(),
             Ask::Save => "save".to_string(),
@@ -153,6 +158,11 @@ impl Ask {
             "processat" => Some(Ask::ProcessAt(parts.next()?.parse().ok()?)),
             "region" => Some(Ask::Region(Region::from_parts(&mut parts)?)),
             "called" => Some(Ask::Called(parts.next().unwrap_or("").to_string())),
+            "touched" => Some(Ask::Touched),
+            "ontrack" => {
+                let index = parts.next()?.parse().ok()?;
+                Some(Ask::OnTrack(parts.next().unwrap_or("").to_string(), index))
+            }
             "show" => Some(Ask::Show),
             "hide" => Some(Ask::Hide),
             "save" => Some(Ask::Save),
@@ -179,6 +189,7 @@ impl Reply {
             Reply::Knobs(names) => format!("knobs\t{}", names.join("\x1f")),
             Reply::Readings(found) => format!("readings\t{}", found.iter().map(|reading| format!("{}\x1e{}\x1e{}", tidy(&reading.name), reading.value, tidy(&reading.text))).collect::<Vec<_>>().join("\x1f")),
             Reply::Value(value) => format!("value\t{value}"),
+            Reply::Edited(yes) => format!("edited\t{}", *yes as u8),
             Reply::Fine => "fine".to_string(),
             Reply::Fell(seat) => format!("{FELL}\t{seat}"),
             Reply::Trouble(why) => format!("trouble\t{}", why.replace('\n', " ")),
@@ -217,6 +228,7 @@ impl Reply {
                 Some(Reply::Readings(found))
             }
             "value" => Some(Reply::Value(parts.next()?.parse().ok()?)),
+            "edited" => Some(Reply::Edited(parts.next()? == "1")),
             "fine" => Some(Reply::Fine),
             FELL => Some(Reply::Fell(parts.next()?.parse().ok()?)),
             "trouble" => Some(Reply::Trouble(parts.next().unwrap_or("something went wrong").to_string())),

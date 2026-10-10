@@ -914,6 +914,13 @@ impl App {
             Message::LookAround => {
                 let hosts = self.plugin_hosts();
                 self.resources.look(&hosts);
+                if let Some(mut racks) = self.borrow_racks() {
+                    let touched = racks.any_plugin_touched();
+                    self.racks = Some(racks);
+                    if touched {
+                        self.dirty = true;
+                    }
+                }
             }
             Message::Tick => {
                 let punched_out = self.recording.as_ref().and_then(|recording| recording.punch).is_some_and(|(_, to)| self.engine.position() >= to);
@@ -3250,7 +3257,6 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("z", true, false) => Some(Message::Undo),
                 ("z", true, true) | ("y", true, _) => Some(Message::Redo),
                 ("i", true, _) => Some(Message::Import),
-                ("p", true, _) if modifiers.alt() => Some(Message::OpenPerformance),
                 _ if modifiers.command() || modifiers.alt() => Some(Message::ScriptKey(c.to_lowercase(), modifiers)),
                 _ => None,
             }

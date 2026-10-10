@@ -83,6 +83,15 @@ pub trait Chains: Send {
         Ok(())
     }
 
+    fn on_track(&mut self, track: TrackId, slot: usize, name: &str, index: i64) -> Result<(), String> {
+        let _ = (track, slot, name, index);
+        Ok(())
+    }
+
+    fn any_plugin_touched(&mut self) -> bool {
+        false
+    }
+
     fn load(&mut self, track: TrackId, slot: usize) -> Result<(), String> {
         let _ = (track, slot);
         Err("plugins are not wired up".into())

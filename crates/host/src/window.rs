@@ -92,6 +92,7 @@ mod real {
         fn SetForegroundWindow(window: Handle) -> i32;
         fn SetFocus(window: Handle) -> Handle;
         fn GetDpiForWindow(window: Handle) -> u32;
+        fn GetSystemMetrics(which: i32) -> i32;
         fn FillRect(dc: Handle, rect: *const [i32; 4], brush: Handle) -> i32;
         fn DrawTextW(dc: Handle, text: *const u16, length: i32, rect: *mut [i32; 4], how: u32) -> i32;
         fn InvalidateRect(window: Handle, rect: *const [i32; 4], erase: i32) -> i32;
@@ -824,6 +825,10 @@ mod real {
             SCALED.with(Cell::get)
         }
 
+        pub fn screen_size(&self) -> (i32, i32) {
+            unsafe { (GetSystemMetrics(0), GetSystemMetrics(1)) }
+        }
+
         pub fn fit_around(&self, width: i32, height: i32) {
             unsafe {
                 let mut rect = [0, 0, width, height + grown(BAR)];
@@ -914,6 +919,10 @@ mod real {
 
         pub fn screen_scale(&self) -> f32 {
             1.0
+        }
+
+        pub fn screen_size(&self) -> (i32, i32) {
+            (1920, 1080)
         }
 
         pub fn fit_around(&self, _width: i32, _height: i32) {}
