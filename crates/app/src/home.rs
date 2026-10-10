@@ -29,12 +29,32 @@ impl App {
             .on_press(message)
             .into()
         };
+        let removable = |title: String, note: String, open: Message, drop: Message| -> Element<'_, Message> {
+            row![
+                button(
+                    column![
+                        text(title).size(13.5).font(palette.medium),
+                        text(note).size(11.5).color(palette.text_dim),
+                    ]
+                    .spacing(3),
+                )
+                .width(Length::Fill)
+                .padding([9, 12])
+                .style(move |_, status| palette.menu_item(status))
+                .on_press(open),
+                icon_button(palette, "x", Some(drop)),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(2)
+            .into()
+        };
+
 
         let mut start = column![heading("START")].spacing(4);
         start = start.push(choice("Blank project".into(), "An empty song".into(), Message::NewBlank));
         for template in &self.templates {
             let note = "Template".to_string();
-            start = start.push(choice(stem(template), note, Message::NewFromTemplate(template.clone())));
+            start = start.push(removable(stem(template), note, Message::NewFromTemplate(template.clone()), Message::AskDeleteTemplate(template.clone())));
         }
         start = start.push(choice("Open project…".into(), "Pick a .lp file".into(), Message::OpenProject));
 

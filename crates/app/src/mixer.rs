@@ -205,6 +205,12 @@ impl App {
         .style(move |_| palette.channel())
         .into()
     }
+    pub(crate) fn mixer_follows_the_song(&mut self) -> iced::Task<Message> {
+        if self.mixer_open && self.mixer_wants_alone && self.mixer_window.is_none() && self.screen == crate::Screen::Song {
+            return self.mixer_to_its_own_window();
+        }
+        iced::Task::none()
+    }
 
     pub(crate) fn mixer_to_its_own_window(&mut self) -> iced::Task<Message> {
         if self.mixer_window.is_some() {
@@ -268,7 +274,7 @@ impl App {
             let wired = count > 0 || track.parent.is_some();
             let routes = if count > 0 { format!("→{count}") } else { "→".to_string() };
             let small = |words: String| text(words).size(11.5).font(palette.semibold).width(Length::Fill).center();
-            container(
+            let strip = container(
                 column![
                     container(Space::new(Length::Fill, 3)).style(move |_| container::Style {
                         background: Some(colour.into()),
@@ -322,8 +328,12 @@ impl App {
             .padding(7)
             .width(STRIP_WIDTH)
             .height(self.strip_tall())
-            .style(move |_| palette.channel())
-            .into()
+            .style(move |_| palette.channel());
+            mouse_area(strip)
+                .on_press(Message::MixerGrabbedStrip(index))
+                .on_enter(Message::MixerOverStrip(index))
+                .on_release(Message::MixerDroppedStrip)
+                .into()
         });
         let row = iced::widget::row(strips).spacing(10);
         let faders: Element<'_, Message> = if self.project.tracks.is_empty() {

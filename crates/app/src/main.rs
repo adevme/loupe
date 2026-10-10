@@ -219,6 +219,9 @@ pub enum Message {
     ScaleTrackHeights(f32),
     ChooseTrack { track: loupe_engine::TrackId, as_well: bool },
     MoveTrack { track: loupe_engine::TrackId, to: usize, parent: Option<loupe_engine::TrackId> },
+    MixerGrabbedStrip(usize),
+    MixerOverStrip(usize),
+    MixerDroppedStrip,
     NudgeTracks { down: bool },
     SetTrackParent { track: TrackId, parent: Option<TrackId> },
     OpenRouting(TrackId),
@@ -355,6 +358,8 @@ pub enum Message {
     GoHome,
     NewBlank,
     NewFromTemplate(PathBuf),
+    AskDeleteTemplate(PathBuf),
+    DeleteTemplate,
     OpenRecent(PathBuf),
     SaveAsTemplate,
     ProjectPicked(Option<PathBuf>),
@@ -446,6 +451,7 @@ pub enum Overlay {
     Colour { track: TrackId, at: Point },
     Inputs { track: TrackId, at: Point, inputs: u16 },
     ConfirmDiscard(Pending),
+    ConfirmDeleteTemplate(PathBuf),
     TemplateName,
     SaveName,
     Export,
@@ -469,6 +475,7 @@ pub enum Overlay {
 pub enum Pending {
     Open,
     Home,
+    Quit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -565,6 +572,9 @@ struct App {
     main_window: window::Id,
     mixer_window: Option<window::Id>,
     mixer_open: bool,
+    mixer_wants_alone: bool,
+    mixer_drag: Option<usize>,
+    mixer_over: Option<usize>,
     mixer_height: f32,
     folder: Option<PathBuf>,
     resizing_mixer: bool,
@@ -695,6 +705,9 @@ impl App {
             main_window: main,
             mixer_window: None,
             mixer_open: settings.mixer_open,
+            mixer_wants_alone: settings.mixer_alone,
+            mixer_drag: None,
+            mixer_over: None,
             mixer_height: settings.mixer_height.unwrap_or(mixer::MIXER_HEIGHT).max(mixer::SHORTEST_MIXER),
             resizing_mixer: false,
             folder: settings.folder.clone(),
@@ -804,7 +817,7 @@ impl App {
         app.keep_safe();
         app.listen_to_keyboards();
         let measure = window::get_size(main).map(Message::Resized);
-        let mixer = if app.mixer_open && settings.mixer_alone { app.mixer_to_its_own_window() } else { Task::none() };
+        let mixer = if app.mixer_open && settings.mixer_alone && app.screen != Screen::Home { app.mixer_to_its_own_window() } else { Task::none() };
         let hunt = Task::perform(async { plugins::find_plugins() }, Message::PluginsFound);
         let look = if app.check_updates {
             app.quiet_check = true;
@@ -1417,6 +1430,9 @@ impl App {
                 }
             }
             Message::ToggleMixer => {
+                if let Some(window) = self.mixer_window {
+                    return iced::window::gain_focus(window);
+                }
                 self.mixer_open = !self.mixer_open;
                 let _ = settings::save("mixer", if self.mixer_open { "open" } else { "closed" });
                 if !self.mixer_open {
@@ -1447,8 +1463,34 @@ impl App {
                     let _ = settings::save("mixer_alone", "no");
                     return window::close(window);
                 } else if window == self.main_window {
+                    if self.dirty && !self.project.tracks.is_empty() {
+                        self.overlay = Overlay::ConfirmDiscard(Pending::Quit);
+                        return Task::none();
+                    }
                     return self.shut_down();
                 }
+            }
+            Message::MixerGrabbedStrip(index) => {
+                self.mixer_drag = Some(index);
+                self.mixer_over = Some(index);
+            }
+            Message::MixerOverStrip(index) => {
+                if self.mixer_drag.is_some() {
+                    self.mixer_over = Some(index);
+                }
+            }
+            Message::MixerDroppedStrip => {
+                let (Some(from), Some(to)) = (self.mixer_drag.take(), self.mixer_over.take()) else {
+                    return Task::none();
+                };
+                if from == to {
+                    return Task::none();
+                }
+                let Some(track) = self.project.tracks.get(from).map(|t| t.id) else {
+                    return Task::none();
+                };
+                let parent = self.project.tracks.get(to).and_then(|t| t.parent);
+                self.edit(None, Command::MoveTrack { track, to, parent });
             }
             Message::MixerGrabbed => self.resizing_mixer = true,
             Message::MixerDragged(pointer_y) => {
@@ -1920,6 +1962,7 @@ impl App {
             Message::Discard => match self.overlay {
                 Overlay::ConfirmDiscard(Pending::Open) => return self.pick_project(),
                 Overlay::ConfirmDiscard(Pending::Home) => self.go_home(),
+                Overlay::ConfirmDiscard(Pending::Quit) => return self.shut_down(),
                 _ => {}
             },
             Message::GoHome => {
@@ -1934,8 +1977,19 @@ impl App {
                 self.replace_project(Project::new(self.project.rate), HashMap::new());
                 self.overlay = Overlay::None;
                 self.screen = Screen::Song;
+                return self.mixer_follows_the_song();
             }
             Message::NewFromTemplate(template) => return self.read_project(template, false, self.wants_safe_open()),
+            Message::AskDeleteTemplate(template) => self.overlay = Overlay::ConfirmDeleteTemplate(template),
+            Message::DeleteTemplate => {
+                if let Overlay::ConfirmDeleteTemplate(template) = self.overlay.clone() {
+                    match std::fs::remove_file(&template) {
+                        Ok(()) => self.templates = settings::templates(self.folder.as_deref()),
+                        Err(why) => self.problem = Some(format!("Could not delete that template: {why}")),
+                    }
+                }
+                self.overlay = Overlay::None;
+            }
             Message::OpenRecent(project) => return self.read_project(project, false, self.wants_safe_open()),
             Message::SaveAsTemplate => {
                 self.overlay = Overlay::TemplateName;
@@ -1960,6 +2014,7 @@ impl App {
                             self.dirty = true;
                             self.revision += 1;
                         }
+                        return self.mixer_follows_the_song();
                     }
                     Err(why) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -2400,6 +2455,9 @@ impl App {
         if !loupe_plugins::rack::is_built_in(&fx.path) {
             if let Some(mut racks) = self.borrow_racks() {
                 racks.follow(&self.project);
+                let seat = self.project.tracks.iter().position(|t| t.id == track).unwrap_or(0) as i64;
+                let on = self.project.tracks.iter().find(|t| t.id == track).map(|t| t.name.clone()).unwrap_or_default();
+                let _ = racks.on_track(track, slot, &on, seat);
                 let _ = racks.called(track, slot, &label);
                 if let Err(why) = racks.show(track, slot) {
                     self.problem = Some(why);
@@ -2827,6 +2885,7 @@ impl App {
             punch: self.punch,
             tool: self.tool,
             snap: self.snap,
+            hinting: self.hint,
             armed: &self.armed,
             recording_from: self.recording.as_ref().map(|recording| recording.from),
             taking_shape: &self.taking_shape,

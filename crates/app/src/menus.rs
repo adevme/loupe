@@ -29,6 +29,7 @@ impl App {
             },
             Overlay::Settings => self.centred(self.settings_sheet()),
             Overlay::ConfirmDiscard(_) => self.centred(self.discard_sheet()),
+            Overlay::ConfirmDeleteTemplate(which) => self.centred(self.delete_template_sheet(which)),
             Overlay::TemplateName => self.centred(self.template_sheet()),
             Overlay::SaveName => self.centred(self.save_sheet()),
             Overlay::Export => self.centred(self.export_sheet()),
@@ -419,15 +420,48 @@ impl App {
         .into()
     }
 
-    fn discard_sheet(&self) -> Element<'_, Message> {
+
+    fn delete_template_sheet(&self, which: &std::path::Path) -> Element<'_, Message> {
         let palette = self.palette;
+        let name = crate::home::stem(which);
         let choices = row![
             horizontal_space(),
             button(text("Cancel").size(13).font(palette.medium))
                 .padding([7, 14])
                 .style(move |_, status| palette.outlined(status))
                 .on_press(Message::CloseOverlay),
-            button(text("Discard").size(13).font(palette.medium).color(Color::WHITE))
+            button(text("Delete").size(13).font(palette.medium).color(Color::WHITE))
+                .padding([7, 14])
+                .style(move |_, status| palette.destructive(status))
+                .on_press(Message::DeleteTemplate),
+        ]
+        .spacing(10);
+        container(
+            column![
+                text(format!("Delete “{name}”?")).size(16).font(palette.semibold),
+                text("This removes the template file from your computer. It cannot be undone.")
+                    .size(13)
+                    .color(palette.text_dim),
+                choices,
+            ]
+            .spacing(14),
+        )
+        .padding(20)
+        .width(Length::Fill)
+        .max_width(460)
+        .style(move |_| palette.sheet())
+        .into()
+    }
+    fn discard_sheet(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        let quitting = matches!(self.overlay, Overlay::ConfirmDiscard(crate::Pending::Quit));
+        let choices = row![
+            horizontal_space(),
+            button(text("Cancel").size(13).font(palette.medium))
+                .padding([7, 14])
+                .style(move |_, status| palette.outlined(status))
+                .on_press(Message::CloseOverlay),
+            button(text(if quitting { "Quit anyway" } else { "Discard" }).size(13).font(palette.medium).color(Color::WHITE))
                 .padding([7, 14])
                 .style(move |_, status| palette.destructive(status))
                 .on_press(Message::Discard),
@@ -435,8 +469,8 @@ impl App {
         .spacing(10);
         container(
             column![
-                text("Discard changes?").size(16).font(palette.semibold),
-                text("This song has changes that are not saved. Carrying on discards them.")
+                text(if quitting { "Quit without saving?" } else { "Discard changes?" }).size(16).font(palette.semibold),
+                text(if quitting { "This song has changes that are not saved. Quitting loses them." } else { "This song has changes that are not saved. Carrying on discards them." })
                     .size(13)
                     .color(palette.text_dim),
                 choices,
