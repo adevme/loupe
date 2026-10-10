@@ -28,7 +28,6 @@ mod chains;
 mod chainwin;
 mod keying;
 mod recording;
-mod performance;
 mod resources;
 mod takes;
 mod selection;
@@ -187,7 +186,6 @@ pub enum Message {
     OpenFileMenu,
     OpenHelpMenu,
     OpenViewMenu,
-    OpenPerformance,
     OpenScriptsMenu,
     RunScript(PathBuf),
     OpenScriptsFolder,
@@ -438,7 +436,6 @@ pub enum Overlay {
     FileMenu,
     HelpMenu,
     ViewMenu,
-    Performance,
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
@@ -1334,11 +1331,6 @@ impl App {
             Message::OpenFileMenu => self.overlay = Overlay::FileMenu,
             Message::OpenHelpMenu => self.overlay = Overlay::HelpMenu,
             Message::OpenViewMenu => self.overlay = Overlay::ViewMenu,
-            Message::OpenPerformance => {
-                let hosts = self.plugin_hosts();
-                self.resources.look(&hosts);
-                self.overlay = Overlay::Performance;
-            }
             Message::OpenScriptsMenu => {
                 self.find_scripts();
                 self.overlay = Overlay::ScriptsMenu;

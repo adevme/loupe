@@ -50,14 +50,6 @@ impl Resources {
         self.cpu = (!first).then(|| cpu.clamp(0.0, 100.0));
     }
 
-    pub fn of(&self, pid: u32) -> Option<Usage> {
-        self.each.get(&pid).copied()
-    }
-
-    pub fn own(&self) -> Option<Usage> {
-        self.of(self.me?.as_u32())
-    }
-
     pub fn summary(&self) -> String {
         let cpu = self.cpu.map_or("CPU ...".to_string(), |cpu| format!("CPU {cpu:.0}%"));
         let memory = self.memory.map_or("RAM ...".to_string(), memory_text);

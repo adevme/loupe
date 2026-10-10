@@ -38,7 +38,6 @@ impl App {
                 self.item("About Loupe", "", Some(Message::OpenAbout)),
             ])),
             Overlay::ViewMenu => self.floating(self.under_the_bar(self.view_menu_left()), self.view_menu()),
-            Overlay::Performance => self.centred(self.performance_sheet()),
             Overlay::ScriptsMenu => self.floating(self.under_the_bar(SCRIPTS_MENU_LEFT), self.scripts_menu()),
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
@@ -104,7 +103,6 @@ impl App {
             }
             items.push(rule(self.palette));
         }
-        items.push(self.item("Performance", "Ctrl+Alt+P", Some(Message::OpenPerformance)));
         self.menu(items)
     }
 
