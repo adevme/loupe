@@ -17,6 +17,28 @@ pub struct Class {
     pub id: [u8; 16],
 }
 
+
+pub fn effects_in(bundle: &Path) -> Vec<(usize, String)> {
+    let Ok(library) = Library::open(bundle) else {
+        return fallback(bundle);
+    };
+    let classes = library.classes();
+    let effects: Vec<(usize, String)> = classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| class.category == "Audio Module Class")
+        .map(|(index, class)| (index, class.name.clone()))
+        .collect();
+    match effects.is_empty() {
+        true => fallback(bundle),
+        false => effects,
+    }
+}
+
+fn fallback(bundle: &Path) -> Vec<(usize, String)> {
+    let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    vec![(0, name)]
+}
 pub fn binary_in(bundle: &Path) -> PathBuf {
     if bundle.is_file() {
         return bundle.to_path_buf();

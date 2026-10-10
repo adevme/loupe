@@ -115,6 +115,12 @@ fn look(format: Format, root: &Path, at: &Path, found: &mut Vec<Found>, depth: u
                 .filter(|parent| *parent != root)
                 .and_then(|parent| parent.file_name())
                 .map(|name| name.to_string_lossy().into_owned());
+            if format == Format::Vst3 {
+                for one in crate::vst3::effects_in(&path) {
+                    found.push(Found { name: one.1, path: path.clone(), format, vendor: vendor.clone(), index: one.0 });
+                }
+                continue;
+            }
             if format == Format::Lv2 {
                 for (index, one) in crate::lv2::plugins_in(&path).into_iter().enumerate() {
                     found.push(Found { name: one.name, path: path.clone(), format, vendor: vendor.clone(), index });
