@@ -322,7 +322,7 @@ impl App {
             iced::widget::image(text_logo()).height(44),
             text(concat!("Version ", env!("CARGO_PKG_VERSION"))).size(12).font(palette.mono).color(palette.text_dim),
             rule(palette),
-            credit("Made by ash."),
+            credit("Made by ash. Tested by friends."),
             rule(palette),
             self.updates_block(),
         ]
