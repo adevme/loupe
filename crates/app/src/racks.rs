@@ -58,6 +58,7 @@ pub struct Racks {
     falls: Falls,
     said_held_back: usize,
     off_the_audio_thread: bool,
+    own_ceiling: Option<std::sync::Arc<loupe_plugins::ceiling::Ceiling>>,
     spent_in_plugins: AtomicU64,
     waves: AtomicU64,
     tracks_in_waves: AtomicU64,
@@ -78,6 +79,7 @@ impl Racks {
             falls,
             said_held_back: 0,
             off_the_audio_thread: false,
+            own_ceiling: None,
             spent_in_plugins: AtomicU64::new(0),
             waves: AtomicU64::new(0),
             tracks_in_waves: AtomicU64::new(0),
@@ -86,7 +88,15 @@ impl Racks {
 
     pub fn away_from_the_audio_thread(mut self) -> Self {
         self.off_the_audio_thread = true;
+        self.own_ceiling = Some(loupe_plugins::ceiling::Ceiling::of(loupe_plugins::ceiling::Ceiling::for_this_computer().most()));
         self
+    }
+
+    fn a_new_rack(&self) -> Rack {
+        match &self.own_ceiling {
+            Some(ceiling) => Rack::sharing(self.host.clone(), self.rate, self.block, ceiling.clone()),
+            None => Rack::new(self.host.clone(), self.rate, self.block),
+        }
     }
 
     fn held_back(&self) -> usize {
@@ -185,7 +195,8 @@ impl Racks {
                     record: fx.record,
                 })
                 .collect();
-            let rack = self.master.get_or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
+            let fresh = self.a_new_rack();
+            let rack = self.master.get_or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
         }
         self.chains.retain(|id, _| project.tracks.iter().any(|track| track.id == *id));
@@ -207,10 +218,11 @@ impl Racks {
                     record: fx.record,
                 })
                 .collect();
+            let fresh = self.a_new_rack();
             let rack = self
                 .chains
                 .entry(track.id)
-                .or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
+                .or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
         }
         let alive: Vec<ClipId> = project.tracks.iter().flat_map(|track| track.clips.iter().map(|clip| clip.id)).collect();
@@ -234,10 +246,8 @@ impl Racks {
                         record: false,
                     })
                     .collect();
-                let rack = self
-                    .clips
-                    .entry(clip.id)
-                    .or_insert_with(|| Rack::new(self.host.clone(), self.rate, self.block));
+                let fresh = self.a_new_rack();
+                let rack = self.clips.entry(clip.id).or_insert(fresh);
                 troubles.extend(rack.follow_region(region_of(project, clip)));
                 troubles.extend(rack.reconcile(&want));
             }
