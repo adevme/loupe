@@ -2048,7 +2048,7 @@ impl App {
                 self.screen = Screen::Song;
                 return self.mixer_follows_the_song();
             }
-            Message::NewFromTemplate(template) => return self.read_project(template, false, self.wants_safe_open()),
+            Message::NewFromTemplate(template) => return self.read_project(template, true, self.wants_safe_open()),
             Message::AskDeleteTemplate(template) => self.overlay = Overlay::ConfirmDeleteTemplate(template),
             Message::DeleteTemplate => {
                 if let Overlay::ConfirmDeleteTemplate(template) = self.overlay.clone() {
