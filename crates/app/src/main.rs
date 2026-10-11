@@ -2035,7 +2035,7 @@ impl App {
                         .and_then(|track| track.sends.iter().find(|send| send.to == to))
                         .map(|send| send.gain);
                     if let Some(gain) = gain {
-                        self.entry = routing::send_percent_text(gain);
+                        self.entry = mixer::level_text(gain);
                         self.editing_send = Some((from, to));
                         return Task::batch([
                             text_input::focus(routing::SEND_ENTRY_ID),

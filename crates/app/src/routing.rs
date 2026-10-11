@@ -8,20 +8,19 @@ use crate::theme;
 use crate::{rule, App, Message};
 
 pub const SEND_ENTRY_ID: &str = "send-entry";
-pub const LOUDEST_SEND: f32 = 125.0;
 
-pub fn send_percent_text(gain: f32) -> String {
-    format!("{:.0}%", gain * 100.0)
+pub fn loudest_send() -> f32 {
+    mixer::gain_from_db(mixer::LOUDEST_DB)
 }
 
 pub fn gain_from(typed: &str) -> Option<f32> {
-    let typed = typed.trim().to_lowercase();
-    if typed.ends_with("db") {
-        let db = mixer::db_from_typed(&typed)?;
-        return Some((mixer::gain_from_db(db) * 100.0).clamp(0.0, LOUDEST_SEND) / 100.0);
+    let typed = typed.trim();
+    if let Some(percent) = typed.strip_suffix('%') {
+        let percent = percent.trim().parse::<f32>().ok().filter(|percent| percent.is_finite())?;
+        return Some((percent / 100.0).clamp(0.0, loudest_send()));
     }
-    let number = typed.trim_end_matches('%').trim();
-    number.parse::<f32>().ok().filter(|percent| percent.is_finite()).map(|percent| percent.clamp(0.0, LOUDEST_SEND) / 100.0)
+    let db = mixer::db_from_typed(typed)?;
+    Some(mixer::gain_from_db(db.clamp(mixer::SILENT_DB, mixer::LOUDEST_DB)))
 }
 
 impl App {
@@ -39,7 +38,7 @@ impl App {
                 .style(move |_, status| palette.field(status))
                 .into()
         } else {
-            mouse_area(text(send_percent_text(gain)).size(11.5).font(palette.mono).color(palette.text_dim))
+            mouse_area(text(mixer::level_text(gain)).size(11.5).font(palette.mono).color(palette.text_dim))
                 .on_press(Message::SendLevelPressed { from, to })
                 .interaction(iced::mouse::Interaction::Text)
                 .into()
@@ -79,15 +78,20 @@ impl App {
                 continue;
             };
             let to = send.to;
-            let percent = send.gain * 100.0;
+            let db = mixer::db_from_gain(send.gain);
             rows = rows.push(
                 row![
                     text(target.name.clone()).size(13).width(SEND_NAME).wrapping(iced::widget::text::Wrapping::None),
                     self.send_level(from, to, send.gain),
-                    slider(0.0..=LOUDEST_SEND, percent, move |percent| Message::SendGain { from, to, gain: percent / 100.0 })
-                        .step(1.0)
-                        .width(120)
-                        .style(move |_, status| palette.slider(status)),
+                    slider(mixer::SILENT_DB..=mixer::LOUDEST_DB, db, move |db| Message::SendGain {
+                        from,
+                        to,
+                        gain: mixer::gain_from_db(db),
+                    })
+                    .step(0.1)
+                    .default(0.0)
+                    .width(120)
+                    .style(move |_, status| palette.slider(status)),
                     checkbox("Pre", send.pre_fader)
                         .size(14)
                         .text_size(12)
@@ -262,27 +266,62 @@ mod tests {
     use super::*;
     use loupe_engine::{Command, Outcome, Project};
 
-    #[test]
-    fn plain_numbers_and_percent_signs_both_read_as_percent() {
-        assert_eq!(gain_from("35"), Some(0.35));
-        assert_eq!(gain_from("35%"), Some(0.35));
-        assert_eq!(gain_from("  36 % "), Some(0.36));
-        assert_eq!(gain_from("0"), Some(0.0));
+    fn close(got: Option<f32>, want: f32) {
+        let got = got.expect("a level");
+        assert!((got - want).abs() < 1e-3, "got {got}, wanted {want}");
     }
 
     #[test]
-    fn a_db_suffix_reads_as_decibels() {
-        assert_eq!(gain_from("0db"), Some(1.0));
+    fn a_bare_number_reads_as_decibels() {
+        close(gain_from("0"), 1.0);
+        close(gain_from("-6"), 0.5012);
+        close(gain_from("-19.3"), 0.1086);
+        close(gain_from("+6"), 1.9953);
+        close(gain_from("  -12.0  "), 0.2512);
+    }
+
+    #[test]
+    fn a_db_suffix_reads_as_decibels_too() {
+        close(gain_from("0db"), 1.0);
+        close(gain_from("-6 dB"), 0.5012);
+        close(gain_from("-19.3 DB"), 0.1086);
+    }
+
+    #[test]
+    fn a_percent_sign_still_reads_as_percent() {
+        assert_eq!(gain_from("35%"), Some(0.35));
+        assert_eq!(gain_from("  36 % "), Some(0.36));
+        assert_eq!(gain_from("100%"), Some(1.0));
+        assert_eq!(gain_from("0%"), Some(0.0));
+    }
+
+    #[test]
+    fn the_bottom_of_the_range_is_silence() {
+        assert_eq!(gain_from("-inf"), Some(0.0));
         assert_eq!(gain_from("-inf dB"), Some(0.0));
-        let six = gain_from("-6 dB").unwrap();
-        assert!((six - 0.5012).abs() < 1e-3, "got {six}");
+        assert_eq!(gain_from("-60"), Some(0.0));
+        assert_eq!(gain_from("-90 dB"), Some(0.0));
+    }
+
+    #[test]
+    fn gain_and_db_make_the_round_trip() {
+        for gain in [1.0f32, 0.5012, 0.1086, 1.9953, 0.01] {
+            close(Some(mixer::gain_from_db(mixer::db_from_gain(gain))), gain);
+        }
+        assert_eq!(mixer::db_from_gain(0.0), mixer::SILENT_DB);
+        assert_eq!(mixer::gain_from_db(mixer::db_from_gain(0.0)), 0.0);
+        assert_eq!(mixer::level_text(0.0), "-inf");
+        assert_eq!(mixer::level_text(1.0), "+0.0");
+        assert_eq!(mixer::level_text(0.5012), "-6.0");
+        assert_eq!(mixer::level_text(0.1086), "-19.3");
     }
 
     #[test]
     fn values_past_the_ends_come_back_clamped() {
-        assert_eq!(gain_from("400"), Some(1.25));
-        assert_eq!(gain_from("-20"), Some(0.0));
-        assert_eq!(gain_from("24 dB"), Some(1.25));
+        close(gain_from("24 dB"), loudest_send());
+        close(gain_from("400%"), loudest_send());
+        assert_eq!(gain_from("-20%"), Some(0.0));
+        assert_eq!(gain_from("-400 dB"), Some(0.0));
     }
 
     #[test]
@@ -304,8 +343,15 @@ mod tests {
         let from = project.tracks[0].id;
         let to = project.tracks[1].id;
         project.apply(Command::AddSend { from, to }).unwrap();
-        let gain = gain_from("35%").unwrap();
+        let gain = gain_from("-6.0").unwrap();
         assert_eq!(project.apply(Command::SetSendGain { from, to, gain }).unwrap(), Outcome::Done);
-        assert_eq!(project.tracks[0].sends[0].gain, 0.35);
+        close(Some(project.tracks[0].sends[0].gain), 0.5012);
+        let gain = gain_from("0.0").unwrap();
+        project.apply(Command::SetSendGain { from, to, gain }).unwrap();
+        assert_eq!(project.tracks[0].sends[0].gain, 1.0);
+        let gain = gain_from("-inf").unwrap();
+        project.apply(Command::SetSendGain { from, to, gain }).unwrap();
+        assert_eq!(project.tracks[0].sends[0].gain, 0.0);
+        assert_eq!(mixer::level_text(project.tracks[0].sends[0].gain), "-inf");
     }
 }
