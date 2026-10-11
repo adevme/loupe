@@ -259,6 +259,9 @@ impl Timeline<'_> {
         )
     }
 
+    fn tool_at(&self, p: Point) -> Option<&'static str> {
+        Tool::ALL.into_iter().enumerate().find(|(i, _)| self.tool_button(*i).contains(p)).map(|(_, tool)| tool.words())
+    }
 
     fn draw_taking_shape(&self, overlay: &mut Frame, left: f32, right: f32, top: f32, bottom: f32, from: Frames) {
         if self.taking_shape.is_empty() {
@@ -330,6 +333,17 @@ impl Timeline<'_> {
     fn hidden(&self, track: &Track) -> bool {
         out_of_sight(self.project, track)
     }
+}
+
+fn ours(words: &'static str) -> bool {
+    Tool::ALL.into_iter().any(|tool| tool.words() == words)
+}
+
+fn hint_now(hinting: Option<&'static str>, over: Option<&'static str>, inside: bool) -> Option<Option<&'static str>> {
+    if !inside {
+        return hinting.is_some_and(ours).then_some(None);
+    }
+    (over != hinting).then_some(over)
 }
 
 fn out_of_sight(project: &Project, track: &Track) -> bool {
@@ -1024,13 +1038,12 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let (Some(p), Some(drag)) = (anywhere, state.drag.as_mut()) else {
-                    if let Some(p) = anywhere {
-                        let over = Tool::ALL.into_iter().enumerate().find(|(i, _)| self.tool_button(*i).contains(p)).map(|(_, tool)| tool.words());
-                        if over != self.hinting {
-                            return (Ignored, Some(Message::Hint(over)));
-                        }
+                    let inside = cursor.is_over(bounds);
+                    let over = anywhere.filter(|_| inside).and_then(|p| self.tool_at(p));
+                    if let Some(words) = hint_now(self.hinting, over, inside) {
+                        return (Ignored, Some(Message::Hint(words)));
                     }
-                    let aiming = self.tool == Tool::Razor && cursor.is_over(bounds);
+                    let aiming = self.tool == Tool::Razor && inside;
                     return (Ignored, aiming.then_some(Message::Refresh));
                 };
                 match drag {
@@ -1208,6 +1221,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     }
                 }
             }
+            canvas::Event::Mouse(mouse::Event::CursorLeft) => (Ignored, hint_now(self.hinting, None, false).map(Message::Hint)),
             canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => match state.drag.take() {
                 Some(Drag::Reorder { track, at: Some(to), .. }) => {
                     (Captured, Some(Message::MoveTrack { track, to, parent: self.folder_at(to, track) }))
@@ -2332,6 +2346,34 @@ mod hiding {
 
         assert!(!out_of_sight(&project, &track_called(&project, "Vox Chain")));
         assert!(out_of_sight(&project, &track_called(&project, "Vox 1")));
+    }
+}
+
+#[cfg(test)]
+mod hints {
+    use super::*;
+
+    const MIXER_HINT: &str = "Show or hide the mixer";
+
+    #[test]
+    fn a_hint_from_elsewhere_survives_the_pointer_moving_outside_the_arrangement() {
+        let resting = Some(MIXER_HINT);
+        assert_eq!(hint_now(resting, None, false), None, "the first move after the hint appeared must leave it alone");
+        assert_eq!(hint_now(resting, None, false), None, "and every move after that");
+    }
+
+    #[test]
+    fn a_tool_hint_stays_while_the_pointer_rests_on_the_button() {
+        let razor = Some(Tool::Razor.words());
+        assert_eq!(hint_now(None, razor, true), Some(razor), "moving onto the button shows it");
+        assert_eq!(hint_now(razor, razor, true), None, "resting on it says nothing new");
+    }
+
+    #[test]
+    fn a_tool_hint_goes_when_the_pointer_leaves_the_button_or_the_window() {
+        let razor = Some(Tool::Razor.words());
+        assert_eq!(hint_now(razor, None, true), Some(None), "sliding off the button inside the arrangement");
+        assert_eq!(hint_now(razor, None, false), Some(None), "leaving the arrangement altogether");
     }
 }
 
