@@ -206,6 +206,7 @@ impl App {
             racks.follow(&project);
             let waited = std::time::Instant::now();
             while racks.still_opening() && waited.elapsed() < OPENS_WITHIN {
+                racks.nudge();
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             let went = loupe_engine::export_through(&project, &plan, &report, Some(racks.as_mut()));
