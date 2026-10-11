@@ -5,6 +5,7 @@ use iced::widget::{button, column, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length};
 use loupe_engine::{chain_from, chain_text, Command, Fx, Outcome};
 
+use crate::stockwin::Spot;
 use crate::{settings, App, Message, Overlay};
 
 const EXTENSION: &str = "chain";
@@ -39,6 +40,12 @@ impl App {
             }
             Overlay::ClipPlugins(clip) => Some(self.project.clip(*clip)?.fx.clone()),
             Overlay::MasterPlugins => Some(self.project.master_fx.clone()),
+            Overlay::Chain(Spot::Track(track)) => {
+                let record = self.rec_shown.contains(track);
+                Some(self.project.track(*track)?.fx.iter().filter(|fx| fx.record == record).cloned().collect())
+            }
+            Overlay::Chain(Spot::Clip(clip)) => Some(self.project.clip(*clip)?.fx.clone()),
+            Overlay::Chain(Spot::Master) => Some(self.project.master_fx.clone()),
             _ => None,
         }
     }
@@ -78,23 +85,25 @@ impl App {
         };
         let overlay = std::mem::replace(&mut self.overlay, Overlay::None);
         let record = match &overlay {
-            Overlay::Plugins(track) => self.rec_shown.contains(track),
+            Overlay::Plugins(track) | Overlay::Chain(Spot::Track(track)) => self.rec_shown.contains(track),
             _ => false,
         };
         self.transact(None, |project| {
             for fx in chain {
                 let fx = Fx { record, ..fx };
                 match &overlay {
-                    Overlay::Plugins(track) => project.apply(Command::AddFx { track: *track, fx })?,
-                    Overlay::ClipPlugins(clip) => project.apply(Command::AddClipFx { clip: *clip, fx })?,
-                    Overlay::MasterPlugins => project.apply(Command::AddMasterFx(fx))?,
+                    Overlay::Plugins(track) | Overlay::Chain(Spot::Track(track)) => project.apply(Command::AddFx { track: *track, fx })?,
+                    Overlay::ClipPlugins(clip) | Overlay::Chain(Spot::Clip(clip)) => project.apply(Command::AddClipFx { clip: *clip, fx })?,
+                    Overlay::MasterPlugins | Overlay::Chain(Spot::Master) => project.apply(Command::AddMasterFx(fx))?,
                     _ => return Ok(Outcome::Done),
                 };
             }
             Ok(Outcome::Done)
         });
-        if let Overlay::ClipPlugins(clip) = overlay {
-            self.overlay = Overlay::Clip(clip);
+        match overlay {
+            Overlay::ClipPlugins(clip) => self.overlay = Overlay::Clip(clip),
+            Overlay::Chain(spot) => self.overlay = Overlay::Chain(spot),
+            _ => {}
         }
     }
 

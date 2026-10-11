@@ -71,6 +71,9 @@ impl App {
             body = body.push(self.chain_tabs(track, recording));
         }
         body = body.push(listed).push(row![add, Space::with_width(Length::Fill)].align_y(Alignment::Center));
+        if let Some(chains) = self.chain_block() {
+            body = body.push(chains);
+        }
         self.window(format!("FX — {}", self.chain_name(spot)), body.into(), WINDOW_WIDTH)
     }
 
@@ -96,9 +99,17 @@ impl App {
         let on = !fx.bypassed;
         let held = self.chain_drag == Some((spot, slot));
         let over = self.chain_over == Some((spot, slot));
+        let lit = if on { palette.meter_low } else { palette.danger };
         let dot = button(Space::new(DOT, DOT))
             .padding(0)
-            .style(move |_, status| palette.toggled(on, status))
+            .style(move |_, status| iced::widget::button::Style {
+                background: Some(iced::Background::Color(match status {
+                    iced::widget::button::Status::Hovered => crate::theme::alpha(lit, 0.75),
+                    _ => lit,
+                })),
+                border: iced::Border::default().rounded(DOT / 2.0),
+                ..Default::default()
+            })
             .on_press(self.bypass_of(spot, slot));
         let name = text(fx.name.clone())
             .size(13)
@@ -107,6 +118,7 @@ impl App {
             .wrapping(iced::widget::text::Wrapping::None);
         let open = mouse_area(container(name).width(Length::Fill).padding([2, 4]))
             .on_press(self.open_of(spot, slot))
+            .on_right_press(Message::StartRenameFx(spot, slot))
             .interaction(iced::mouse::Interaction::Pointer);
         let grip = mouse_area(container(icon("layers-2", 12.0).color(palette.text_faint)).padding([2, 4]))
             .on_press(Message::ChainGrab(spot, slot))

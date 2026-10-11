@@ -316,6 +316,9 @@ pub enum Command {
     BypassFx { track: TrackId, slot: usize, bypassed: bool },
     SetFxMix { track: TrackId, slot: usize, mix: f32 },
     SetFxState { track: TrackId, slot: usize, state: Vec<u8> },
+    RenameFx { track: TrackId, slot: usize, name: String },
+    RenameClipFx { clip: ClipId, slot: usize, name: String },
+    RenameMasterFx { slot: usize, name: String },
     AddMasterFx(Fx),
     RemoveMasterFx(usize),
     MoveMasterFx { slot: usize, to: usize },
@@ -968,6 +971,23 @@ impl Project {
                 fx.state = state;
                 Ok(Outcome::Done)
             }
+            Command::RenameFx { track, slot, name } => {
+                let t = self.track_index(track)?;
+                let fx = self.tracks[t].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.name = named(name)?;
+                Ok(Outcome::Done)
+            }
+            Command::RenameClipFx { clip, slot, name } => {
+                let (t, i) = self.locate(clip)?;
+                let fx = self.tracks[t].clips[i].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.name = named(name)?;
+                Ok(Outcome::Done)
+            }
+            Command::RenameMasterFx { slot, name } => {
+                let fx = self.master_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.name = named(name)?;
+                Ok(Outcome::Done)
+            }
             Command::AddMasterFx(fx) => {
                 self.master_fx.push(fx);
                 Ok(Outcome::Done)
@@ -1294,6 +1314,14 @@ mod tests {
         assert!(p.apply(Command::SetBpm(0.0)).is_err());
         assert!(p.apply(Command::DeleteClip(ClipId(999))).is_err());
     }
+}
+
+fn named(name: String) -> Result<String, CommandError> {
+    let tidy: String = name.trim().chars().filter(|letter| !letter.is_control()).collect();
+    if tidy.is_empty() || tidy.chars().count() > 64 {
+        return Err(CommandError::InvalidValue);
+    }
+    Ok(tidy)
 }
 
 fn valid_mix(mix: f32) -> Result<f32, CommandError> {
