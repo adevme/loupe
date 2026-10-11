@@ -10,6 +10,8 @@ use loupe_engine::{next_version_folder, ExportPlan, Format, Normalise, SavedProj
 use crate::theme;
 use crate::{App, Message, Overlay};
 
+const OPENS_WITHIN: std::time::Duration = std::time::Duration::from_secs(90);
+
 const EXPORTS_FOLDER: &str = "Exports";
 const NORMALISE_CHOICES: [Normalise; 9] = [
     Normalise::Off,
@@ -202,6 +204,10 @@ impl App {
             let mut racks: Box<dyn loupe_engine::Chains> =
                 Box::new(crate::racks::Racks::new(rate, 512, crate::racks::Peeks::default(), plugins_off, crate::racks::Falls::default()).away_from_the_audio_thread());
             racks.follow(&project);
+            let waited = std::time::Instant::now();
+            while racks.still_opening() && waited.elapsed() < OPENS_WITHIN {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             let went = loupe_engine::export_through(&project, &plan, &report, Some(racks.as_mut()));
             drop(racks);
             let _ = done.send(went.map(|note| (folder, note)));
