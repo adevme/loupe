@@ -723,6 +723,7 @@ impl Rack {
                 }
             }
         }
+        crate::sandbox::see_them_out(hosts_in(&mut pool));
         self.start_what_there_is_room_to_start();
         troubles
     }
@@ -1505,18 +1506,124 @@ mod growing_tests {
     }
 }
 
-impl Rack {
-    pub fn say_bye(&mut self) {
-        for slot in &mut self.slots {
-            if let Some(host) = slot.host.as_mut() {
-                host.say_bye();
-            }
-        }
-    }
+fn hosts_in(slots: &mut [Slot]) -> Vec<&mut Sandbox> {
+    slots.iter_mut().filter_map(|slot| slot.host.as_mut()).collect()
+}
+
+pub fn let_them_go(mut going: Vec<Rack>) {
+    crate::sandbox::see_them_out(going.iter_mut().flat_map(|rack| hosts_in(&mut rack.slots)).collect());
 }
 
 impl Drop for Rack {
     fn drop(&mut self) {
-        self.say_bye();
+        crate::sandbox::see_them_out(hosts_in(&mut self.slots));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod closing_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    struct Fake(PathBuf);
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            if let Some(folder) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+
+    fn fake_host(name: &str, on_quit: &str) -> Fake {
+        let folder = std::env::temp_dir().join(format!("loupe-closing-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("loupe-host");
+        let script =
+            format!("#!/bin/sh\nread ask\nprintf 'loaded\\t0\\t0\\t0\\n'\nwhile read ask ; do\n  case \"$ask\" in\n    quit) {on_quit} ;;\n  esac\ndone\n");
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Fake(file)
+    }
+
+    fn asked_for(name: &str) -> Wanted {
+        Wanted { path: PathBuf::from("thing.vst3"), index: 0, name: name.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }
+    }
+
+    fn still_about(pid: u32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    fn running(host: &Path, racks: usize, each: usize) -> Vec<Rack> {
+        let mut out = Vec::new();
+        for which in 0..racks {
+            let mut rack = Rack::with_room_for(host.to_path_buf(), 48_000, 64, each + 1);
+            let want: Vec<Wanted> = (0..each).map(|slot| asked_for(&format!("Plug {which}-{slot}"))).collect();
+            assert!(rack.reconcile(&want).is_empty());
+            out.push(rack);
+        }
+        let gave_up = Instant::now();
+        while out.iter().any(|rack| rack.slots().iter().any(|slot| slot.on_its_way())) {
+            assert!(gave_up.elapsed() < Duration::from_secs(60), "the fake hosts never started");
+            for rack in out.iter_mut() {
+                rack.ready();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(out.iter().flat_map(|rack| rack.slots()).filter(|slot| slot.working()).count(), racks * each);
+        out
+    }
+
+    fn pids(racks: &[Rack]) -> Vec<u32> {
+        racks.iter().flat_map(|rack| (0..rack.len()).filter_map(|slot| rack.host_pid(slot))).collect()
+    }
+
+    fn nobody_left(hosts: &[u32]) {
+        let gave_up = Instant::now();
+        while let Some(pid) = hosts.iter().copied().find(|pid| still_about(*pid)) {
+            assert!(gave_up.elapsed() < Duration::from_secs(5), "host {pid} was left behind");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn many_racks_close_in_the_time_one_of_them_takes() {
+        let fake = fake_host("slow", "sleep 0.3 ; exit 0");
+        let racks = running(&fake.0, 12, 3);
+        let hosts = pids(&racks);
+        assert_eq!(hosts.len(), 36);
+        let began = Instant::now();
+        let_them_go(racks);
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(1_200), "closing 36 hosts took {took:?}, as if one at a time");
+        nobody_left(&hosts);
+    }
+
+    #[test]
+    fn hosts_that_ignore_goodbye_are_all_killed_at_one_deadline() {
+        let fake = fake_host("stubborn", ":");
+        let racks = running(&fake.0, 10, 2);
+        let hosts = pids(&racks);
+        assert_eq!(hosts.len(), 20);
+        let began = Instant::now();
+        let_them_go(racks);
+        let took = began.elapsed();
+        assert!(took >= crate::sandbox::GOODBYE_PATIENCE, "the hosts were given no time to quit on their own");
+        assert!(took < Duration::from_millis(2_000), "closing 20 stubborn hosts took {took:?}, as if one at a time");
+        nobody_left(&hosts);
+    }
+
+    #[test]
+    fn a_rack_dropped_on_its_own_leaves_nobody_behind() {
+        let fake = fake_host("alone", ":");
+        let mut racks = running(&fake.0, 1, 3);
+        let hosts = pids(&racks);
+        assert_eq!(hosts.len(), 3);
+        let began = Instant::now();
+        drop(racks.pop());
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(1_200), "dropping one rack of stubborn hosts took {took:?}");
+        nobody_left(&hosts);
     }
 }

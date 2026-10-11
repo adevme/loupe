@@ -13,6 +13,8 @@ const BLOCK_PATIENCE: Duration = Duration::from_millis(2_000);
 const CATCHING_UP: Duration = Duration::from_millis(1);
 const LATE_BLOCKS_ALLOWED: u16 = 200;
 const FIRST_BLOCK_PATIENCE: Duration = Duration::from_secs(10);
+pub const GOODBYE_PATIENCE: Duration = Duration::from_millis(500);
+pub const BETWEEN_GOODBYE_LOOKS: Duration = Duration::from_millis(5);
 
 enum Want {
     Line,
@@ -269,6 +271,32 @@ impl Sandbox {
         let _ = Ask::Quit.write(&mut self.writing);
         self.said_bye = true;
     }
+
+    pub fn has_gone(&mut self) -> bool {
+        self.lost || matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+
+    pub fn make_it_go(&mut self) {
+        if !self.has_gone() {
+            let _ = self.give_up("the plugin host would not quit when it was asked");
+        }
+    }
+}
+
+pub fn see_them_out(mut hosts: Vec<&mut Sandbox>) {
+    for host in hosts.iter_mut() {
+        host.say_bye();
+    }
+    let since = Instant::now();
+    while !hosts.iter_mut().all(|host| host.has_gone()) {
+        if since.elapsed() >= GOODBYE_PATIENCE {
+            break;
+        }
+        std::thread::sleep(BETWEEN_GOODBYE_LOOKS);
+    }
+    for host in hosts.iter_mut() {
+        host.make_it_go();
+    }
 }
 
 impl Drop for Sandbox {
@@ -276,16 +304,12 @@ impl Drop for Sandbox {
         if !self.lost {
             self.say_bye();
             let since = Instant::now();
-            loop {
-                if matches!(self.child.try_wait(), Ok(Some(_))) {
+            while !self.has_gone() {
+                if since.elapsed() >= GOODBYE_PATIENCE {
+                    self.make_it_go();
                     break;
                 }
-                if since.elapsed() >= Duration::from_millis(500) {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(BETWEEN_GOODBYE_LOOKS);
             }
         }
         self.wants.take();
