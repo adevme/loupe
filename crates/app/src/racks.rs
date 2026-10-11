@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use loupe_engine::{Chains, Clip, ClipId, PluginSpending, Project, TrackId};
-use loupe_plugins::rack::{Fallen, Rack, Wanted};
+use loupe_plugins::rack::{let_them_go, Fallen, Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_plugins::wire::Region;
 use loupe_stock::{Findings, History, Readings, Scopes, Spectra};
@@ -43,6 +43,26 @@ pub type Falls = Arc<Mutex<Vec<Fell>>>;
 fn tell_falls(falls: &Falls, fallen: Vec<Fallen>, spot: impl Fn(usize) -> Spot) {
     let Ok(mut held) = falls.lock() else { return };
     held.extend(fallen.into_iter().map(|fell| Fell { spot: spot(fell.slot), name: fell.name, why: fell.why }));
+}
+
+fn all_at_once<Of: Copy + Send>(racks: Vec<(Of, &mut Rack)>) -> Vec<(Of, usize, Vec<u8>)> {
+    std::thread::scope(|scope| {
+        let asking: Vec<_> = racks
+            .into_iter()
+            .map(|(of, rack)| {
+                scope.spawn(move || {
+                    let mut found = Vec::new();
+                    for slot in 0..rack.len() {
+                        if let Some(state) = rack.save(slot) {
+                            found.push((of, slot, state));
+                        }
+                    }
+                    found
+                })
+            })
+            .collect();
+        asking.into_iter().flat_map(|one| one.join().unwrap_or_default()).collect()
+    })
 }
 
 pub struct Racks {
@@ -169,19 +189,45 @@ impl Racks {
         ))
     }
 
-    fn settle(&mut self, project: &Project) -> Vec<String> {
+    fn everything_leaving(&mut self) -> Vec<Rack> {
+        let mut going: Vec<Rack> = self.chains.drain().map(|(_, rack)| rack).collect();
+        going.extend(self.clips.drain().map(|(_, rack)| rack));
+        going.extend(self.master.take());
+        going
+    }
+
+    fn who_is_leaving(&mut self, project: &Project) -> Vec<Rack> {
         if self.off.load(Ordering::Relaxed) {
-            self.chains.clear();
-            self.clips.clear();
-            self.master = None;
+            return self.everything_leaving();
+        }
+        let mut going = Vec::new();
+        if project.master_fx.is_empty() {
+            going.extend(self.master.take());
+        }
+        let staying: Vec<TrackId> = project.tracks.iter().filter(|track| !track.fx.is_empty()).map(|track| track.id).collect();
+        let tracks: Vec<TrackId> = self.chains.keys().copied().filter(|id| !staying.contains(id)).collect();
+        for track in tracks {
+            going.extend(self.chains.remove(&track));
+        }
+        let kept: Vec<ClipId> =
+            project.tracks.iter().flat_map(|track| track.clips.iter()).filter(|clip| !clip.fx.is_empty()).map(|clip| clip.id).collect();
+        let clips: Vec<ClipId> = self.clips.keys().copied().filter(|id| !kept.contains(id)).collect();
+        for clip in clips {
+            going.extend(self.clips.remove(&clip));
+        }
+        going
+    }
+
+    fn settle(&mut self, project: &Project) -> Vec<String> {
+        let going = self.who_is_leaving(project);
+        let_them_go(going);
+        if self.off.load(Ordering::Relaxed) {
             self.said_held_back = 0;
             self.publish();
             return Vec::new();
         }
         let mut troubles = Vec::new();
-        if project.master_fx.is_empty() {
-            self.master = None;
-        } else {
+        if !project.master_fx.is_empty() {
             let want: Vec<_> = project
                 .master_fx
                 .iter()
@@ -199,10 +245,8 @@ impl Racks {
             let rack = self.master.get_or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
         }
-        self.chains.retain(|id, _| project.tracks.iter().any(|track| track.id == *id));
         for track in &project.tracks {
             if track.fx.is_empty() {
-                self.chains.remove(&track.id);
                 continue;
             }
             let want: Vec<_> = track
@@ -225,12 +269,9 @@ impl Racks {
                 .or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
         }
-        let alive: Vec<ClipId> = project.tracks.iter().flat_map(|track| track.clips.iter().map(|clip| clip.id)).collect();
-        self.clips.retain(|id, _| alive.contains(id));
         for track in &project.tracks {
             for clip in &track.clips {
                 if clip.fx.is_empty() {
-                    self.clips.remove(&clip.id);
                     continue;
                 }
                 let want: Vec<_> = clip
@@ -519,15 +560,7 @@ impl Chains for Racks {
     }
 
     fn harvest_clips(&mut self) -> Vec<(ClipId, usize, Vec<u8>)> {
-        let mut out = Vec::new();
-        for (id, rack) in self.clips.iter_mut() {
-            for slot in 0..rack.len() {
-                if let Some(state) = rack.save(slot) {
-                    out.push((*id, slot, state));
-                }
-            }
-        }
-        out
+        all_at_once(self.clips.iter_mut().map(|(id, rack)| (*id, rack)).collect())
     }
 
     fn harvest_master(&mut self) -> Vec<(usize, Vec<u8>)> {
@@ -543,15 +576,7 @@ impl Chains for Racks {
     }
 
     fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
-        let mut out = Vec::new();
-        for (id, rack) in self.chains.iter_mut() {
-            for slot in 0..rack.len() {
-                if let Some(state) = rack.save(slot) {
-                    out.push((*id, slot, state));
-                }
-            }
-        }
-        out
+        all_at_once(self.chains.iter_mut().map(|(id, rack)| (*id, rack)).collect())
     }
 
     fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
@@ -879,8 +904,7 @@ mod tests {
 
 impl Drop for Racks {
     fn drop(&mut self) {
-        for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()) {
-            rack.say_bye();
-        }
+        let going = self.everything_leaving();
+        let_them_go(going);
     }
 }
