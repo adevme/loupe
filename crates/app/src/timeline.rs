@@ -327,27 +327,33 @@ impl Timeline<'_> {
     }
 
     fn hidden(&self, track: &Track) -> bool {
-        if track.hidden {
+        out_of_sight(self.project, track)
+    }
+}
+
+fn out_of_sight(project: &Project, track: &Track) -> bool {
+    if track.hidden {
+        return true;
+    }
+    let mut at = track.parent;
+    let mut steps = 0;
+    while let Some(id) = at {
+        let Some(parent) = project.tracks.iter().find(|t| t.id == id) else {
+            return false;
+        };
+        if parent.collapsed {
             return true;
         }
-        let mut at = track.parent;
-        let mut steps = 0;
-        while let Some(id) = at {
-            let Some(parent) = self.project.tracks.iter().find(|t| t.id == id) else {
-                return false;
-            };
-            if parent.collapsed || parent.hidden {
-                return true;
-            }
-            steps += 1;
-            if steps > self.project.tracks.len() {
-                return false;
-            }
-            at = parent.parent;
+        steps += 1;
+        if steps > project.tracks.len() {
+            return false;
         }
-        false
+        at = parent.parent;
     }
+    false
+}
 
+impl Timeline<'_> {
     fn track_top(&self, index: usize) -> f32 {
         let above: f32 = self.project.tracks[..index].iter().map(|t| self.height_of(t)).sum();
         self.lanes_top() + above - self.view.scroll_y
@@ -2291,4 +2297,41 @@ fn sheen_fill(p: &Palette, top: f32, height: f32) -> canvas::Fill {
         .add_stop(0.6, theme::alpha(Color::WHITE, 0.0))
         .add_stop(1.0, theme::alpha(Color::WHITE, 0.0))
         .into()
+}
+
+#[cfg(test)]
+mod hiding {
+    use super::*;
+    use loupe_engine::{Command, Outcome};
+
+    fn track_called(project: &Project, name: &str) -> Track {
+        project.tracks.iter().find(|track| track.name == name).cloned().expect("no such track")
+    }
+
+    #[test]
+    fn hiding_a_parent_leaves_its_children_in_the_arrangement() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(chain_b)) = project.apply(Command::AddTrack { name: "Vox Chain B".into() }) else { panic!() };
+        let Ok(Outcome::Track(chain)) = project.apply(Command::AddTrack { name: "Vox Chain".into() }) else { panic!() };
+        let Ok(Outcome::Track(vox)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        project.apply(Command::SetTrackParent { track: chain, parent: Some(chain_b) }).unwrap();
+        project.apply(Command::SetTrackParent { track: vox, parent: Some(chain) }).unwrap();
+        project.apply(Command::SetTrackHidden { track: chain_b, hidden: true }).unwrap();
+
+        assert!(out_of_sight(&project, &track_called(&project, "Vox Chain B")), "the hidden track itself goes");
+        assert!(!out_of_sight(&project, &track_called(&project, "Vox Chain")), "its child stays");
+        assert!(!out_of_sight(&project, &track_called(&project, "Vox 1")), "its grandchild stays");
+    }
+
+    #[test]
+    fn collapsing_a_folder_still_tucks_its_children_away() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(folder)) = project.apply(Command::AddTrack { name: "Vox Chain".into() }) else { panic!() };
+        let Ok(Outcome::Track(vox)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        project.apply(Command::SetTrackParent { track: vox, parent: Some(folder) }).unwrap();
+        project.apply(Command::ToggleCollapsed(folder)).unwrap();
+
+        assert!(!out_of_sight(&project, &track_called(&project, "Vox Chain")));
+        assert!(out_of_sight(&project, &track_called(&project, "Vox 1")));
+    }
 }

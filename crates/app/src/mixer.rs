@@ -13,7 +13,7 @@ const SHORTEST_MIXER_WINDOW: f32 = 420.0;
 const GRAB_BAR: f32 = 6.0;
 const MENU_INSET: f32 = 12.0;
 const STRIP_MARGIN: f32 = 24.0;
-const STRIP_WIDTH: f32 = 120.0;
+const STRIP_WIDTH: f32 = 134.0;
 const NAME_LENGTH: usize = 11;
 const PAN_PER_PX: f32 = 1.0;
 pub const SILENT_DB: f32 = -60.0;
@@ -171,7 +171,7 @@ impl App {
                     background: Some(palette.accent.into()),
                     ..Default::default()
                 }),
-                strip_title(palette, "", "Master".to_string(), None),
+                strip_title(palette, "", "Master".to_string(), None, None),
                 self.fx_button(crate::stockwin::Spot::Master),
                 hrow![
                     mouse_area(
@@ -252,6 +252,18 @@ impl App {
         container(self.mixer_strips()).width(Length::Fill).height(Length::Fill).into()
     }
 
+    fn landing_mark(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        container(Space::new(4, Length::Fill))
+            .height(self.strip_tall())
+            .style(move |_| container::Style {
+                background: Some(palette.accent.into()),
+                border: iced::Border::default().rounded(2),
+                ..Default::default()
+            })
+            .into()
+    }
+
     fn mixer_strips(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let strips = self.project.tracks.iter().enumerate().map(|(index, track)| {
@@ -262,6 +274,7 @@ impl App {
                 .envelope(loupe_engine::Target::TrackGain(id))
                 .and_then(|shape| shape.value_at(self.playhead))
                 .unwrap_or(track.gain);
+            let lifted = self.mixer_drag == Some(index);
             let db = db_from_gain(shown);
             let colour = match track.colour {
                 Some([r, g, b]) => Color::from_rgb8(r, g, b),
@@ -280,7 +293,7 @@ impl App {
                         background: Some(colour.into()),
                         ..Default::default()
                     }),
-                    strip_title(palette, &format!("{:02}", index + 1), name, track.hidden.then_some(id)),
+                    strip_title(palette, &format!("{:02}", index + 1), name, track.hidden.then_some(id), Some(id)),
                     self.fx_button(crate::stockwin::Spot::Track(id)),
                     self.pan_knob(id, track.pan),
                     hrow![
@@ -328,14 +341,35 @@ impl App {
             .padding(7)
             .width(STRIP_WIDTH)
             .height(self.strip_tall())
-            .style(move |_| palette.channel());
-            mouse_area(strip)
+            .style(move |_| {
+                let mut look = palette.channel();
+                if lifted {
+                    look.border = look.border.color(palette.accent).width(2.0);
+                }
+                look
+            });
+            let wrapped: Element<'_, Message> = mouse_area(strip)
                 .on_press(Message::MixerGrabbedStrip(index))
                 .on_enter(Message::MixerOverStrip(index))
                 .on_release(Message::MixerDroppedStrip)
-                .into()
+                .into();
+            wrapped
         });
-        let row = iced::widget::row(strips).spacing(10);
+        let row: Element<'_, Message> = {
+            let dragging = self.mixer_drag;
+            let landing = self.mixer_over;
+            let mut laid = iced::widget::row![].spacing(10);
+            for (index, strip) in strips.enumerate() {
+                if dragging.is_some() && landing == Some(index) {
+                    laid = laid.push(self.landing_mark());
+                }
+                laid = laid.push(strip);
+            }
+            if dragging.is_some() && landing == Some(self.project.tracks.len()) {
+                laid = laid.push(self.landing_mark());
+            }
+            laid.into()
+        };
         let faders: Element<'_, Message> = if self.project.tracks.is_empty() {
             container(text("Each track gets a fader here.").size(12.5).color(palette.text_dim))
                 .center_x(Length::Fill)
@@ -366,7 +400,7 @@ impl App {
     }
 }
 
-fn strip_title(palette: crate::theme::Palette, number: &str, name: String, hidden: Option<TrackId>) -> Element<'static, Message> {
+fn strip_title(palette: crate::theme::Palette, number: &str, name: String, hidden: Option<TrackId>, track: Option<TrackId>) -> Element<'static, Message> {
     let mark: Element<'static, Message> = match hidden {
         Some(track) => button(text(crate::icons::glyph("eye-off").to_string()).font(crate::icons::font("eye-off")).size(12).color(palette.text_dim))
             .padding(0)
@@ -374,11 +408,16 @@ fn strip_title(palette: crate::theme::Palette, number: &str, name: String, hidde
             .style(|_, _| button::Style::default())
             .on_press(Message::SetTrackHidden { track, hidden: false })
             .into(),
-        None => Space::new(HIDDEN_MARK, 0).into(),
+        None => Space::new(0, 0).into(),
+    };
+    let label = text(name).size(12).font(palette.semibold).wrapping(iced::widget::text::Wrapping::None).width(Length::Fill);
+    let named: Element<'static, Message> = match track {
+        Some(id) => mouse_area(label).on_press(Message::MixerNameClicked(id)).interaction(iced::mouse::Interaction::Text).into(),
+        None => label.into(),
     };
     let line = hrow![
         text(number.to_string()).size(10).font(palette.mono).color(palette.text_faint),
-        text(name).size(12).font(palette.semibold).wrapping(iced::widget::text::Wrapping::None).width(Length::Fill),
+        named,
         mark,
     ]
     .spacing(5)
