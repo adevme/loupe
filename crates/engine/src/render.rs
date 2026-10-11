@@ -58,6 +58,10 @@ pub trait Chains: Send {
         Vec::new()
     }
 
+    fn harvest_master(&mut self) -> Vec<(usize, Vec<u8>)> {
+        Vec::new()
+    }
+
     fn knob_readings(&mut self, track: TrackId, slot: usize) -> Vec<(String, f32, String)> {
         let _ = (track, slot);
         Vec::new()

@@ -520,6 +520,18 @@ impl Chains for Racks {
         out
     }
 
+    fn harvest_master(&mut self) -> Vec<(usize, Vec<u8>)> {
+        let mut out = Vec::new();
+        if let Some(rack) = self.master.as_mut() {
+            for slot in 0..rack.len() {
+                if let Some(state) = rack.save(slot) {
+                    out.push((slot, state));
+                }
+            }
+        }
+        out
+    }
+
     fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
         let mut out = Vec::new();
         for (id, rack) in self.chains.iter_mut() {
@@ -766,6 +778,29 @@ mod tests {
         }
         assert_eq!(saved(&project), as_opened);
         assert!(as_opened.contains("Crasher"));
+    }
+
+    #[test]
+    fn a_master_plugins_settings_are_saved_and_come_back() {
+        let mut project = Project::new(48_000);
+        project.apply(Command::AddMasterFx(fx(loupe_plugins::BUILT_IN, 1, &[]))).unwrap();
+        let mut racks = racks(false);
+        racks.follow(&project);
+        let found = racks.harvest_master();
+        assert_eq!(found.len(), 1, "the master rack was not harvested");
+        assert!(!found[0].1.is_empty(), "the master plugin saved nothing");
+        for (slot, state) in found {
+            project.apply(Command::SetMasterFxState { slot, state }).unwrap();
+        }
+        let kept = project.master_fx[0].state.clone();
+        let text = loupe_engine::SavedProject::capture(&project, |_| None).to_text();
+        let read = loupe_engine::SavedProject::parse(&text).expect("the song reads back");
+        let (reopened, _) = read.build(&[], 48_000);
+        assert_eq!(reopened.master_fx[0].state, kept, "the master plugin came back on defaults");
+        let mut again = Racks::new(48_000, 512, Peeks::default(), Arc::new(AtomicBool::new(false)), Falls::default());
+        again.follow(&reopened);
+        assert_eq!(again.master.as_ref().map(Rack::len), Some(1));
+        assert_eq!(again.harvest_master(), vec![(0, kept)]);
     }
 
     #[test]

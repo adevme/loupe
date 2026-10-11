@@ -2373,7 +2373,8 @@ impl App {
     }
 
     pub(crate) fn gather_fx_state(&mut self) {
-        let bare = self.project.tracks.iter().all(|track| track.fx.is_empty())
+        let bare = self.project.master_fx.is_empty()
+            && self.project.tracks.iter().all(|track| track.fx.is_empty())
             && self.project.tracks.iter().flat_map(|track| track.clips.iter()).all(|clip| clip.fx.is_empty());
         if bare {
             return;
@@ -2381,12 +2382,16 @@ impl App {
         let Some(mut racks) = self.borrow_racks() else { return };
         let found = racks.harvest();
         let on_clips = racks.harvest_clips();
+        let on_master = racks.harvest_master();
         self.racks = Some(racks);
         for (track, slot, state) in found {
             let _ = self.project.apply(Command::SetFxState { track, slot, state });
         }
         for (clip, slot, state) in on_clips {
             let _ = self.project.apply(Command::SetClipFxState { clip, slot, state });
+        }
+        for (slot, state) in on_master {
+            let _ = self.project.apply(Command::SetMasterFxState { slot, state });
         }
         self.hand_racks_over();
     }
