@@ -1,12 +1,52 @@
-use iced::widget::{button, checkbox, column, container, row, scrollable, slider, text};
+use iced::widget::{button, checkbox, column, container, mouse_area, row, scrollable, slider, text, text_input};
 use iced::{Alignment, Element, Length};
 use loupe_engine::TrackId;
 
 use crate::clip_window::TrackChoice;
+use crate::mixer;
 use crate::theme;
 use crate::{rule, App, Message};
 
+pub const SEND_ENTRY_ID: &str = "send-entry";
+pub const LOUDEST_SEND: f32 = 125.0;
+
+pub fn send_percent_text(gain: f32) -> String {
+    format!("{:.0}%", gain * 100.0)
+}
+
+pub fn gain_from(typed: &str) -> Option<f32> {
+    let typed = typed.trim().to_lowercase();
+    if typed.ends_with("db") {
+        let db = mixer::db_from_typed(&typed)?;
+        return Some((mixer::gain_from_db(db) * 100.0).clamp(0.0, LOUDEST_SEND) / 100.0);
+    }
+    let number = typed.trim_end_matches('%').trim();
+    number.parse::<f32>().ok().filter(|percent| percent.is_finite()).map(|percent| percent.clamp(0.0, LOUDEST_SEND) / 100.0)
+}
+
 impl App {
+    fn send_level(&self, from: TrackId, to: TrackId, gain: f32) -> Element<'_, Message> {
+        let palette = self.palette;
+        let shown: Element<'_, Message> = if self.editing_send == Some((from, to)) {
+            text_input("", &self.entry)
+                .id(SEND_ENTRY_ID)
+                .on_input(Message::EntryTyped)
+                .on_submit(Message::SendLevelEntered)
+                .font(palette.mono)
+                .size(11.5)
+                .padding([2, 4])
+                .width(Length::Fill)
+                .style(move |_, status| palette.field(status))
+                .into()
+        } else {
+            mouse_area(text(send_percent_text(gain)).size(11.5).font(palette.mono).color(palette.text_dim))
+                .on_press(Message::SendLevelPressed { from, to })
+                .interaction(iced::mouse::Interaction::Text)
+                .into()
+        };
+        container(shown).width(SEND_LEVEL).center_y(22).into()
+    }
+
     pub(crate) fn routing_sheet(&self, from: TrackId) -> Element<'_, Message> {
         let palette = self.palette;
         let Some(track) = self.project.tracks.iter().find(|t| t.id == from) else {
@@ -43,8 +83,8 @@ impl App {
             rows = rows.push(
                 row![
                     text(target.name.clone()).size(13).width(SEND_NAME).wrapping(iced::widget::text::Wrapping::None),
-                    text(format!("{percent:.0}%")).size(11.5).font(palette.mono).color(palette.text_dim),
-                    slider(0.0..=125.0, percent, move |percent| Message::SendGain { from, to, gain: percent / 100.0 })
+                    self.send_level(from, to, send.gain),
+                    slider(0.0..=LOUDEST_SEND, percent, move |percent| Message::SendGain { from, to, gain: percent / 100.0 })
                         .step(1.0)
                         .width(120)
                         .style(move |_, status| palette.slider(status)),
@@ -135,6 +175,7 @@ impl App {
 const CELL: f32 = 30.0;
 const NAME_COL: f32 = 130.0;
 const SEND_NAME: f32 = 150.0;
+const SEND_LEVEL: f32 = 56.0;
 
 impl App {
     pub(crate) fn matrix_sheet(&self) -> Element<'_, Message> {
@@ -213,5 +254,58 @@ impl App {
         .padding(16)
         .style(move |_| palette.sheet())
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loupe_engine::{Command, Outcome, Project};
+
+    #[test]
+    fn plain_numbers_and_percent_signs_both_read_as_percent() {
+        assert_eq!(gain_from("35"), Some(0.35));
+        assert_eq!(gain_from("35%"), Some(0.35));
+        assert_eq!(gain_from("  36 % "), Some(0.36));
+        assert_eq!(gain_from("0"), Some(0.0));
+    }
+
+    #[test]
+    fn a_db_suffix_reads_as_decibels() {
+        assert_eq!(gain_from("0db"), Some(1.0));
+        assert_eq!(gain_from("-inf dB"), Some(0.0));
+        let six = gain_from("-6 dB").unwrap();
+        assert!((six - 0.5012).abs() < 1e-3, "got {six}");
+    }
+
+    #[test]
+    fn values_past_the_ends_come_back_clamped() {
+        assert_eq!(gain_from("400"), Some(1.25));
+        assert_eq!(gain_from("-20"), Some(0.0));
+        assert_eq!(gain_from("24 dB"), Some(1.25));
+    }
+
+    #[test]
+    fn rubbish_is_turned_away() {
+        assert_eq!(gain_from(""), None);
+        assert_eq!(gain_from("loud"), None);
+        assert_eq!(gain_from("%"), None);
+        assert_eq!(gain_from("3 5"), None);
+        assert_eq!(gain_from("nan"), None);
+        assert_eq!(gain_from("inf"), None);
+        assert_eq!(gain_from("db"), None);
+    }
+
+    #[test]
+    fn a_typed_level_sets_the_send_gain() {
+        let mut project = Project::new(48_000);
+        project.apply(Command::AddTrack { name: "Vox".into() }).unwrap();
+        project.apply(Command::AddTrack { name: "Verb".into() }).unwrap();
+        let from = project.tracks[0].id;
+        let to = project.tracks[1].id;
+        project.apply(Command::AddSend { from, to }).unwrap();
+        let gain = gain_from("35%").unwrap();
+        assert_eq!(project.apply(Command::SetSendGain { from, to, gain }).unwrap(), Outcome::Done);
+        assert_eq!(project.tracks[0].sends[0].gain, 0.35);
     }
 }

@@ -266,6 +266,8 @@ pub enum Message {
     SendPreFader { from: TrackId, to: TrackId, pre_fader: bool },
     SendSidechain { from: TrackId, to: TrackId, sidechain: bool },
     LevelPressed(mixer::Level),
+    SendLevelPressed { from: TrackId, to: TrackId },
+    SendLevelEntered,
     OpenClip(ClipId),
     Autosave,
     AutosaveDone(u64, Result<PathBuf, String>),
@@ -512,6 +514,8 @@ struct App {
     tool: Tool,
     level_press: Option<(mixer::Level, Instant)>,
     editing_level: Option<mixer::Level>,
+    send_press: Option<((TrackId, TrackId), Instant)>,
+    editing_send: Option<(TrackId, TrackId)>,
     preview: Option<clip_window::Preview>,
     copied: Option<Instant>,
     armed: HashSet<TrackId>,
@@ -677,6 +681,8 @@ impl App {
             tool: Tool::default(),
             level_press: None,
             editing_level: None,
+            send_press: None,
+            editing_send: None,
             preview: None,
             copied: None,
             armed: HashSet::new(),
@@ -1224,6 +1230,7 @@ impl App {
                 self.overlay = Overlay::None;
                 self.stock = None;
                 self.editing_level = None;
+                self.editing_send = None;
                 self.stop_preview();
             }
             Message::OpenClip(clip) => {
@@ -2012,6 +2019,36 @@ impl App {
             }
             Message::SendGain { from, to, gain } => {
                 self.edit(Some(Run::Send(from, to)), Command::SetSendGain { from, to, gain });
+            }
+            Message::SendLevelPressed { from, to } => {
+                let twice = self
+                    .send_press
+                    .is_some_and(|(last, at)| last == (from, to) && at.elapsed() < DOUBLE_CLICK);
+                self.send_press = Some(((from, to), Instant::now()));
+                if self.editing_send != Some((from, to)) {
+                    self.editing_send = None;
+                }
+                if twice {
+                    let gain = self
+                        .project
+                        .track(from)
+                        .and_then(|track| track.sends.iter().find(|send| send.to == to))
+                        .map(|send| send.gain);
+                    if let Some(gain) = gain {
+                        self.entry = routing::send_percent_text(gain);
+                        self.editing_send = Some((from, to));
+                        return Task::batch([
+                            text_input::focus(routing::SEND_ENTRY_ID),
+                            text_input::select_all(routing::SEND_ENTRY_ID),
+                        ]);
+                    }
+                }
+            }
+            Message::SendLevelEntered => {
+                if let (Some((from, to)), Some(gain)) = (self.editing_send.take(), routing::gain_from(&self.entry)) {
+                    self.edit(None, Command::SetSendGain { from, to, gain });
+                }
+                return unfocus();
             }
             Message::SendPreFader { from, to, pre_fader } => {
                 self.edit(None, Command::SetSendPreFader { from, to, pre_fader });
