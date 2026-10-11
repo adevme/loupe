@@ -172,7 +172,7 @@ const NEUTRAL: Palette = Palette {
     corner: 6.0,
     solid_corner: 16.0,
     sheet_corner: 10.0,
-    clip_corner: 5.0,
+    clip_corner: 3.5,
     border_width: 1.0,
     playhead_width: 1.0,
     handle_radius: 4.5,
