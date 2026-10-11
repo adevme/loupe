@@ -267,6 +267,10 @@ impl App {
                 env!("CARGO_PKG_VERSION")
             ));
         }
+        if as_template {
+            self.path = None;
+            self.dirty = true;
+        }
         if !as_template && !protect {
             settings::remember(&path);
             self.path = Some(path);

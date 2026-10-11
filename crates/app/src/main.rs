@@ -2876,7 +2876,8 @@ impl App {
 
     fn place(&mut self, source: Arc<Source>) {
         let first = self.project.tracks.is_empty();
-        let onto = self.dropped_onto(self.pointer);
+        let at = crate::pointer::where_it_is_now().unwrap_or(self.pointer);
+        let onto = self.dropped_onto(at);
         let start = onto.map_or(self.playhead, |(_, at)| at);
         let name = source.name.clone();
         let placed = self.transact(None, |project| {

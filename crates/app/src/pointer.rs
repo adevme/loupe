@@ -62,6 +62,24 @@ mod windows {
         unsafe { SetCursorPos(point.x, point.y) != 0 }
     }
 
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetForegroundWindow() -> *mut core::ffi::c_void;
+        fn ScreenToClient(window: *mut core::ffi::c_void, point: *mut Point) -> i32;
+    }
+
+    pub fn in_window() -> Option<(f32, f32)> {
+        let mut point = Point { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            return None;
+        }
+        let window = unsafe { GetForegroundWindow() };
+        if window.is_null() || unsafe { ScreenToClient(window, &mut point) } == 0 {
+            return None;
+        }
+        Some((point.x as f32, point.y as f32))
+    }
+
     pub fn show(visible: bool) {
         unsafe {
             ShowCursor(visible as i32);
@@ -100,4 +118,14 @@ impl EndlessDrag {
         }
         Some(self.travel_up)
     }
+}
+
+#[cfg(windows)]
+pub fn where_it_is_now() -> Option<Point> {
+    windows::in_window().map(|(x, y)| Point::new(x, y))
+}
+
+#[cfg(not(windows))]
+pub fn where_it_is_now() -> Option<Point> {
+    None
 }
