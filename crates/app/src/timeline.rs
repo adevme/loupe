@@ -23,6 +23,7 @@ const ARM_BUTTON: f32 = 22.0;
 const ARM_GAP: f32 = 8.0;
 const NAME_GAP: f32 = 10.0;
 const CHOSEN_EDGE: f32 = 4.0;
+const COLOUR_EDGE: f32 = 3.0;
 const REORDER_STARTS_AT: f32 = 6.0;
 const LANDING_LINE: f32 = 3.0;
 const LANDING_DOT: f32 = 4.0;
@@ -2096,13 +2097,11 @@ impl Timeline<'_> {
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
             let depth = self.project.depth_of(track.id).min(4) as f32;
             let indent = depth * INDENT_W;
-            if depth > 0.0 {
-                frame.fill_rectangle(
-                    Point::new(indent - 7.0, top + 6.0),
-                    Size::new(2.0, height - 13.0),
-                    theme::alpha(self.colour_of(i), 0.7),
-                );
-            }
+            frame.fill_rectangle(
+                Point::new(0.0, top),
+                Size::new(COLOUR_EDGE, height - 1.0),
+                theme::alpha(self.colour_of(i), 0.7),
+            );
             if self.project.tracks.iter().any(|t| t.parent == Some(track.id)) {
                 frame.fill_text(Text {
                     content: icons::glyph(if track.collapsed { "chevron-right" } else { "chevron-down" }).to_string(),
