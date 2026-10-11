@@ -195,6 +195,7 @@ pub enum Message {
     StartRenameFx(stockwin::Spot, usize),
     MixerNameClicked(TrackId),
     PointerAt(Point),
+    OpenChainInMixer(stockwin::Spot),
     RenameTrackAt { track: TrackId, at: Point },
     StartColour(TrackId),
     EntryTyped(String),
@@ -587,6 +588,7 @@ struct App {
     entry: String,
     clip_name: String,
     pointer: Point,
+    chain_from_mixer: bool,
     chain_drag: Option<(stockwin::Spot, usize)>,
     name_clicked: Option<(TrackId, std::time::Instant)>,
     chain_over: Option<(stockwin::Spot, usize)>,
@@ -726,6 +728,7 @@ impl App {
             chain_drag: None,
             name_clicked: None,
             pointer: Point::ORIGIN,
+            chain_from_mixer: false,
             chain_over: None,
             entry_problem: None,
             main_window: main,
@@ -1369,7 +1372,14 @@ impl App {
                     return self.update(Message::CloseOverlay);
                 }
             }
-            Message::OpenChain(spot) => self.overlay = Overlay::Chain(spot),
+            Message::OpenChain(spot) => {
+                self.chain_from_mixer = false;
+                self.overlay = Overlay::Chain(spot);
+            }
+            Message::OpenChainInMixer(spot) => {
+                self.chain_from_mixer = self.mixer_window.is_some();
+                self.overlay = Overlay::Chain(spot);
+            }
             Message::SetFxMix(spot, slot, mix) => self.set_fx_mix(spot, slot, mix),
             Message::ChainGrab(spot, slot) => {
                 self.chain_drag = Some((spot, slot));
@@ -2939,8 +2949,9 @@ impl App {
         if self.mixer_window != Some(window) {
             return self.view();
         }
-        match self.overlay {
+        match &self.overlay {
             Overlay::RenameInMixer(_) => stack![self.mixer_alone(), self.centred(self.rename_sheet())].into(),
+            Overlay::Chain(spot) if self.chain_from_mixer => stack![self.mixer_alone(), self.centred(self.chain_sheet(*spot))].into(),
             _ => self.mixer_alone(),
         }
     }
