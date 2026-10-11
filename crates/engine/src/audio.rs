@@ -13,7 +13,7 @@ use crate::devices::{self, Device, Running};
 use crate::instrument::Note;
 use crate::midi_in::{KeyEvent, KeySender};
 use crate::model::{ClipId, Frames, Project, TrackId};
-use crate::render::{mix_tracks_metered, pan_gains, scale, Chains, Mixdown};
+use crate::render::{mix_tracks_metered, pan_gains, scale, shape_of, Chains, Mixdown, Shape};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -67,6 +67,7 @@ enum Msg {
     CountIn(Frames),
     Hear(Option<(Consumer<f32>, u32, usize)>),
     HearOn([Option<TrackId>; MOST_HEARD]),
+    HearThroughChain(bool),
 }
 
 impl Default for Shared {
@@ -129,8 +130,11 @@ struct Rt {
     count_in: Frames,
     count_in_len: Frames,
     ear: Ear,
+    hear_through_chain: bool,
     done_feeds: Producer<Consumer<f32>>,
 }
+
+const NOT_HEARD: usize = usize::MAX;
 
 struct Ear {
     feed: Option<Consumer<f32>>,
@@ -143,6 +147,13 @@ struct Ear {
     next: [f32; MOST_INPUTS],
     voice: Vec<f32>,
     track: Vec<[f32; 2]>,
+    mix: Vec<Vec<[f32; 2]>>,
+    sides: Vec<Vec<[f32; 2]>>,
+    pre: Vec<[f32; 2]>,
+    depth: Vec<usize>,
+    deepest: usize,
+    shape: Vec<Shape>,
+    armed: [Option<TrackId>; MOST_HEARD],
 }
 
 impl Default for Ear {
@@ -158,8 +169,72 @@ impl Default for Ear {
             next: [0.0; MOST_INPUTS],
             voice: Vec::new(),
             track: Vec::new(),
+            mix: Vec::new(),
+            sides: Vec::new(),
+            pre: Vec::new(),
+            depth: Vec::new(),
+            deepest: 0,
+            shape: Vec::new(),
+            armed: [None; MOST_HEARD],
         }
     }
+}
+
+fn room_to_hear(ear: &mut Ear, tracks: usize, frames: usize) {
+    if ear.mix.len() < tracks {
+        ear.mix.resize_with(tracks, Vec::new);
+        ear.sides.resize_with(tracks, Vec::new);
+    }
+    for buffer in ear.mix.iter_mut().take(tracks).chain(ear.sides.iter_mut().take(tracks)) {
+        if buffer.len() < frames {
+            buffer.resize(frames, [0.0; 2]);
+        }
+    }
+    if ear.pre.len() < frames {
+        ear.pre.resize(frames, [0.0; 2]);
+    }
+}
+
+fn work_out_the_path(ear: &mut Ear, project: &Project) {
+    let count = project.tracks.len();
+    let same = ear.depth.len() == count
+        && ear.armed == ear.on
+        && ear.shape.len() == count
+        && project.tracks.iter().zip(&ear.shape).all(|(track, known)| shape_of(track) == *known);
+    if same {
+        return;
+    }
+    ear.armed = ear.on;
+    ear.shape.clear();
+    ear.shape.extend(project.tracks.iter().map(shape_of));
+    ear.depth.clear();
+    ear.depth.resize(count, NOT_HEARD);
+    for id in ear.on.iter().flatten() {
+        if let Some(at) = project.tracks.iter().position(|track| track.id == *id) {
+            ear.depth[at] = 0;
+        }
+    }
+    for _ in 0..count {
+        let mut moved = false;
+        for at in 0..count {
+            if ear.depth[at] == NOT_HEARD {
+                continue;
+            }
+            let next = ear.depth[at] + 1;
+            let track = &project.tracks[at];
+            for fed in track.parent.into_iter().chain(track.sends.iter().map(|send| send.to)) {
+                let Some(to) = project.tracks.iter().position(|t| t.id == fed) else { continue };
+                if ear.depth[to] == NOT_HEARD || ear.depth[to] < next {
+                    ear.depth[to] = next;
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    ear.deepest = ear.depth.iter().filter(|deep| **deep != NOT_HEARD).copied().max().unwrap_or(0);
 }
 
 const MOST_LIVE_NOTES: usize = 32;
@@ -202,6 +277,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         load: 0.0,
         load_peak: 0.0,
         ear: Ear { voice: vec![0.0; MAX_BLOCK * MOST_INPUTS], track: vec![[0.0; 2]; MAX_BLOCK], ..Ear::default() },
+        hear_through_chain: true,
         done_feeds: done_in,
         scratch: Mixdown::default(),
         chains: None,
@@ -271,6 +347,7 @@ impl Rt {
                     self.ear.filling = true;
                 }
                 Msg::HearOn(on) => self.ear.on = on,
+                Msg::HearThroughChain(on) => self.hear_through_chain = on,
                 Msg::Seek(to) => self.seek = Some(to),
                 Msg::Loop(range) => self.loop_range = range,
                 Msg::Audition(clip) => self.audition = clip,
@@ -444,6 +521,15 @@ impl Rt {
             }
             ear.phase += step;
         }
+        match self.hear_through_chain {
+            true => self.hear_through_the_chains(frames),
+            false => self.hear_straight(frames),
+        }
+    }
+
+    fn hear_straight(&mut self, frames: usize) {
+        let ear = &mut self.ear;
+        let width = ear.width;
         let master = if self.project.master_muted { 0.0 } else { self.project.master };
         for id in ear.on.iter().flatten() {
             let Some(index) = self.project.tracks.iter().position(|track| track.id == *id) else { continue };
@@ -458,7 +544,7 @@ impl Rt {
             let gain = if track.muted { 0.0 } else { track.gain * master };
             let (left, right) = pan_gains(track.pan);
             let mut top = 0.0f32;
-            for (out, frame) in self.block[..frames].iter_mut().zip(sound.iter()) {
+            for (out, frame) in self.block[..frames].iter_mut().zip(ear.track[..frames].iter()) {
                 let heard = [frame[0] * gain * left, frame[1] * gain * right];
                 top = top.max(heard[0].abs()).max(heard[1].abs());
                 out[0] += heard[0];
@@ -468,6 +554,97 @@ impl Rt {
                 level.fetch_max(top.to_bits(), Ordering::Relaxed);
             }
             self.shared.master_level.fetch_max(top.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    fn hear_through_the_chains(&mut self, frames: usize) {
+        let project: &Project = &self.project;
+        let count = project.tracks.len();
+        let ear = &mut self.ear;
+        room_to_hear(ear, count, frames);
+        work_out_the_path(ear, project);
+        let width = ear.width;
+        let master = if project.master_muted { 0.0 } else { project.master };
+        for index in 0..count {
+            if ear.depth[index] == NOT_HEARD {
+                continue;
+            }
+            ear.mix[index][..frames].fill([0.0; 2]);
+            ear.sides[index][..frames].fill([0.0; 2]);
+        }
+        for level in 0..=ear.deepest {
+            for index in 0..count {
+                if ear.depth[index] != level {
+                    continue;
+                }
+                let track = &project.tracks[index];
+                let armed = ear.on.iter().flatten().any(|id| *id == track.id);
+                if armed {
+                    let sound = &mut ear.track[..frames];
+                    for (frame, heard) in sound.iter_mut().zip(ear.voice.chunks_exact(width)) {
+                        *frame = track.input.heard(heard);
+                    }
+                    if let Some(racks) = self.chains.as_deref_mut() {
+                        racks.process_takes(track.id, &mut ear.track[..frames]);
+                    }
+                    for (dest, from) in ear.mix[index][..frames].iter_mut().zip(ear.track[..frames].iter()) {
+                        dest[0] += from[0];
+                        dest[1] += from[1];
+                    }
+                } else if !track.fx.is_empty() {
+                    if let Some(racks) = self.chains.as_deref_mut() {
+                        let Ear { mix, sides, .. } = ear;
+                        racks.process_with(track.id, &mut mix[index][..frames], &sides[index][..frames]);
+                    }
+                }
+                if track.sends.iter().any(|send| send.pre_fader) {
+                    ear.pre[..frames].copy_from_slice(&ear.mix[index][..frames]);
+                }
+                let gain = if track.muted { 0.0 } else { track.gain };
+                let (left, right) = pan_gains(track.pan);
+                let mut top = 0.0f32;
+                for frame in ear.mix[index][..frames].iter_mut() {
+                    frame[0] *= gain * left;
+                    frame[1] *= gain * right;
+                    top = top.max(frame[0].abs()).max(frame[1].abs());
+                }
+                if let Some(meter) = self.shared.levels.get(index) {
+                    meter.fetch_max(top.to_bits(), Ordering::Relaxed);
+                }
+                for send in &track.sends {
+                    let Some(to) = project.tracks.iter().position(|t| t.id == send.to) else { continue };
+                    if ear.depth[to] == NOT_HEARD {
+                        continue;
+                    }
+                    for i in 0..frames {
+                        let from = if send.pre_fader { ear.pre[i] } else { ear.mix[index][i] };
+                        let dest = if send.sidechain { &mut ear.sides[to][i] } else { &mut ear.mix[to][i] };
+                        dest[0] += from[0] * send.gain;
+                        dest[1] += from[1] * send.gain;
+                    }
+                }
+                let up = track.parent.and_then(|parent| project.tracks.iter().position(|t| t.id == parent)).filter(|to| ear.depth[*to] != NOT_HEARD);
+                match up {
+                    Some(to) => {
+                        for i in 0..frames {
+                            let from = ear.mix[index][i];
+                            let dest = &mut ear.mix[to][i];
+                            dest[0] += from[0];
+                            dest[1] += from[1];
+                        }
+                    }
+                    None => {
+                        let mut top = 0.0f32;
+                        for (out, frame) in self.block[..frames].iter_mut().zip(ear.mix[index][..frames].iter()) {
+                            let heard = [frame[0] * master, frame[1] * master];
+                            top = top.max(heard[0].abs()).max(heard[1].abs());
+                            out[0] += heard[0];
+                            out[1] += heard[1];
+                        }
+                        self.shared.master_level.fetch_max(top.to_bits(), Ordering::Relaxed);
+                    }
+                }
+            }
         }
     }
 
@@ -704,6 +881,10 @@ impl Engine {
             *slot = Some(*track);
         }
         self.send(Msg::HearOn(on));
+    }
+
+    pub fn hear_through_the_chains(&mut self, on: bool) {
+        self.send(Msg::HearThroughChain(on));
     }
 
     pub fn drop_chains(&mut self) {
@@ -1227,6 +1408,159 @@ mod tests {
         for frame in rt.process(256) {
             assert!((frame[0] - 0.2 * left).abs() < 1e-4 && (frame[1] + 0.4 * right).abs() < 1e-4, "the keys hear inputs 1+2 as a pair, got {frame:?}");
         }
+    }
+
+    #[derive(Default)]
+    struct Trebles {
+        ran: Arc<std::sync::Mutex<Vec<TrackId>>>,
+    }
+
+    impl Chains for Trebles {
+        fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], _: &[[f32; 2]]) {
+            if let Ok(mut ran) = self.ran.lock() {
+                ran.push(track);
+            }
+            for frame in audio.iter_mut() {
+                frame[0] *= 3.0;
+                frame[1] *= 3.0;
+            }
+        }
+
+        fn process_takes(&mut self, _: TrackId, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                frame[0] *= 0.5;
+                frame[1] *= 0.5;
+            }
+        }
+    }
+
+    fn some_fx(name: &str) -> crate::model::Fx {
+        crate::model::Fx { path: std::path::PathBuf::from("/nowhere/Bus.vst3"), index: 0, name: name.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }
+    }
+
+    fn speak(mic: &mut Producer<f32>, samples: &[f32]) {
+        for _ in 0..4_000 {
+            for sample in samples {
+                mic.push(*sample).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn a_heard_track_in_a_folder_is_heard_through_the_folders_chain() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(bus)) = project.apply(Command::AddTrack { name: "Vox Chain".into() }) else { panic!() };
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        project.apply(Command::SetTrackParent { track: vocal, parent: Some(bus) }).unwrap();
+        project.apply(Command::AddFx { track: bus, fx: some_fx("Pro-Q") }).unwrap();
+        project.apply(Command::SetTrackGain { track: bus, gain: 0.5 }).unwrap();
+        let ran = Arc::new(std::sync::Mutex::new(Vec::new()));
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Trebles { ran: ran.clone() })))).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(1 << 15);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE, 1)))).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        speak(&mut mic, &[0.8]);
+        rt.process(256);
+        speak(&mut mic, &[0.8]);
+        let heard = rt.process(256).to_vec();
+        let (left, right) = pan_gains(0.0);
+        let want = 0.8 * 0.5 * 3.0 * 0.5;
+        for frame in heard {
+            assert!((frame[0] - want * left).abs() < 1e-4 && (frame[1] - want * right).abs() < 1e-4, "got {frame:?}, wanted {want}");
+        }
+        assert_eq!(*ran.lock().unwrap(), vec![bus, bus], "the folder's chain runs once a block");
+    }
+
+    #[test]
+    fn a_send_from_a_folder_is_fed_while_hearing_the_input() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(bus)) = project.apply(Command::AddTrack { name: "Vox Chain B".into() }) else { panic!() };
+        let Ok(Outcome::Track(reverb)) = project.apply(Command::AddTrack { name: "Vox Reverb".into() }) else { panic!() };
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        project.apply(Command::SetTrackParent { track: vocal, parent: Some(bus) }).unwrap();
+        project.apply(Command::AddSend { from: bus, to: reverb }).unwrap();
+        project.apply(Command::SetSendGain { from: bus, to: reverb, gain: 0.5 }).unwrap();
+        remote.outbox.push(Msg::Project(Arc::new(project.clone()))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Trebles::default())))).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(1 << 15);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE, 1)))).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        speak(&mut mic, &[0.8]);
+        rt.process(256);
+        speak(&mut mic, &[0.8]);
+        let (left, _) = pan_gains(0.0);
+        let dry = 0.8 * 0.5;
+        for frame in rt.process(256) {
+            assert!((frame[0] - (dry + dry * 0.5) * left).abs() < 1e-4, "the send is not fed, got {frame:?}");
+        }
+        project.apply(Command::SetSendPreFader { from: bus, to: reverb, pre_fader: true }).unwrap();
+        project.apply(Command::SetTrackMuted { track: bus, muted: true }).unwrap();
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        speak(&mut mic, &[0.8]);
+        for frame in rt.process(256) {
+            assert!((frame[0] - dry * 0.5 * left).abs() < 1e-4, "a pre-fader send is heard past the mute, got {frame:?}");
+        }
+    }
+
+    #[test]
+    fn two_heard_tracks_under_one_folder_run_its_chain_once() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(bus)) = project.apply(Command::AddTrack { name: "Vox Chain".into() }) else { panic!() };
+        let Ok(Outcome::Track(one)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        let Ok(Outcome::Track(two)) = project.apply(Command::AddTrack { name: "Vox 2".into() }) else { panic!() };
+        for track in [one, two] {
+            project.apply(Command::SetTrackParent { track, parent: Some(bus) }).unwrap();
+        }
+        project.apply(Command::SetTrackInput { track: one, input: crate::model::InputChannels::Mono(0) }).unwrap();
+        project.apply(Command::SetTrackInput { track: two, input: crate::model::InputChannels::Mono(1) }).unwrap();
+        project.apply(Command::AddFx { track: bus, fx: some_fx("Pro-C 2") }).unwrap();
+        let ran = Arc::new(std::sync::Mutex::new(Vec::new()));
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Trebles { ran: ran.clone() })))).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(1 << 15);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE, 2)))).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(one), Some(two), None, None, None, None, None, None])).ok().unwrap();
+        speak(&mut mic, &[0.2, 0.4]);
+        rt.process(256);
+        ran.lock().unwrap().clear();
+        speak(&mut mic, &[0.2, 0.4]);
+        let (left, _) = pan_gains(0.0);
+        let want = (0.2 + 0.4) * 0.5 * 3.0;
+        for frame in rt.process(256) {
+            assert!((frame[0] - want * left).abs() < 1e-4, "got {frame:?}, wanted {want}");
+        }
+        assert_eq!(*ran.lock().unwrap(), vec![bus], "the folder's chain ran more than once");
+    }
+
+    #[test]
+    fn hearing_the_short_way_skips_the_folders_chain() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(bus)) = project.apply(Command::AddTrack { name: "Vox Chain".into() }) else { panic!() };
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        project.apply(Command::SetTrackParent { track: vocal, parent: Some(bus) }).unwrap();
+        project.apply(Command::AddFx { track: bus, fx: some_fx("Pro-Q") }).unwrap();
+        project.apply(Command::SetTrackGain { track: bus, gain: 0.5 }).unwrap();
+        let ran = Arc::new(std::sync::Mutex::new(Vec::new()));
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Trebles { ran: ran.clone() })))).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(1 << 15);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE, 1)))).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        remote.outbox.push(Msg::HearThroughChain(false)).ok().unwrap();
+        speak(&mut mic, &[0.8]);
+        rt.process(256);
+        speak(&mut mic, &[0.8]);
+        let (left, _) = pan_gains(0.0);
+        let want = 0.8 * 0.5;
+        for frame in rt.process(256) {
+            assert!((frame[0] - want * left).abs() < 1e-4, "got {frame:?}, wanted {want}");
+        }
+        assert!(ran.lock().unwrap().is_empty(), "the folder's chain ran on the short path");
     }
 
     #[test]

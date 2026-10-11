@@ -31,6 +31,7 @@ pub struct Settings {
     pub preroll_bars: u32,
     pub punch: bool,
     pub hear_input: Hearing,
+    pub hear_through_chain: bool,
     pub snap: bool,
     pub midi_inputs: Option<Vec<String>>,
     pub audio: loupe_engine::Device,
@@ -100,6 +101,7 @@ impl Settings {
             preroll_bars: value_of("preroll").and_then(count_in_from).unwrap_or(DEFAULT_PREROLL_BARS),
             punch: value_of("punch") == Some("on"),
             hear_input: Hearing::from_saved(value_of("hear_input")),
+            hear_through_chain: value_of("hear_through_chain") != Some("off"),
             snap: value_of("snap") != Some("off"),
             midi_inputs: value_of("midi_inputs").map(|value| value.split('\t').filter(|name| !name.is_empty()).map(str::to_string).collect()),
             audio: loupe_engine::Device {

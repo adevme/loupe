@@ -287,6 +287,7 @@ pub enum Message {
     Comp { track: TrackId, take: usize, from: Frames, to: Frames },
     ShowChain(TrackId, bool),
     HearingChosen(settings::Hearing),
+    HearThroughChainToggled(bool),
     OpenSampler(TrackId),
     SamplerChanged(TrackId, loupe_engine::Sampler),
     PickSample(TrackId),
@@ -616,6 +617,7 @@ struct App {
     preroll_bars: u32,
     punch: bool,
     hear_input: settings::Hearing,
+    hear_through_chain: bool,
     rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
@@ -639,6 +641,7 @@ impl App {
         let project = Project::new(engine.rate());
         engine.set_project(&project);
         engine.set_metronome(settings.metronome);
+        engine.hear_through_the_chains(settings.hear_through_chain);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
         loupe_plugins::presets::keep_in(settings::presets_folder(settings.folder.as_deref()));
@@ -749,6 +752,7 @@ impl App {
             preroll_bars: settings.preroll_bars,
             punch: settings.punch,
             hear_input: settings.hear_input,
+            hear_through_chain: settings.hear_through_chain,
             rec_shown: HashSet::new(),
             copied_clips: None,
             scripts: Vec::new(),
@@ -1246,6 +1250,13 @@ impl App {
                     self.problem = Some(format!("Could not save settings: {why}"));
                 }
                 self.listen_if_armed();
+            }
+            Message::HearThroughChainToggled(on) => {
+                self.hear_through_chain = on;
+                if let Err(why) = settings::save("hear_through_chain", if on { "on" } else { "off" }) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+                self.engine.hear_through_the_chains(on);
             }
             Message::ToggleRecordsNotes(track) => {
                 self.overlay = Overlay::None;
