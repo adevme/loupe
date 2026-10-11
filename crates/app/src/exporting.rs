@@ -202,7 +202,7 @@ impl App {
                 !stop.load(Ordering::Relaxed)
             };
             let mut racks: Box<dyn loupe_engine::Chains> =
-                Box::new(crate::racks::Racks::new(rate, 512, crate::racks::Peeks::default(), plugins_off, crate::racks::Falls::default()).away_from_the_audio_thread());
+                Box::new(crate::racks::Racks::new(rate, loupe_engine::EXPORT_BLOCK, crate::racks::Peeks::default(), plugins_off, crate::racks::Falls::default()).away_from_the_audio_thread());
             racks.follow(&project);
             let waited = std::time::Instant::now();
             while racks.still_opening() && waited.elapsed() < OPENS_WITHIN {

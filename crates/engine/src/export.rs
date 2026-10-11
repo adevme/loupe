@@ -10,7 +10,7 @@ use crate::encode::{Format, Writer};
 use crate::model::{Frames, Project, Track, TrackId};
 use crate::wav;
 
-const BLOCK: usize = 16_384;
+pub const BLOCK: usize = 16_384;
 const STEMS_FOLDER: &str = "Stems";
 const NOT_IN_FILE_NAMES: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 const MEASURING: &str = "measuring.wav";
