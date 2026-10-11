@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use iced::futures::channel::oneshot;
-use iced::widget::{column, row, text};
+use iced::widget::{checkbox, column, row, text};
 use iced::{Element, Length, Task};
 use loupe_engine::{milliseconds, Device, Engine, Output, SavedProject};
 
@@ -132,6 +132,7 @@ impl App {
         self.note_audio_for_crashes();
         self.problem = self.engine.output_error().map(|e| format!("Sound output: {e}"));
         self.engine.set_metronome(self.metronome);
+        self.engine.hear_through_the_chains(self.hear_through_chain);
         self.engine.seek(self.playhead);
         if self.midi_keys.is_some() {
             self.midi_keys = loupe_engine::MidiKeys::open(self.engine.key_sender(), &self.midi_chosen).ok();
@@ -211,6 +212,9 @@ impl App {
                 .spacing(8),
             ]
             .spacing(12),
+            label("Hearing yourself"),
+            dim("What you hear while a track is armed goes through its folders and sends, as the mix does. Turn it off for the shortest way to your ears.".to_string()),
+            checkbox("Monitor through the full chain", self.hear_through_chain).on_toggle(Message::HearThroughChainToggled).text_size(13),
             dim(running_text(&self.engine)),
         ]
         .spacing(8)

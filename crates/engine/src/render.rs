@@ -58,6 +58,10 @@ pub trait Chains: Send {
         Vec::new()
     }
 
+    fn harvest_master(&mut self) -> Vec<(usize, Vec<u8>)> {
+        Vec::new()
+    }
+
     fn knob_readings(&mut self, track: TrackId, slot: usize) -> Vec<(String, f32, String)> {
         let _ = (track, slot);
         Vec::new()
@@ -211,7 +215,7 @@ pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
     }
 }
 
-type Shape = (TrackId, Option<TrackId>, u64);
+pub(crate) type Shape = (TrackId, Option<TrackId>, u64);
 
 #[derive(Default)]
 pub struct Mixdown {
@@ -229,7 +233,7 @@ pub struct Mixdown {
     ordered: bool,
 }
 
-fn shape_of(track: &Track) -> Shape {
+pub(crate) fn shape_of(track: &Track) -> Shape {
     let sends = track.sends.iter().fold(0u64, |so_far, send| so_far.rotate_left(7) ^ send.to.0);
     (track.id, track.parent, sends)
 }
