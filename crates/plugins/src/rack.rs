@@ -1504,3 +1504,19 @@ mod growing_tests {
         assert_eq!(take_knobs(eq.as_ref()).len(), eq.params().len() * 4, "and it saves with every knob it has now");
     }
 }
+
+impl Rack {
+    pub fn say_bye(&mut self) {
+        for slot in &mut self.slots {
+            if let Some(host) = slot.host.as_mut() {
+                host.say_bye();
+            }
+        }
+    }
+}
+
+impl Drop for Rack {
+    fn drop(&mut self) {
+        self.say_bye();
+    }
+}

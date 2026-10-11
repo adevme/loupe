@@ -2335,3 +2335,36 @@ mod hiding {
         assert!(out_of_sight(&project, &track_called(&project, "Vox 1")));
     }
 }
+
+impl crate::App {
+    pub(crate) fn dropped_onto(&self, at: iced::Point) -> Option<(TrackId, Frames)> {
+        let top = self.palette.scrollbar_height + self.palette.ruler_height;
+        let left = match self.palette.headers {
+            Side::Left => self.palette.header_width,
+            Side::Right => 0.0,
+        };
+        if at.y < top || at.x < left {
+            return None;
+        }
+        let mut y = top - self.view.scroll_y;
+        for track in &self.project.tracks {
+            if out_of_sight(&self.project, track) {
+                continue;
+            }
+            let lanes = self
+                .project
+                .envelopes
+                .iter()
+                .filter(|shape| shape.lane_open && (shape.target.on_track() == Some(track.id) || shape.target.on_clip().is_some_and(|clip| track.clips.iter().any(|kept| kept.id == clip))))
+                .count() as f32;
+            let tall = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height) + lanes * LANE_HEIGHT;
+            if at.y >= y && at.y < y + tall {
+                let seconds = (at.x - left) as f64 / self.view.zoom + self.view.scroll;
+                let start = (seconds * self.project.rate as f64).max(0.0) as Frames;
+                return Some((track.id, start));
+            }
+            y += tall;
+        }
+        None
+    }
+}

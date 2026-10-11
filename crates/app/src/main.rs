@@ -194,6 +194,7 @@ pub enum Message {
     StartRename(TrackId),
     StartRenameFx(stockwin::Spot, usize),
     MixerNameClicked(TrackId),
+    PointerAt(Point),
     RenameTrackAt { track: TrackId, at: Point },
     StartColour(TrackId),
     EntryTyped(String),
@@ -585,6 +586,7 @@ struct App {
     settings_tab: SettingsTab,
     entry: String,
     clip_name: String,
+    pointer: Point,
     chain_drag: Option<(stockwin::Spot, usize)>,
     name_clicked: Option<(TrackId, std::time::Instant)>,
     chain_over: Option<(stockwin::Spot, usize)>,
@@ -723,6 +725,7 @@ impl App {
             clip_name: String::new(),
             chain_drag: None,
             name_clicked: None,
+            pointer: Point::ORIGIN,
             chain_over: None,
             entry_problem: None,
             main_window: main,
@@ -1401,6 +1404,7 @@ impl App {
                     return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
                 }
             }
+            Message::PointerAt(at) => self.pointer = at,
             Message::MixerNameClicked(track) => {
                 let now = std::time::Instant::now();
                 let again = self.name_clicked.is_some_and(|(was, when)| was == track && now.duration_since(when) < DOUBLE_CLICK);
@@ -2331,6 +2335,10 @@ impl App {
         } else {
             Subscription::none()
         };
+        let following = iced::event::listen_with(|event, _status, _window| match event {
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::PointerAt(position)),
+            _ => None,
+        });
         let mixer_drag = if self.resizing_mixer {
             iced::event::listen_with(|event, _status, _window| match event {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::MixerDragged(position.y)),
@@ -2370,7 +2378,7 @@ impl App {
             Subscription::none()
         };
         let looking_around = iced::time::every(Duration::from_secs(1)).map(|_| Message::LookAround);
-        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around])
+        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around, following])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -2868,11 +2876,16 @@ impl App {
 
     fn place(&mut self, source: Arc<Source>) {
         let first = self.project.tracks.is_empty();
-        let start = self.playhead;
+        let onto = self.dropped_onto(self.pointer);
+        let start = onto.map_or(self.playhead, |(_, at)| at);
         let name = source.name.clone();
         let placed = self.transact(None, |project| {
-            let Outcome::Track(track) = project.apply(Command::AddTrack { name })? else {
-                return Err(CommandError::NoSuchTrack);
+            let track = match onto {
+                Some((track, _)) => track,
+                None => match project.apply(Command::AddTrack { name })? {
+                    Outcome::Track(made) => made,
+                    _ => return Err(CommandError::NoSuchTrack),
+                },
             };
             project.apply(Command::AddClip { track, source, start })
         });

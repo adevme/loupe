@@ -37,6 +37,7 @@ pub struct Sandbox {
     owed: bool,
     seat: Option<Seat>,
     fell_at: Option<usize>,
+    said_bye: bool,
 }
 
 impl Sandbox {
@@ -87,6 +88,7 @@ impl Sandbox {
             owed: false,
             seat: Some(seat),
             fell_at: None,
+            said_bye: false,
         })
     }
 
@@ -259,10 +261,20 @@ fn read_for(out: ChildStdout, asked: Receiver<Want>, sends: Sender<Got>) {
     }
 }
 
+impl Sandbox {
+    pub fn say_bye(&mut self) {
+        if self.lost || self.said_bye {
+            return;
+        }
+        let _ = Ask::Quit.write(&mut self.writing);
+        self.said_bye = true;
+    }
+}
+
 impl Drop for Sandbox {
     fn drop(&mut self) {
         if !self.lost {
-            let _ = Ask::Quit.write(&mut self.writing);
+            self.say_bye();
             let since = Instant::now();
             loop {
                 if matches!(self.child.try_wait(), Ok(Some(_))) {

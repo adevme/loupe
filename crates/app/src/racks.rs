@@ -866,3 +866,11 @@ mod tests {
         assert_eq!(region_of(&project, clip_in(&project, id)), None);
     }
 }
+
+impl Drop for Racks {
+    fn drop(&mut self) {
+        for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()) {
+            rack.say_bye();
+        }
+    }
+}
