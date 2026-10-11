@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use loupe_stock::{Effect, Meter, SILENT_LUFS};
 
 use crate::encode::{Format, Writer};
-use crate::model::{Frames, Project, Track, TrackId};
+use crate::model::{Frames, Project, Track};
 use crate::wav;
 
 pub const BLOCK: usize = 16_384;
@@ -152,12 +152,9 @@ impl Stage {
     }
 }
 
-pub(crate) fn render_units(project: &Project, only: Option<TrackId>) -> f32 {
+pub(crate) fn render_units(project: &Project) -> f32 {
     let mut units = 1.0 + PLUGIN_SLOT_UNITS * project.master_fx.len() as f32;
     for track in &project.tracks {
-        if only.is_some_and(|wanted| wanted != track.id) {
-            continue;
-        }
         units += 1.0 + PLUGIN_SLOT_UNITS * track.fx.len() as f32;
         for clip in &track.clips {
             units += PLUGIN_SLOT_UNITS * clip.fx.len() as f32;
@@ -170,24 +167,24 @@ pub(crate) fn stages_of(project: &Project, plan: &ExportPlan, span: Frames, stem
     let encoding = plan.format.nanoseconds_a_frame();
     let mut stages = Vec::with_capacity(2 + stems.len());
     if plan.normalise == Normalise::Off {
-        stages.push(Stage { what: "render and encode", frames: span, render_units: render_units(project, None), other_nanoseconds_a_frame: encoding });
+        stages.push(Stage { what: "render and encode", frames: span, render_units: render_units(project), other_nanoseconds_a_frame: encoding });
     } else {
         let spilling = if held_in_memory { 0.0 } else { Format::WavFloat.nanoseconds_a_frame() };
         stages.push(Stage {
             what: "render and measure",
             frames: span,
-            render_units: render_units(project, None),
+            render_units: render_units(project),
             other_nanoseconds_a_frame: METER_NANOSECONDS_A_FRAME + spilling,
         });
         let reading = if held_in_memory { 0.0 } else { READING_BACK_NANOSECONDS_A_FRAME };
         stages.push(Stage { what: "encode the mix", frames: span, render_units: 0.0, other_nanoseconds_a_frame: reading + encoding });
     }
-    for track in stems {
+    if !stems.is_empty() {
         stages.push(Stage {
-            what: "render a stem",
+            what: "render the stems",
             frames: span,
-            render_units: render_units(project, Some(track.id)),
-            other_nanoseconds_a_frame: encoding,
+            render_units: render_units(project),
+            other_nanoseconds_a_frame: encoding * stems.len() as f64,
         });
     }
     stages
@@ -484,16 +481,8 @@ pub fn export_through(
     if plan.split {
         let stems_folder = plan.folder.join(STEMS_FOLDER);
         fs::create_dir_all(&stems_folder).map_err(|why| failed(&stems_folder, why))?;
-        let mut used: Vec<String> = Vec::new();
-        for track in stems {
-            let mut alone = project.clone();
-            alone.tracks.retain(|other| other.id == track.id);
-            alone.master = 1.0;
-            let file = stems_folder.join(format!("{}.{extension}", unused_name(&track.name, &mut used)));
-            write_file(&file, plan.format, plan.dither, &alone, from, to, gain.linear(), &mut pacer, chains.as_deref_mut())
-                .map_err(|why| failed(&file, why))?;
-            pacer.finished_a_stage();
-        }
+        write_stems(&stems_folder, &stems, plan, project, from, to, gain.linear(), &mut pacer, chains.as_deref_mut())?;
+        pacer.finished_a_stage();
     }
     let mut notes: Vec<String> = gain.note.into_iter().collect();
     if pacer.timing_wanted() {
@@ -534,7 +523,7 @@ pub fn render_to_wav_through(
     let mut pacer = Pacer::new(&quiet, vec![Stage {
         what: "render and encode",
         frames: span,
-        render_units: render_units(project, None),
+        render_units: render_units(project),
         other_nanoseconds_a_frame: Format::WavFloat.nanoseconds_a_frame(),
     }]);
     write_file(path, Format::WavFloat, false, project, from, to, 1.0, &mut pacer, chains)
@@ -574,13 +563,15 @@ fn amplify(block: &mut [[f32; 2]], gain: f32) {
     }
 }
 
+type Takes<'a> = dyn FnMut(&mut [[f32; 2]], &crate::render::Mixdown) -> io::Result<()> + 'a;
+
 fn render_into(
     project: &Project,
     from: Frames,
     to: Frames,
     pacer: &mut Pacer<'_>,
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
-    take: &mut dyn FnMut(&mut [[f32; 2]]) -> io::Result<()>,
+    take: &mut Takes<'_>,
 ) -> io::Result<()> {
     let mut block = vec![[0.0f32; 2]; BLOCK];
     let mut spare = crate::render::Mixdown::default();
@@ -594,7 +585,7 @@ fn render_into(
             let plugins = chains.as_deref().map_or(0, |racks| racks.plugin_spending().nanoseconds);
             pacer.spent_rendering(taken, plugins);
         }
-        take(&mut block[..count])?;
+        take(&mut block[..count], &spare)?;
         pos += count as Frames;
         pacer.wrote(count as Frames);
         if pacer.stopped() {
@@ -618,7 +609,7 @@ fn write_file(
 ) -> io::Result<()> {
     let mut writer = timed_on_files(pacer, || Writer::create(path, format, project.rate, to - from, dither))?;
     let mut encoding = Duration::ZERO;
-    render_into(project, from, to, pacer, chains, &mut |block| {
+    render_into(project, from, to, pacer, chains, &mut |block, _| {
         amplify(block, gain);
         let began = Instant::now();
         let went = writer.push(block);
@@ -627,6 +618,53 @@ fn write_file(
     })?;
     pacer.spent_encoding(encoding);
     timed_on_files(pacer, || writer.finish())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_stems(
+    folder: &Path,
+    stems: &[&Track],
+    plan: &ExportPlan,
+    project: &Project,
+    from: Frames,
+    to: Frames,
+    gain: f32,
+    pacer: &mut Pacer<'_>,
+    chains: Option<&mut (dyn crate::render::Chains + '_)>,
+) -> Result<(), String> {
+    let failed = |what: &Path, why: io::Error| format!("{}: {why}", what.display());
+    let extension = plan.format.extension();
+    let mut used: Vec<String> = Vec::new();
+    let mut writing = Vec::with_capacity(stems.len());
+    for track in stems {
+        let at = project.tracks.iter().position(|other| other.id == track.id);
+        let file = folder.join(format!("{}.{extension}", unused_name(&track.name, &mut used)));
+        let writer = timed_on_files(pacer, || Writer::create(&file, plan.format, project.rate, to - from, plan.dither))
+            .map_err(|why| failed(&file, why))?;
+        writing.push((at, file, writer));
+    }
+    let mut leaving = vec![[0.0f32; 2]; BLOCK];
+    let mut encoding = Duration::ZERO;
+    render_into(project, from, to, pacer, chains, &mut |block, spare| {
+        let count = block.len();
+        for (at, _, writer) in writing.iter_mut() {
+            match at.and_then(|at| spare.tap(at, count)) {
+                Some(audio) => leaving[..count].copy_from_slice(audio),
+                None => leaving[..count].fill([0.0; 2]),
+            }
+            amplify(&mut leaving[..count], gain);
+            let began = Instant::now();
+            writer.push(&leaving[..count])?;
+            encoding += began.elapsed();
+        }
+        Ok(())
+    })
+    .map_err(|why| failed(folder, why))?;
+    pacer.spent_encoding(encoding);
+    for (_, file, writer) in writing {
+        timed_on_files(pacer, || writer.finish()).map_err(|why| failed(&file, why))?;
+    }
+    Ok(())
 }
 
 fn timed_on_files<T>(pacer: &mut Pacer<'_>, work: impl FnOnce() -> T) -> T {
@@ -663,7 +701,7 @@ fn measure_into(
         Mixed::Memory(kept) => {
             kept.reserve((to - from) as usize);
             let mut metering = Duration::ZERO;
-            render_into(project, from, to, pacer, chains, &mut |block| {
+            render_into(project, from, to, pacer, chains, &mut |block, _| {
                 let began = Instant::now();
                 meter.process(block);
                 metering += began.elapsed();
@@ -676,7 +714,7 @@ fn measure_into(
             let mut writer = timed_on_files(pacer, || Writer::create(path, Format::WavFloat, project.rate, to - from, false))?;
             let mut metering = Duration::ZERO;
             let mut spilling = Duration::ZERO;
-            render_into(project, from, to, pacer, chains, &mut |block| {
+            render_into(project, from, to, pacer, chains, &mut |block, _| {
                 let began = Instant::now();
                 meter.process(block);
                 let metered = began.elapsed();
@@ -886,7 +924,7 @@ mod tests {
         let plain_stages = stages_of(&project, &ExportPlan { format: Format::Mp3Cbr320, ..plan_for(&folder) }, span, &[], true);
         assert_eq!(plain_stages.len(), 1);
         assert_eq!(plain_stages[0].other_nanoseconds_a_frame, Format::Mp3Cbr320.nanoseconds_a_frame());
-        assert_eq!(plain_stages[0].render_units, render_units(&project, None));
+        assert_eq!(plain_stages[0].render_units, render_units(&project));
 
         let normalising = ExportPlan { format: Format::Mp3Cbr320, normalise: Normalise::Loudness(-14.0), ..plan_for(&folder) };
         let two = stages_of(&project, &normalising, span, &[], true);
@@ -903,10 +941,9 @@ mod tests {
 
         let stems: Vec<&Track> = project.tracks.iter().filter(|track| !track.muted).collect();
         let split = stages_of(&project, &ExportPlan { split: true, ..normalising }, span, &stems, true);
-        assert_eq!(split.len(), 2 + stems.len());
-        for stage in &split[2..] {
-            assert!(stage.render_units < split[0].render_units, "one track is less work than the whole mix");
-        }
+        assert_eq!(split.len(), 3, "every stem comes out of one more render");
+        assert_eq!(split[2].render_units, split[0].render_units, "the stems render the whole graph once");
+        assert_eq!(split[2].other_nanoseconds_a_frame, Format::Mp3Cbr320.nanoseconds_a_frame() * stems.len() as f64);
         let whole: f64 = shares(&split, RENDER_NANOSECONDS_A_UNIT).iter().sum();
         assert!((whole - 1.0).abs() < 1e-9);
         let _ = fs::remove_dir_all(folder);
@@ -915,7 +952,7 @@ mod tests {
     #[test]
     fn plugins_count_towards_what_a_render_costs() {
         let mut project = song();
-        let bare = render_units(&project, None);
+        let bare = render_units(&project);
         project.tracks[0].fx.push(crate::model::Fx {
             mix: 1.0,
             path: "a.vst3".into(),
@@ -925,8 +962,7 @@ mod tests {
             state: Vec::new(),
             record: false,
         });
-        assert!(render_units(&project, None) > bare, "a plugin is work the bar should know about");
-        assert!(render_units(&project, Some(project.tracks[1].id)) < render_units(&project, None));
+        assert!(render_units(&project) > bare, "a plugin is work the bar should know about");
     }
 
     #[test]
@@ -1128,5 +1164,82 @@ mod tests {
         assert!(folder.join(STEMS_FOLDER).join("Lead vox.mp3").exists());
         assert!(!folder.join("Song.wav").exists());
         fs::remove_dir_all(folder).unwrap();
+    }
+
+    fn bussed() -> Project {
+        let mut p = Project::new(48_000);
+        let mut made = Vec::new();
+        for name in ["Vox Chain", "Vox 1", "Vox Reverb"] {
+            let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: name.into() }) else {
+                panic!("no track")
+            };
+            made.push(track);
+        }
+        let source = Arc::new(Source::from_frames("vox", vec![[0.4f32, 0.4]; 40_000]));
+        p.apply(Command::AddClip { track: made[1], source, start: 0 }).unwrap();
+        p.apply(Command::SetTrackParent { track: made[1], parent: Some(made[0]) }).unwrap();
+        p.apply(Command::AddSend { from: made[1], to: made[2] }).unwrap();
+        p.apply(Command::SetSendGain { from: made[1], to: made[2], gain: 0.25 }).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_bus_stem_holds_what_its_children_feed_it() {
+        let project = bussed();
+        let folder = scratch("bus-stems");
+        let plan = ExportPlan { split: true, ..plan_for(&folder) };
+        export(&project, &plan, &|_| true).unwrap();
+        let stems = folder.join(STEMS_FOLDER);
+        let chain = Source::load(&stems.join("Vox Chain.wav"), 48_000).unwrap();
+        let vox = Source::load(&stems.join("Vox 1.wav"), 48_000).unwrap();
+        assert_eq!(chain.frames.len() as u64, project.length());
+        assert!((chain.frames[1000][0] - 0.4).abs() < 1e-6, "the bus stem holds {:?}", chain.frames[1000]);
+        assert!((vox.frames[1000][0] - 0.4).abs() < 1e-6, "{:?}", vox.frames[1000]);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_send_into_a_bus_lands_in_that_bus_stem() {
+        let project = bussed();
+        let folder = scratch("send-stems");
+        let plan = ExportPlan { split: true, ..plan_for(&folder) };
+        export(&project, &plan, &|_| true).unwrap();
+        let reverb = Source::load(&folder.join(STEMS_FOLDER).join("Vox Reverb.wav"), 48_000).unwrap();
+        assert!((reverb.frames[1000][0] - 0.1).abs() < 1e-6, "the send stem holds {:?}", reverb.frames[1000]);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_stem_carries_its_own_chain_gain_and_pan() {
+        let mut project = bussed();
+        let vox = project.tracks[1].id;
+        project.apply(Command::SetTrackGain { track: vox, gain: 0.5 }).unwrap();
+        project.apply(Command::SetTrackPan { track: vox, pan: -1.0 }).unwrap();
+        let folder = scratch("stem-fader");
+        let plan = ExportPlan { split: true, ..plan_for(&folder) };
+        export(&project, &plan, &|_| true).unwrap();
+        let stems = folder.join(STEMS_FOLDER);
+        let heard = Source::load(&stems.join("Vox 1.wav"), 48_000).unwrap();
+        let (left, right) = crate::render::pan_gains(-1.0);
+        assert!((heard.frames[1000][0] - 0.2 * left).abs() < 1e-6, "{:?}", heard.frames[1000]);
+        assert!((heard.frames[1000][1] - 0.2 * right).abs() < 1e-6, "{:?}", heard.frames[1000]);
+        let chain = Source::load(&stems.join("Vox Chain.wav"), 48_000).unwrap();
+        assert!((chain.frames[1000][0] - 0.2 * left).abs() < 1e-6, "the fader reached the bus {:?}", chain.frames[1000]);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn splitting_leaves_the_mixdown_alone() {
+        let project = bussed();
+        let plain = scratch("mix-plain");
+        export(&project, &plan_for(&plain), &|_| true).unwrap();
+        let split = scratch("mix-split");
+        export(&project, &ExportPlan { split: true, ..plan_for(&split) }, &|_| true).unwrap();
+        let one = Source::load(&plain.join("Song.wav"), 48_000).unwrap();
+        let two = Source::load(&split.join("Song.wav"), 48_000).unwrap();
+        assert_eq!(one.frames, two.frames);
+        assert_eq!(one.frames, heard(&project));
+        fs::remove_dir_all(plain).unwrap();
+        fs::remove_dir_all(split).unwrap();
     }
 }

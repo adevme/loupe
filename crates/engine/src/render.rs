@@ -301,6 +301,13 @@ impl Mixdown {
             self.pre.resize(frames, [0.0; 2]);
         }
     }
+
+    pub fn tap(&self, track: usize, frames: usize) -> Option<&[[f32; 2]]> {
+        if !self.ordered {
+            return None;
+        }
+        self.buffers.get(track).filter(|buffer| buffer.len() >= frames).map(|buffer| &buffer[..frames])
+    }
 }
 
 pub fn mix_tracks(project: &Project, pos: Frames, out: &mut [[f32; 2]], only: Option<ClipId>) {
@@ -1329,6 +1336,84 @@ mod tests {
         assert_eq!(out[70], [10.0, -10.0]);
         p.apply(Command::DeleteClip(c)).unwrap();
         assert!(whole(&p, 200).iter().all(|f| *f == [0.0, 0.0]));
+    }
+
+    fn tapped(p: &Project, frames: usize) -> Vec<Vec<[f32; 2]>> {
+        let mut out = vec![[0.0; 2]; frames];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(p, 0, &mut out, None, None, &mut scratch, None);
+        (0..p.tracks.len())
+            .map(|index| scratch.tap(index, frames).map(<[[f32; 2]]>::to_vec).unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn a_bus_with_no_clips_of_its_own_taps_what_its_child_feeds_it() {
+        let mut p = Project::new(48_000);
+        let bus = track(&mut p);
+        let child = track(&mut p);
+        flat(&mut p, child, 0.5, 64);
+        p.apply(Command::SetTrackParent { track: child, parent: Some(bus) }).unwrap();
+        let taps = tapped(&p, 32);
+        assert!((taps[0][8][0] - 0.5).abs() < 1e-6, "the bus tapped {:?}", taps[0][8]);
+        assert!((taps[1][8][0] - 0.5).abs() < 1e-6, "the child tapped {:?}", taps[1][8]);
+    }
+
+    #[test]
+    fn a_tap_carries_the_track_gain_and_pan() {
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        flat(&mut p, one, 0.8, 64);
+        p.apply(Command::SetTrackGain { track: one, gain: 0.5 }).unwrap();
+        p.apply(Command::SetTrackPan { track: one, pan: 1.0 }).unwrap();
+        let taps = tapped(&p, 32);
+        let (left, right) = pan_gains(1.0);
+        assert!((taps[0][8][0] - 0.4 * left).abs() < 1e-6, "{:?}", taps[0][8]);
+        assert!((taps[0][8][1] - 0.4 * right).abs() < 1e-6, "{:?}", taps[0][8]);
+    }
+
+    #[test]
+    fn a_send_into_a_bus_shows_up_in_the_tap_of_that_bus() {
+        let mut p = Project::new(48_000);
+        let reverb = track(&mut p);
+        let vox = track(&mut p);
+        flat(&mut p, vox, 0.4, 64);
+        p.apply(Command::AddSend { from: vox, to: reverb }).unwrap();
+        p.apply(Command::SetSendGain { from: vox, to: reverb, gain: 0.25 }).unwrap();
+        let taps = tapped(&p, 32);
+        assert!((taps[0][8][0] - 0.1).abs() < 1e-6, "the reverb bus tapped {:?}", taps[0][8]);
+        assert!((taps[1][8][0] - 0.4).abs() < 1e-6, "the send did not change the vox {:?}", taps[1][8]);
+    }
+
+    #[test]
+    fn a_pre_fader_send_taps_the_level_before_the_fader() {
+        let mut p = Project::new(48_000);
+        let reverb = track(&mut p);
+        let vox = track(&mut p);
+        flat(&mut p, vox, 0.4, 64);
+        p.apply(Command::AddSend { from: vox, to: reverb }).unwrap();
+        p.apply(Command::SetSendPreFader { from: vox, to: reverb, pre_fader: true }).unwrap();
+        p.apply(Command::SetTrackGain { track: vox, gain: 0.5 }).unwrap();
+        let taps = tapped(&p, 32);
+        assert!((taps[0][8][0] - 0.4).abs() < 1e-6, "the reverb bus tapped {:?}", taps[0][8]);
+        assert!((taps[1][8][0] - 0.2).abs() < 1e-6, "{:?}", taps[1][8]);
+    }
+
+    #[test]
+    fn the_taps_of_the_top_level_tracks_add_up_to_the_mix() {
+        let mut p = Project::new(48_000);
+        let bus = track(&mut p);
+        let child = track(&mut p);
+        let beat = track(&mut p);
+        flat(&mut p, child, 0.3, 64);
+        flat(&mut p, beat, 0.2, 64);
+        p.apply(Command::SetTrackParent { track: child, parent: Some(bus) }).unwrap();
+        let mut out = vec![[0.0; 2]; 32];
+        let mut scratch = Mixdown::default();
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, None);
+        let bus_tap = scratch.tap(0, 32).unwrap()[8];
+        let beat_tap = scratch.tap(2, 32).unwrap()[8];
+        assert!((out[8][0] - bus_tap[0] - beat_tap[0]).abs() < 1e-6, "{:?}", out[8]);
     }
 }
 
