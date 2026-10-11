@@ -100,6 +100,7 @@ mod real {
         fn EndPaint(window: Handle, paint: *const PaintHeld) -> i32;
         fn SetCapture(window: Handle) -> Handle;
         fn ReleaseCapture() -> i32;
+        fn GetCapture() -> Handle;
         fn TrackMouseEvent(track: *mut TrackMouse) -> i32;
         fn GetWindowLongW(window: Handle, which: i32) -> isize;
         fn GetWindowRect(window: Handle, rect: *mut [i32; 4]) -> i32;
@@ -163,10 +164,11 @@ mod real {
     const POPUP: u32 = 0x8000_0000;
     const TOP_MOST_WINDOW: u32 = 0x0000_0008;
     const SHOW_NO_FOCUS: i32 = 4;
-    const KILL_FOCUS: u32 = 0x0008;
+    const CAPTURE_LOST: u32 = 0x0215;
     const NO_CLIP_ELLIPSIS: u32 = 0x0004_0000;
     const NAME_HINT: &str = "Name this preset";
     const NAME_WIDEST: i32 = 300;
+    const NAME_LEAST: i32 = 160;
     const TEXT_HEIGHT: i32 = 15;
     const FONT_FACE: &str = "Segoe UI";
     const PAINT_MESSAGE: u32 = 0x000F;
@@ -239,6 +241,8 @@ mod real {
     thread_local! {
         static STRIP: RefCell<Bar> = const { RefCell::new(Bar::empty()) };
         static LIST_WINDOW: Cell<Handle> = const { Cell::new(std::ptr::null_mut()) };
+        static LIST_ARMED: Cell<bool> = const { Cell::new(false) };
+        static PLUGIN_WIDE: Cell<i32> = const { Cell::new(0) };
         static FOLLOWING: RefCell<Option<Box<dyn Fn(i32, i32)>>> = const { RefCell::new(None) };
     }
 
@@ -274,6 +278,10 @@ mod real {
         }
     }
 
+    fn bar_least() -> i32 {
+        grown(GAP) * 5 + grown(LIST_WIDTH) + grown(NAME_LEAST) + grown(SAVE_WIDTH) + grown(DELETE_WIDTH)
+    }
+
     fn spots(width: i32) -> [(Spot, [i32; 4]); 4] {
         let (bar, row, gap) = (grown(BAR), grown(ROW), grown(GAP));
         let (picker, save_wide, delete_wide) = (grown(LIST_WIDTH), grown(SAVE_WIDTH), grown(DELETE_WIDTH));
@@ -282,7 +290,7 @@ mod real {
         let save_at = width - gap - save_wide - gap - delete_wide;
         let delete_at = width - gap - delete_wide;
         let name_at = gap * 2 + picker;
-        let name_to = (save_at - gap).min(name_at + grown(NAME_WIDEST)).max(name_at + grown(60));
+        let name_to = (save_at - gap).min(name_at + grown(NAME_WIDEST)).max(name_at + grown(NAME_LEAST));
         [
             (Spot::Picker, [gap, top, gap + picker, bottom]),
             (Spot::Name, [name_at, top, name_to, bottom]),
@@ -387,9 +395,20 @@ mod real {
                 }
                 return 0;
             }
+            LEFT_DOWN => {
+                LIST_ARMED.with(|kept| kept.set(true));
+                return 0;
+            }
             LEFT_UP => {
-                let y = ((second >> 16) & 0xFFFF) as i16 as i32;
-                let picked = usize::try_from((y - 1) / grown(ROW_TALL)).ok();
+                let (x, y) = ((second & 0xFFFF) as i16 as i32, ((second >> 16) & 0xFFFF) as i16 as i32);
+                let mut inside = [0i32; 4];
+                GetClientRect(window, &mut inside);
+                let within = x >= 0 && y >= 0 && x < inside[2] && y < inside[3];
+                if !within && !LIST_ARMED.with(Cell::get) {
+                    LIST_ARMED.with(|kept| kept.set(true));
+                    return 0;
+                }
+                let picked = within.then(|| usize::try_from((y - 1) / grown(ROW_TALL)).ok()).flatten();
                 let asked = STRIP.with(|kept| {
                     let mut bar = kept.borrow_mut();
                     let at = picked.filter(|at| *at < bar.names.len())?;
@@ -402,7 +421,7 @@ mod real {
                 shut_list();
                 return 0;
             }
-            KILL_FOCUS => {
+            CAPTURE_LOST => {
                 shut_list();
                 return 0;
             }
@@ -414,6 +433,7 @@ mod real {
     unsafe fn shut_list() {
         let window = LIST_WINDOW.with(Cell::get);
         if !window.is_null() {
+            ReleaseCapture();
             LIST_WINDOW.with(|held| held.set(std::ptr::null_mut()));
             DestroyWindow(window);
         }
@@ -457,9 +477,10 @@ mod real {
             return;
         }
         LIST_WINDOW.with(|held| held.set(made));
+        LIST_ARMED.with(|held| held.set(false));
         STRIP.with(|held| held.borrow_mut().listing = true);
         ShowWindow(made, SHOW_NO_FOCUS);
-        SetFocus(made);
+        SetCapture(made);
     }
 
     unsafe fn draw_bar(window: Handle, dc: Handle) {
@@ -550,10 +571,12 @@ mod real {
                 if let Some(parts) = PARTS.with(Cell::get) {
                     let width = (second & 0xFFFF) as i32;
                     let height = ((second >> 16) & 0xFFFF) as i32;
-                    MoveWindow(parts.area, 0, grown(BAR), width, (height - grown(BAR)).max(0), 1);
+                    let own = PLUGIN_WIDE.with(Cell::get);
+                    let wide = if own > 0 { width.min(own) } else { width };
+                    MoveWindow(parts.area, 0, grown(BAR), wide, (height - grown(BAR)).max(0), 1);
                     FOLLOWING.with(|held| {
                         if let Some(follow) = held.borrow().as_ref() {
-                            follow(width, (height - grown(BAR)).max(0));
+                            follow(wide, (height - grown(BAR)).max(0));
                         }
                     });
                 }
@@ -598,7 +621,7 @@ mod real {
                     bar.typing = hit == Some(Spot::Name);
                     bar.held = hit.filter(|spot| matches!(spot, Spot::Save | Spot::Delete));
                 });
-                if hit.is_some() {
+                if hit.is_some() && hit != Some(Spot::Picker) {
                     SetCapture(window);
                     SetFocus(window);
                 }
@@ -613,7 +636,9 @@ mod real {
                 GetClientRect(window, &mut whole);
                 let (x, y) = ((second & 0xFFFF) as i16 as i32, ((second >> 16) & 0xFFFF) as i16 as i32);
                 let hit = spot_at(whole[2], x, y);
-                ReleaseCapture();
+                if GetCapture() == window {
+                    ReleaseCapture();
+                }
                 let asked = STRIP.with(|held| {
                     let mut bar = held.borrow_mut();
                     let was = bar.held.take();
@@ -787,7 +812,8 @@ mod real {
                     return Err("Loupe could not open a window for the plugin".into());
                 }
                 measure_screen(handle);
-                let mut fitted = [0, 0, width, height + grown(BAR)];
+                PLUGIN_WIDE.with(|held| held.set(width));
+                let mut fitted = [0, 0, width.max(bar_least()), height + grown(BAR)];
                 AdjustWindowRectEx(&mut fitted, frame, 0, 0);
                 SetWindowPos(handle, TOP, 0, 0, fitted[2] - fitted[0], fitted[3] - fitted[1], KEEP_PLACE);
                 wear_dark(handle);
@@ -831,7 +857,8 @@ mod real {
 
         pub fn fit_around(&self, width: i32, height: i32) {
             unsafe {
-                let mut rect = [0, 0, width, height + grown(BAR)];
+                PLUGIN_WIDE.with(|held| held.set(width));
+                let mut rect = [0, 0, width.max(bar_least()), height + grown(BAR)];
                 let style = GetWindowLongW(self.handle, GWL_STYLE) as u32;
                 AdjustWindowRectEx(&mut rect, style, 0, 0);
                 let mut where_it_is = [0i32; 4];

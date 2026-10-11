@@ -28,7 +28,6 @@ impl IHostApplicationTrait for Us {
     }
 
     unsafe fn createInstance(&self, _cid: *mut TUID, iid: *mut TUID, obj: *mut *mut std::ffi::c_void) -> tresult {
-        { use std::io::Write; let _ = std::fs::OpenOptions::new().create(true).append(true).open("C:\\Users\\ash\\probe\\step.txt").map(|mut f| writeln!(f, "STEP createInstance")); }
         if obj.is_null() {
             return kNotImplemented;
         }

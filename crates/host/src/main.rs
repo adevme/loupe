@@ -177,7 +177,13 @@ fn names_in(path: &Path) -> Result<Vec<String>, String> {
         "clap" => clap::Library::open(path).map(|library| library.classes().into_iter().map(|class| class.name).collect()),
         "lv2" => lv2::Library::open(path).map(|library| library.classes().into_iter().map(|class| class.name).collect()),
         "au" => au_names(),
-        _ => vst3::Library::open(path).map(|library| library.classes().into_iter().map(|class| class.name).collect()),
+        _ => vst3::Library::open(path).map(|library| {
+            library
+                .classes()
+                .into_iter()
+                .map(|class| if class.category == "Audio Module Class" { class.name } else { String::new() })
+                .collect()
+        }),
     }
 }
 
@@ -578,14 +584,12 @@ fn show(
     }
     unsafe { made.attach(pane.inner(), kind) }?;
     let scale = pane.screen_scale();
-    if scale > 1.01 {
-        made.told_its_scale(scale);
-    }
+    let aware = scale > 1.01 && made.told_its_scale(scale);
     if !on.0.is_empty() {
         made.told_its_track(&on.0, on.1);
     }
     let asked = made.size();
-    let settled = scaled_to_fit(asked, scale, pane.screen_size());
+    let settled = scaled_to_fit(asked, if aware { 1.0 } else { scale }, pane.screen_size());
     if settled != (width, height) && settled.0 > 0 && settled.1 > 0 {
         pane.fit_around(settled.0, settled.1);
     }

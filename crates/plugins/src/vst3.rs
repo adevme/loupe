@@ -17,28 +17,6 @@ pub struct Class {
     pub id: [u8; 16],
 }
 
-
-pub fn effects_in(bundle: &Path) -> Vec<(usize, String)> {
-    let Ok(library) = Library::open(bundle) else {
-        return fallback(bundle);
-    };
-    let classes = library.classes();
-    let effects: Vec<(usize, String)> = classes
-        .iter()
-        .enumerate()
-        .filter(|(_, class)| class.category == "Audio Module Class")
-        .map(|(index, class)| (index, class.name.clone()))
-        .collect();
-    match effects.is_empty() {
-        true => fallback(bundle),
-        false => effects,
-    }
-}
-
-fn fallback(bundle: &Path) -> Vec<(usize, String)> {
-    let name = bundle.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    vec![(0, name)]
-}
 pub fn binary_in(bundle: &Path) -> PathBuf {
     if bundle.is_file() {
         return bundle.to_path_buf();
@@ -62,10 +40,27 @@ pub fn binary_in(bundle: &Path) -> PathBuf {
         .unwrap_or(direct)
 }
 
+fn open_binary(binary: &Path) -> Result<libloading::Library, String> {
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{Library as WindowsLibrary, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32};
+        let flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_SYSTEM32;
+        let found = unsafe { WindowsLibrary::load_with_flags(binary, flags) };
+        return match found {
+            Ok(library) => Ok(library.into()),
+            Err(why) => Err(format!("{} could not be opened: {why}", binary.display())),
+        };
+    }
+    #[cfg(not(windows))]
+    unsafe {
+        libloading::Library::new(binary).map_err(|why| format!("{} could not be opened: {why}", binary.display()))
+    }
+}
+
 impl Library {
     pub fn open(bundle: &Path) -> Result<Self, String> {
         let binary = binary_in(bundle);
-        let lib = unsafe { libloading::Library::new(&binary) }.map_err(|why| format!("{} could not be opened: {why}", binary.display()))?;
+        let lib = open_binary(&binary)?;
         unsafe {
             if let Ok(enter) = lib.get::<unsafe extern "C" fn() -> bool>(entry_name()) {
                 if !enter() {
@@ -128,11 +123,7 @@ impl Library {
 
 impl Drop for Library {
     fn drop(&mut self) {
-        if let Some(exit) = self.exit {
-            unsafe {
-                exit();
-            }
-        }
+        let _ = self.exit;
     }
 }
 
