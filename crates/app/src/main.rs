@@ -192,6 +192,8 @@ pub enum Message {
     ScriptKey(String, keyboard::Modifiers),
     OpenAbout,
     StartRename(TrackId),
+    StartRenameFx(stockwin::Spot, usize),
+    MixerNameClicked(TrackId),
     RenameTrackAt { track: TrackId, at: Point },
     StartColour(TrackId),
     EntryTyped(String),
@@ -461,6 +463,8 @@ pub enum Overlay {
     Plugins(TrackId),
     ClipPlugins(ClipId),
     Knobs(stockwin::Spot, usize),
+    RenameFx(stockwin::Spot, usize),
+    RenameInMixer(TrackId),
     Automation(loupe_engine::Target),
     MasterPlugins,
     Stock,
@@ -478,6 +482,20 @@ pub enum Pending {
     Quit,
 }
 
+
+impl Overlay {
+    fn is_a_menu(&self) -> bool {
+        matches!(
+            self,
+            Overlay::FileMenu
+                | Overlay::HelpMenu
+                | Overlay::ViewMenu
+                | Overlay::ScriptsMenu
+                | Overlay::TrackMenu { .. }
+                | Overlay::MixerMenu { .. }
+        )
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
     Home,
@@ -567,6 +585,7 @@ struct App {
     entry: String,
     clip_name: String,
     chain_drag: Option<(stockwin::Spot, usize)>,
+    name_clicked: Option<(TrackId, std::time::Instant)>,
     chain_over: Option<(stockwin::Spot, usize)>,
     entry_problem: Option<String>,
     main_window: window::Id,
@@ -700,6 +719,7 @@ impl App {
             entry: String::new(),
             clip_name: String::new(),
             chain_drag: None,
+            name_clicked: None,
             chain_over: None,
             entry_problem: None,
             main_window: main,
@@ -1370,6 +1390,25 @@ impl App {
                     return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
                 }
             }
+            Message::MixerNameClicked(track) => {
+                let now = std::time::Instant::now();
+                let again = self.name_clicked.is_some_and(|(was, when)| was == track && now.duration_since(when) < DOUBLE_CLICK);
+                self.name_clicked = (!again).then_some((track, now));
+                if again {
+                    if let Some(found) = self.project.track(track) {
+                        self.entry = found.name.clone();
+                        self.overlay = Overlay::RenameInMixer(track);
+                        return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
+                    }
+                }
+            }
+            Message::StartRenameFx(spot, slot) => {
+                if let Some(fx) = self.chain_of(spot).and_then(|chain| chain.get(slot)) {
+                    self.entry = fx.name.clone();
+                    self.overlay = Overlay::RenameFx(spot, slot);
+                    return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
+                }
+            }
             Message::RenameTrackAt { track, at } => {
                 if let Some(found) = self.project.track(track) {
                     self.entry = found.name.clone();
@@ -1402,6 +1441,21 @@ impl App {
                     self.edit(None, Command::RenameTrack { track, name });
                     self.overlay = Overlay::None;
                 }
+                Overlay::RenameInMixer(track) => {
+                    let name = self.entry.clone();
+                    self.edit(None, Command::RenameTrack { track, name });
+                    self.overlay = Overlay::None;
+                }
+                Overlay::RenameFx(spot, slot) => {
+                    let name = self.entry.clone();
+                    let wanted = match spot {
+                        stockwin::Spot::Track(track) => Command::RenameFx { track, slot, name },
+                        stockwin::Spot::Clip(clip) => Command::RenameClipFx { clip, slot, name },
+                        stockwin::Spot::Master => Command::RenameMasterFx { slot, name },
+                    };
+                    self.edit(None, wanted);
+                    self.overlay = Overlay::None;
+                }
                 Overlay::Colour { track, .. } => {
                     if let Some(colour) = menus::colour_from_hex(&self.entry) {
                         self.edit(None, Command::SetTrackColour { track, colour: Some(colour) });
@@ -1430,16 +1484,15 @@ impl App {
                 }
             }
             Message::ToggleMixer => {
-                if let Some(window) = self.mixer_window {
-                    return iced::window::gain_focus(window);
-                }
                 self.mixer_open = !self.mixer_open;
                 let _ = settings::save("mixer", if self.mixer_open { "open" } else { "closed" });
-                if !self.mixer_open {
-                    if let Some(window) = self.mixer_window.take() {
-                        let _ = settings::save("mixer_alone", "no");
-                        return window::close(window);
+                match self.mixer_open {
+                    false => {
+                        if let Some(window) = self.mixer_window.take() {
+                            return window::close(window);
+                        }
                     }
+                    true => return self.mixer_follows_the_song(),
                 }
             }
             Message::MixerToItsOwnWindow => {
@@ -1460,7 +1513,8 @@ impl App {
             Message::WindowClosed(window) => {
                 if self.mixer_window == Some(window) {
                     self.mixer_window = None;
-                    let _ = settings::save("mixer_alone", "no");
+                    self.mixer_open = false;
+                    let _ = settings::save("mixer", "closed");
                     return window::close(window);
                 } else if window == self.main_window {
                     if self.dirty && !self.project.tracks.is_empty() {
@@ -2023,13 +2077,17 @@ impl App {
                 }
             }
             Message::Save => {
-                self.overlay = Overlay::None;
+                if self.overlay.is_a_menu() {
+                    self.overlay = Overlay::None;
+                }
                 if !self.project.tracks.is_empty() {
                     return self.save();
                 }
             }
             Message::SaveAs => {
-                self.overlay = Overlay::None;
+                if self.overlay.is_a_menu() {
+                    self.overlay = Overlay::None;
+                }
                 if !self.project.tracks.is_empty() {
                     return self.save_as();
                 }
@@ -2848,9 +2906,12 @@ impl App {
     }
 
     fn view_of(&self, window: window::Id) -> Element<'_, Message> {
-        match self.mixer_window == Some(window) {
-            true => self.mixer_alone(),
-            false => self.view(),
+        if self.mixer_window != Some(window) {
+            return self.view();
+        }
+        match self.overlay {
+            Overlay::RenameInMixer(_) => stack![self.mixer_alone(), self.centred(self.rename_sheet())].into(),
+            _ => self.mixer_alone(),
         }
     }
 

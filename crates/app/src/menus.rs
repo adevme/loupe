@@ -45,6 +45,7 @@ impl App {
             Overlay::MixerMenu { at } => self.floating(*at, self.mixer_menu()),
             Overlay::Chain(spot) => self.centred(self.chain_sheet(*spot)),
             Overlay::Exported(folder, note) => self.centred(self.exported_sheet(folder, note.as_deref())),
+            Overlay::Rename { at, .. } if *at == Point::ORIGIN => self.centred(self.rename_sheet()),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),
             Overlay::Colour { track, at } => self.floating(*at, self.colour_sheet(*track)),
             Overlay::Inputs { track, at, inputs } => self.floating(*at, self.input_menu(*track, *inputs)),
@@ -54,6 +55,9 @@ impl App {
             Overlay::MasterPlugins => self.centred(self.picker("Plugins for Master".to_string(), &Message::AddMasterPlugin)),
             Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
+            Overlay::RenameFx(..) => self.centred(self.rename_fx_sheet()),
+            Overlay::RenameInMixer(..) if self.mixer_window.is_none() => self.centred(self.rename_sheet()),
+            Overlay::RenameInMixer(..) => Space::new(0, 0).into(),
             Overlay::Automation(target) => self.centred(self.automation_sheet(*target)),
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
@@ -64,7 +68,7 @@ impl App {
         }
     }
 
-    fn centred<'a>(&self, sheet: Element<'a, Message>) -> Element<'a, Message> {
+    pub(crate) fn centred<'a>(&self, sheet: Element<'a, Message>) -> Element<'a, Message> {
         let palette = self.palette;
         opaque(
             mouse_area(center(opaque(sheet)).padding(16).style(move |_| palette.backdrop()))
@@ -282,11 +286,19 @@ impl App {
             .into()
     }
 
-    fn rename_sheet(&self) -> Element<'_, Message> {
+    pub(crate) fn rename_sheet(&self) -> Element<'_, Message> {
         let palette = self.palette;
         self.menu(vec![
             container(text("Rename track").size(12).color(palette.text_dim)).padding([4, 4]).into(),
             self.entry_field("Track name"),
+        ])
+    }
+
+    fn rename_fx_sheet(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        self.menu(vec![
+            container(text("Rename plugin").size(12).color(palette.text_dim)).padding([4, 4]).into(),
+            self.entry_field("Plugin name"),
         ])
     }
 
