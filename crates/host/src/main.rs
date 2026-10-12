@@ -322,9 +322,19 @@ fn main() {
     'living: loop {
         if let Some((made, pane, seat)) = editor.as_ref() {
             let seat = *seat;
+            let mut chords: Vec<Reply> = Vec::new();
             for asked in pane.pump() {
+                if let Some(chord) = told_the_song(&asked) {
+                    if !chords.contains(&chord) {
+                        chords.push(chord);
+                    }
+                    continue;
+                }
                 let name = seats.at(seat).map(|seated| seated.name.clone()).unwrap_or_default();
                 use_preset(asked, seats.at(seat).map(|seated| &mut seated.open), pane, &name);
+            }
+            for chord in chords {
+                let _ = chord.write(&mut out);
             }
             if let Some((width, height)) = made.wanted_size() {
                 let scale = pane.screen_scale();
@@ -624,6 +634,15 @@ fn preset_folder(plugin: &str) -> Option<PathBuf> {
     Some(loupe_plugins::presets::folder_for(Path::new(&root), plugin))
 }
 
+fn told_the_song(asked: &window::Asked) -> Option<Reply> {
+    match asked {
+        window::Asked::SaveTheSong => Some(Reply::SaveTheSong),
+        window::Asked::UndoAnEdit => Some(Reply::UndoAnEdit),
+        window::Asked::RedoAnEdit => Some(Reply::RedoAnEdit),
+        _ => None,
+    }
+}
+
 fn use_preset(asked: window::Asked, open: Option<&mut Open>, pane: &window::Window, plugin: &str) {
     let (Some(effect), Some(folder)) = (open, preset_folder(plugin)) else { return };
     match asked {
@@ -644,6 +663,7 @@ fn use_preset(asked: window::Asked, open: Option<&mut Open>, pane: &window::Wind
                 pane.clear_name();
             }
         }
+        window::Asked::SaveTheSong | window::Asked::UndoAnEdit | window::Asked::RedoAnEdit => {}
     }
 }
 

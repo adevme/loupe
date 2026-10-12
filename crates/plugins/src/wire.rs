@@ -48,6 +48,9 @@ pub enum Reply {
     Edited(bool),
     Fine,
     Fell(usize),
+    SaveTheSong,
+    UndoAnEdit,
+    RedoAnEdit,
     Trouble(String),
 }
 
@@ -192,6 +195,9 @@ impl Reply {
             Reply::Edited(yes) => format!("edited\t{}", *yes as u8),
             Reply::Fine => "fine".to_string(),
             Reply::Fell(seat) => format!("{FELL}\t{seat}"),
+            Reply::SaveTheSong => "savesong".to_string(),
+            Reply::UndoAnEdit => "undoedit".to_string(),
+            Reply::RedoAnEdit => "redoedit".to_string(),
             Reply::Trouble(why) => format!("trouble\t{}", why.replace('\n', " ")),
         };
         writeln!(out, "{line}")?;
@@ -231,6 +237,9 @@ impl Reply {
             "edited" => Some(Reply::Edited(parts.next()? == "1")),
             "fine" => Some(Reply::Fine),
             FELL => Some(Reply::Fell(parts.next()?.parse().ok()?)),
+            "savesong" => Some(Reply::SaveTheSong),
+            "undoedit" => Some(Reply::UndoAnEdit),
+            "redoedit" => Some(Reply::RedoAnEdit),
             "trouble" => Some(Reply::Trouble(parts.next().unwrap_or("something went wrong").to_string())),
             _ => None,
         }
@@ -446,6 +455,9 @@ mod tests {
             Reply::Value(0.75),
             Reply::Fine,
             Reply::Fell(5),
+            Reply::SaveTheSong,
+            Reply::UndoAnEdit,
+            Reply::RedoAnEdit,
             Reply::Trouble("it broke".into()),
         ];
         for reply in replies {

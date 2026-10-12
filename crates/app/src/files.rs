@@ -77,6 +77,23 @@ impl App {
         }
     }
 
+    pub(crate) fn take_plugin_window_chords(&mut self) -> Task<Message> {
+        let mut doing = Vec::new();
+        let asked_to_save = loupe_plugins::sandbox::asked_to_save_the_song();
+        let asked_to_undo = loupe_plugins::sandbox::asked_to_undo_an_edit();
+        let asked_to_redo = loupe_plugins::sandbox::asked_to_redo_an_edit();
+        if asked_to_save && self.overlay != Overlay::SaveName {
+            doing.push(self.update(Message::Save));
+        }
+        if asked_to_undo {
+            doing.push(self.update(Message::Undo));
+        }
+        if asked_to_redo {
+            doing.push(self.update(Message::Redo));
+        }
+        Task::batch(doing)
+    }
+
     pub(crate) fn save_as(&mut self) -> Task<Message> {
         self.entry = self.path.as_deref().map(crate::home::stem).unwrap_or_default();
         self.entry_problem = None;

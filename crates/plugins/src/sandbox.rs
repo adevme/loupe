@@ -1,6 +1,7 @@
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -16,9 +17,45 @@ const FIRST_BLOCK_PATIENCE: Duration = Duration::from_secs(10);
 pub const GOODBYE_PATIENCE: Duration = Duration::from_millis(500);
 pub const BETWEEN_GOODBYE_LOOKS: Duration = Duration::from_millis(5);
 
+#[derive(Clone, Copy)]
 enum Want {
     Line,
     Block,
+}
+
+static A_SAVE_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
+static AN_UNDO_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
+static A_REDO_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
+
+fn flag_for(chord: &Reply) -> Option<&'static AtomicBool> {
+    match chord {
+        Reply::SaveTheSong => Some(&A_SAVE_WAS_ASKED_FOR),
+        Reply::UndoAnEdit => Some(&AN_UNDO_WAS_ASKED_FOR),
+        Reply::RedoAnEdit => Some(&A_REDO_WAS_ASKED_FOR),
+        _ => None,
+    }
+}
+
+fn remember_the_chord(chord: &Reply) -> bool {
+    match flag_for(chord) {
+        Some(flag) => {
+            flag.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
+}
+
+pub fn asked_to_save_the_song() -> bool {
+    A_SAVE_WAS_ASKED_FOR.swap(false, Ordering::Relaxed)
+}
+
+pub fn asked_to_undo_an_edit() -> bool {
+    AN_UNDO_WAS_ASKED_FOR.swap(false, Ordering::Relaxed)
+}
+
+pub fn asked_to_redo_an_edit() -> bool {
+    A_REDO_WAS_ASKED_FOR.swap(false, Ordering::Relaxed)
 }
 
 enum Got {
@@ -241,20 +278,28 @@ impl Sandbox {
     }
 }
 
-fn read_for(out: ChildStdout, asked: Receiver<Want>, sends: Sender<Got>) {
+fn read_for(out: impl Read, asked: Receiver<Want>, sends: Sender<Got>) {
     let mut reading = BufReader::new(out);
     let mut audio = Vec::new();
     while let Ok(want) = asked.recv() {
-        let got = match want {
-            Want::Line => match next_line(&mut reading) {
-                Some(line) => Got::Line(line),
-                None => Got::Gone,
-            },
-            Want::Block => match read_block_or_line(&mut reading, &mut audio) {
-                Ok(Came::Block) => Got::Block(std::mem::take(&mut audio)),
-                Ok(Came::Line(line)) => Got::Line(line),
-                Err(_) => Got::Gone,
-            },
+        let got = loop {
+            let came = match want {
+                Want::Line => match next_line(&mut reading) {
+                    Some(line) => Got::Line(line),
+                    None => Got::Gone,
+                },
+                Want::Block => match read_block_or_line(&mut reading, &mut audio) {
+                    Ok(Came::Block) => Got::Block(std::mem::take(&mut audio)),
+                    Ok(Came::Line(line)) => Got::Line(line),
+                    Err(_) => Got::Gone,
+                },
+            };
+            if let Got::Line(line) = &came {
+                if Reply::read(line).as_ref().is_some_and(remember_the_chord) {
+                    continue;
+                }
+            }
+            break came;
         };
         let gone = matches!(got, Got::Gone);
         if sends.send(got).is_err() || gone {
@@ -544,5 +589,116 @@ mod orphan_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let _ = std::fs::remove_dir_all(&folder);
+    }
+}
+
+#[cfg(test)]
+mod chord_tests {
+    use super::*;
+
+    const CHORDS: [Reply; 3] = [Reply::SaveTheSong, Reply::UndoAnEdit, Reply::RedoAnEdit];
+
+    fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let taken = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        nothing_is_waiting();
+        taken
+    }
+
+    fn nothing_is_waiting() {
+        let _ = asked_to_save_the_song();
+        let _ = asked_to_undo_an_edit();
+        let _ = asked_to_redo_an_edit();
+    }
+
+    fn waiting_now() -> (bool, bool, bool) {
+        (asked_to_save_the_song(), asked_to_undo_an_edit(), asked_to_redo_an_edit())
+    }
+
+    #[test]
+    fn each_chord_lands_on_its_own_and_nothing_else() {
+        let _turn = one_at_a_time();
+        for chord in CHORDS {
+            let wanted = match chord {
+                Reply::SaveTheSong => (true, false, false),
+                Reply::UndoAnEdit => (false, true, false),
+                _ => (false, false, true),
+            };
+            assert!(remember_the_chord(&chord));
+            assert_eq!(waiting_now(), wanted, "{chord:?} woke the wrong one");
+        }
+    }
+
+    #[test]
+    fn two_hosts_asking_at_once_only_save_the_song_once() {
+        let _turn = one_at_a_time();
+        let both: Vec<_> =
+            (0..2).map(|_| std::thread::spawn(|| remember_the_chord(&Reply::SaveTheSong))).collect();
+        for one in both {
+            assert!(one.join().expect("both hosts asked"));
+        }
+        assert!(asked_to_save_the_song(), "the first look should take the ask");
+        assert!(!asked_to_save_the_song(), "the second look should find nothing left");
+    }
+
+    #[test]
+    fn two_hosts_asking_at_once_only_undo_one_edit() {
+        let _turn = one_at_a_time();
+        let both: Vec<_> =
+            (0..2).map(|_| std::thread::spawn(|| remember_the_chord(&Reply::UndoAnEdit))).collect();
+        for one in both {
+            assert!(one.join().expect("both hosts asked"));
+        }
+        assert!(asked_to_undo_an_edit(), "the first look should take the ask");
+        assert!(!asked_to_undo_an_edit(), "the second look should find nothing left");
+    }
+
+    #[test]
+    fn an_ordinary_reply_is_not_a_chord() {
+        let _turn = one_at_a_time();
+        for reply in [Reply::Fine, Reply::Edited(true), Reply::Fell(2), Reply::Value(0.5)] {
+            assert!(!remember_the_chord(&reply), "{reply:?} was taken for a chord");
+        }
+        assert_eq!(waiting_now(), (false, false, false));
+    }
+
+    #[test]
+    fn nothing_is_waiting_until_a_host_asks() {
+        let _turn = one_at_a_time();
+        assert_eq!(waiting_now(), (false, false, false));
+        assert!(remember_the_chord(&Reply::RedoAnEdit));
+        assert_eq!(waiting_now(), (false, false, true));
+    }
+
+    #[test]
+    fn a_chord_does_not_stand_in_for_the_answer() {
+        let _turn = one_at_a_time();
+        let said = b"savesong\nundoedit\nsavesong\nedited\t1\n".to_vec();
+        let (wants, asked) = channel::<Want>();
+        let (sends, gets) = channel::<Got>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends));
+        wants.send(Want::Line).expect("the reader is listening");
+        let Ok(Got::Line(line)) = gets.recv_timeout(PATIENCE) else { panic!("the answer never came back") };
+        assert_eq!(Reply::read(&line), Some(Reply::Edited(true)));
+        assert_eq!(waiting_now(), (true, true, false));
+        drop(wants);
+        reader.join().expect("the reader finished");
+    }
+
+    #[test]
+    fn a_chord_does_not_stand_in_for_a_block() {
+        let _turn = one_at_a_time();
+        let mut said = Vec::new();
+        Reply::UndoAnEdit.write(&mut said).expect("the chord is written");
+        write_block(&mut said, &[[0.25f32, -0.25]; 4]).expect("the block is written");
+        let (wants, asked) = channel::<Want>();
+        let (sends, gets) = channel::<Got>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends));
+        wants.send(Want::Block).expect("the reader is listening");
+        let Ok(Got::Block(came)) = gets.recv_timeout(PATIENCE) else { panic!("the block never came back") };
+        assert_eq!(came, vec![[0.25f32, -0.25]; 4]);
+        assert_eq!(waiting_now(), (false, true, false));
+        drop(wants);
+        reader.join().expect("the reader finished");
     }
 }

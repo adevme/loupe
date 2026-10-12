@@ -4,6 +4,41 @@ pub enum Asked {
     Load(String),
     Save(String),
     Delete(String),
+    SaveTheSong,
+    UndoAnEdit,
+    RedoAnEdit,
+}
+
+const KEY_WENT_DOWN: u32 = 0x0100;
+const SYSTEM_KEY_WENT_DOWN: u32 = 0x0104;
+const CHARACTER: u32 = 0x0102;
+const SYSTEM_CHARACTER: u32 = 0x0106;
+const S_KEY: usize = 0x53;
+const Z_KEY: usize = 0x5A;
+const Y_KEY: usize = 0x59;
+const CONTROL_S_CHARACTER: usize = 0x13;
+const CONTROL_Z_CHARACTER: usize = 0x1A;
+const CONTROL_Y_CHARACTER: usize = 0x19;
+
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn chord_pressed(what: u32, key: usize, control_held: bool, shift_held: bool) -> Option<Asked> {
+    let letter = match what {
+        KEY_WENT_DOWN | SYSTEM_KEY_WENT_DOWN if control_held => key,
+        CHARACTER | SYSTEM_CHARACTER => match key {
+            CONTROL_S_CHARACTER => S_KEY,
+            CONTROL_Z_CHARACTER => Z_KEY,
+            CONTROL_Y_CHARACTER => Y_KEY,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    match (letter, shift_held) {
+        (S_KEY, false) => Some(Asked::SaveTheSong),
+        (Z_KEY, false) => Some(Asked::UndoAnEdit),
+        (Z_KEY, true) => Some(Asked::RedoAnEdit),
+        (Y_KEY, _) => Some(Asked::RedoAnEdit),
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
@@ -11,7 +46,7 @@ mod real {
     use std::cell::{Cell, RefCell};
     use std::ffi::c_void;
 
-    use super::Asked;
+    use super::{chord_pressed, Asked, CHARACTER};
 
     type Handle = *mut c_void;
 
@@ -104,6 +139,7 @@ mod real {
         fn TrackMouseEvent(track: *mut TrackMouse) -> i32;
         fn GetWindowLongW(window: Handle, which: i32) -> isize;
         fn GetWindowRect(window: Handle, rect: *mut [i32; 4]) -> i32;
+        fn GetKeyState(key: i32) -> i16;
     }
 
     #[link(name = "gdi32")]
@@ -176,8 +212,9 @@ mod real {
     const LEFT_UP: u32 = 0x0202;
     const MOUSE_MOVED: u32 = 0x0200;
     const MOUSE_LEFT: u32 = 0x02A3;
-    const CHARACTER: u32 = 0x0102;
     const LEAVE_WANTED: u32 = 0x0000_0002;
+    const CONTROL_KEY: i32 = 0x11;
+    const SHIFT_KEY: i32 = 0x10;
     const TEXT_INSET: i32 = 10;
     const CENTRED: u32 = 0x0001;
     const LEFT_ALIGNED: u32 = 0x0000;
@@ -199,6 +236,14 @@ mod real {
     thread_local! {
         static PARTS: Cell<Option<Parts>> = const { Cell::new(None) };
         static ASKED: RefCell<Vec<Asked>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn control_is_down() -> bool {
+        unsafe { GetKeyState(CONTROL_KEY) < 0 }
+    }
+
+    fn shift_is_down() -> bool {
+        unsafe { GetKeyState(SHIFT_KEY) < 0 }
     }
 
     fn wide(text: &str) -> Vec<u16> {
@@ -903,6 +948,10 @@ mod real {
             unsafe {
                 let mut message: Message = std::mem::zeroed();
                 while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, REMOVE) != 0 {
+                    if let Some(asked) = chord_pressed(message.what, message.first, control_is_down(), shift_is_down()) {
+                        ASKED.with(|held| held.borrow_mut().push(asked));
+                        continue;
+                    }
                     TranslateMessage(&message);
                     DispatchMessageW(&message);
                 }
@@ -971,3 +1020,103 @@ mod real {
 }
 
 pub use real::Window;
+
+#[cfg(test)]
+mod chord_tests {
+    use super::*;
+
+    const KEY_MESSAGES: [u32; 2] = [KEY_WENT_DOWN, SYSTEM_KEY_WENT_DOWN];
+    const CHARACTER_MESSAGES: [u32; 2] = [CHARACTER, SYSTEM_CHARACTER];
+
+    #[test]
+    fn control_and_s_going_down_saves_the_song() {
+        for what in KEY_MESSAGES {
+            assert_eq!(chord_pressed(what, S_KEY, true, false), Some(Asked::SaveTheSong));
+        }
+        for what in CHARACTER_MESSAGES {
+            assert_eq!(chord_pressed(what, CONTROL_S_CHARACTER, true, false), Some(Asked::SaveTheSong));
+        }
+    }
+
+    #[test]
+    fn control_and_z_going_down_undoes_an_edit() {
+        for what in KEY_MESSAGES {
+            assert_eq!(chord_pressed(what, Z_KEY, true, false), Some(Asked::UndoAnEdit));
+        }
+        for what in CHARACTER_MESSAGES {
+            assert_eq!(chord_pressed(what, CONTROL_Z_CHARACTER, true, false), Some(Asked::UndoAnEdit));
+        }
+    }
+
+    #[test]
+    fn shift_turns_the_undo_chord_into_a_redo() {
+        for what in KEY_MESSAGES {
+            assert_eq!(chord_pressed(what, Z_KEY, true, true), Some(Asked::RedoAnEdit));
+        }
+        for what in CHARACTER_MESSAGES {
+            assert_eq!(chord_pressed(what, CONTROL_Z_CHARACTER, true, true), Some(Asked::RedoAnEdit));
+        }
+    }
+
+    #[test]
+    fn control_and_y_redoes_an_edit_with_or_without_shift() {
+        for held in [false, true] {
+            for what in KEY_MESSAGES {
+                assert_eq!(chord_pressed(what, Y_KEY, true, held), Some(Asked::RedoAnEdit));
+            }
+            for what in CHARACTER_MESSAGES {
+                assert_eq!(chord_pressed(what, CONTROL_Y_CHARACTER, true, held), Some(Asked::RedoAnEdit));
+            }
+        }
+    }
+
+    #[test]
+    fn a_letter_on_its_own_is_not_a_chord() {
+        for key in [S_KEY, Z_KEY, Y_KEY] {
+            for what in KEY_MESSAGES {
+                assert_eq!(chord_pressed(what, key, false, false), None);
+                assert_eq!(chord_pressed(what, key, false, true), None);
+            }
+        }
+    }
+
+    #[test]
+    fn another_key_with_control_is_not_a_chord() {
+        for key in [0x41usize, 0x43, 0x44, 0x4F, 0x56, 0x58, 0x20] {
+            for what in KEY_MESSAGES {
+                assert_eq!(chord_pressed(what, key, true, false), None, "{key:#x} was taken for a chord");
+                assert_eq!(chord_pressed(what, key, true, true), None, "{key:#x} was taken for a chord");
+            }
+        }
+    }
+
+    #[test]
+    fn control_and_shift_and_s_is_left_to_the_plugin() {
+        for what in KEY_MESSAGES {
+            assert_eq!(chord_pressed(what, S_KEY, true, true), None);
+        }
+        for what in CHARACTER_MESSAGES {
+            assert_eq!(chord_pressed(what, CONTROL_S_CHARACTER, true, true), None);
+        }
+    }
+
+    #[test]
+    fn a_typed_preset_name_is_not_a_chord() {
+        for typed in "Preset name 1".chars() {
+            for held in [false, true] {
+                assert_eq!(chord_pressed(CHARACTER, typed as usize, held, false), None, "{typed} was taken for a chord");
+            }
+        }
+        assert_eq!(chord_pressed(CHARACTER, '\u{8}' as usize, false, false), None);
+        assert_eq!(chord_pressed(CHARACTER, '\r' as usize, false, false), None);
+    }
+
+    #[test]
+    fn the_mouse_and_paint_are_left_alone() {
+        for what in [0x0Fu32, 0x0201, 0x0202, 0x0200, 0x0101, 0x0105] {
+            for key in [S_KEY, Z_KEY, Y_KEY] {
+                assert_eq!(chord_pressed(what, key, true, false), None, "{what:#x} was taken for a chord");
+            }
+        }
+    }
+}

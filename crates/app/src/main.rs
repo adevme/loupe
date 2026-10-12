@@ -1150,6 +1150,7 @@ impl App {
                 let hosts = self.plugin_hosts();
                 self.resources.look(&hosts);
                 self.look_for_touches();
+                return self.take_plugin_window_chords();
             }
             Message::Tick => {
                 let punched_out = self.recording.as_ref().and_then(|recording| recording.punch).is_some_and(|(_, to)| self.engine.position() >= to);
@@ -1203,6 +1204,7 @@ impl App {
                     self.playhead = position;
                     self.follow();
                 }
+                return self.take_plugin_window_chords();
             }
             Message::Import => {
                 return Task::perform(
