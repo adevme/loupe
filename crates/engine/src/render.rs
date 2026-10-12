@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::instrument::{Instrument, Note};
 use crate::model::{Clip, ClipId, Frames, Project, Track, TrackId};
 
@@ -65,6 +67,10 @@ pub trait Chains: Send {
 
     fn whole_waves_at_once(&self) -> bool {
         false
+    }
+
+    fn takes_its_time(&mut self, spare: bool) {
+        let _ = spare;
     }
 
     fn process_wave(&mut self, jobs: &mut [Job<'_>]) {
@@ -296,6 +302,8 @@ pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
 
 pub(crate) type Shape = (TrackId, Option<TrackId>, u64);
 
+pub type Round = Option<(Frames, Frames)>;
+
 #[derive(Default)]
 struct Line {
     delay: usize,
@@ -344,6 +352,9 @@ pub struct Mixdown {
     depth: Vec<usize>,
     wanted: Vec<usize>,
     ordered: bool,
+    round: Round,
+    rounded: Round,
+    hurry: bool,
 }
 
 pub(crate) fn shape_of(track: &Track) -> Shape {
@@ -364,6 +375,14 @@ impl Mixdown {
             && self.lags.len() == project.tracks.len()
             && project.tracks.iter().zip(&self.shape).all(|(track, known)| shape_of(track) == *known)
             && (racks.is_none() || project.tracks.iter().zip(&self.lags).all(|(track, known)| own_lag(track, racks) == *known))
+    }
+
+    fn carried_on(&self, pos: Frames) -> bool {
+        match self.next {
+            Some(next) if next == pos => true,
+            Some(next) => self.round == self.rounded && self.round.is_some_and(|(from, to)| next == to && pos == from),
+            None => false,
+        }
     }
 
     fn rewired(&self, project: &Project) -> bool {
@@ -495,6 +514,52 @@ impl Mixdown {
         }
     }
 
+    pub fn hurries(&mut self) {
+        self.hurry = true;
+    }
+
+    pub fn ready_for(&mut self, project: &Project, pos: Frames, round: Round, racks: Option<&dyn Chains>) -> usize {
+        self.round = round;
+        if !self.same_shape(project, racks) {
+            self.work_out_order(project, racks);
+        }
+        if !self.ordered || self.carried_on(pos) {
+            return 0;
+        }
+        self.ahead.iter().copied().max().unwrap_or(0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_ready(
+        &mut self,
+        project: &Project,
+        pos: Frames,
+        round: Round,
+        only: Option<ClipId>,
+        block: usize,
+        racks: Option<&mut (dyn Chains + '_)>,
+        stop: Option<&AtomicBool>,
+    ) {
+        let len = block.max(1);
+        self.round = round;
+        self.room_for(project.tracks.len(), len);
+        if !self.same_shape(project, racks.as_deref()) {
+            self.work_out_order(project, racks.as_deref());
+        }
+        if !self.ordered {
+            return;
+        }
+        let hurried = std::mem::replace(&mut self.hurry, false);
+        let all_of_it = prime(project, pos, len, only, self, racks, stop);
+        self.hurry = hurried;
+        if !all_of_it {
+            self.next = None;
+            return;
+        }
+        self.next = Some(pos);
+        self.rounded = round;
+    }
+
     pub fn tap(&self, track: usize, frames: usize) -> Option<&[[f32; 2]]> {
         if !self.ordered {
             return None;
@@ -532,11 +597,12 @@ pub fn mix_tracks_metered(
         out.fill([0.0; 2]);
         return;
     }
-    if len > 0 && scratch.next != Some(pos) {
-        prime(project, pos, len, only, scratch, chains.as_deref_mut());
+    if len > 0 && !scratch.carried_on(pos) {
+        prime(project, pos, len, only, scratch, chains.as_deref_mut(), None);
     }
     run(project, pos as i64, out, only, peaks, scratch, chains);
     scratch.next = Some(pos + len as Frames);
+    scratch.rounded = scratch.round;
 }
 
 fn prime(
@@ -546,9 +612,17 @@ fn prime(
     only: Option<ClipId>,
     scratch: &mut Mixdown,
     mut chains: Option<&mut (dyn Chains + '_)>,
-) {
-    let mut left = scratch.ahead.iter().copied().max().unwrap_or(0);
+    stop: Option<&AtomicBool>,
+) -> bool {
+    let wanted = scratch.ahead.iter().copied().max().unwrap_or(0);
+    let mut left = match scratch.hurry {
+        true => wanted.min(len),
+        false => wanted,
+    };
     while left > 0 {
+        if stop.is_some_and(|asked| asked.load(Ordering::Relaxed)) {
+            return false;
+        }
         let part = len.min(left);
         let at = pos as i64 - left as i64;
         let mut sink = std::mem::take(&mut scratch.sink);
@@ -556,6 +630,7 @@ fn prime(
         scratch.sink = sink;
         left -= part;
     }
+    true
 }
 
 fn run(
@@ -579,14 +654,7 @@ fn run(
             continue;
         }
         let read = at + scratch.ahead[index] as i64;
-        if read + len as i64 <= 0 {
-            continue;
-        }
-        let (from, into) = match read < 0 {
-            true => (0, (-read) as usize),
-            false => (read as Frames, 0),
-        };
-        lay_clips(project, track, from, &mut buffer[into..], only, chains.as_deref_mut(), &mut scratch.apart);
+        lay_reading(project, track, read, buffer, scratch.round, only, chains.as_deref_mut(), &mut scratch.apart);
     }
     let in_waves = chains.as_deref().is_some_and(|racks| racks.whole_waves_at_once());
     for wave in 0..scratch.waves.len() {
@@ -714,6 +782,40 @@ pub fn pan_gains(pan: f32) -> (f32, f32) {
     let left = (pan.max(0.0) * std::f32::consts::FRAC_PI_2).cos();
     let right = ((-pan).max(0.0) * std::f32::consts::FRAC_PI_2).cos();
     (left, right)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lay_reading(
+    project: &Project,
+    track: &Track,
+    read: i64,
+    buffer: &mut [[f32; 2]],
+    round: Round,
+    only: Option<ClipId>,
+    mut chains: Option<&mut (dyn Chains + '_)>,
+    apart: &mut Vec<[f32; 2]>,
+) {
+    let len = buffer.len();
+    if let Some((from, to)) = round.filter(|(from, to)| to > from) {
+        let span = (to - from) as i64;
+        let mut at = from as i64 + (read - from as i64).rem_euclid(span);
+        let mut done = 0;
+        while done < len {
+            let part = (len - done).min((to as i64 - at) as usize);
+            lay_clips(project, track, at as Frames, &mut buffer[done..done + part], only, chains.as_deref_mut(), apart);
+            done += part;
+            at = from as i64;
+        }
+        return;
+    }
+    if read + len as i64 <= 0 {
+        return;
+    }
+    let (begin, into) = match read < 0 {
+        true => (0, (-read) as usize),
+        false => (read as Frames, 0),
+    };
+    lay_clips(project, track, begin, &mut buffer[into..], only, chains, apart);
 }
 
 fn lay_clips(
@@ -1917,6 +2019,103 @@ mod tests {
         assert_eq!(scratch.ahead, ahead, "a monitoring chain moved what the mix reads ahead");
         assert_eq!(scratch.lines.iter().map(|line| line.delay).collect::<Vec<usize>>(), delays, "a monitoring chain emptied the delay lines");
         assert_eq!(after, a_block, "a monitoring chain put {after} frames through the plugins in one block instead of {a_block}");
+    }
+
+    fn looped(p: &Project, lags: &[(TrackId, usize)], from: Frames, to: Frames, rounds: usize, block: usize) -> Vec<[f32; 2]> {
+        let mut racks = Lookahead::with(lags);
+        let mut scratch = Mixdown::default();
+        let round = Some((from, to));
+        let mut all = vec![[0.0; 2]; (to - from) as usize * rounds];
+        scratch.get_ready(p, from, round, None, block, Some(&mut racks), None);
+        let mut pos = from;
+        let mut done = 0;
+        while done < all.len() {
+            let count = block.min(all.len() - done).min((to - pos) as usize);
+            mix_tracks_metered(p, pos, &mut all[done..done + count], None, None, &mut scratch, Some(&mut racks));
+            done += count;
+            pos += count as Frames;
+            if pos == to {
+                pos = from;
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn a_loop_comes_round_with_the_compensation_still_nulled() {
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let (from, to) = (100_000, 140_000);
+        let with = looped(&p, &lags, from, to, 2, 512);
+        let without = looped(&p, &[], from, to, 2, 512);
+        assert_eq!(with, without, "the compensated loop did not null against the plain one");
+        let span = (to - from) as usize;
+        assert_eq!(with[..span], with[span..], "the second time round the loop came out different");
+        assert!(loud(&with) > 1.0, "the loop is silent");
+    }
+
+    #[test]
+    fn a_loop_wrap_asks_for_no_pre_roll() {
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let (from, to) = (100_000, 140_000);
+        let round = Some((from, to));
+        let mut racks = Lookahead::with(&lags);
+        let mut scratch = Mixdown::default();
+        scratch.hurries();
+        let mut out = vec![[0.0; 2]; 512];
+        scratch.get_ready(&p, from, round, None, 512, Some(&mut racks), None);
+        let mut pos = from;
+        while pos + 512 < to {
+            assert_eq!(scratch.ready_for(&p, pos, round, Some(&racks)), 0, "the mix wanted a pre-roll at {pos}");
+            mix_tracks_metered(&p, pos, &mut out, None, None, &mut scratch, Some(&mut racks));
+            pos += 512;
+        }
+        let last = (to - pos) as usize;
+        mix_tracks_metered(&p, pos, &mut out[..last], None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(scratch.ready_for(&p, from, round, Some(&racks)), 0, "the wrap back to the loop start wanted a pre-roll");
+    }
+
+    #[test]
+    fn a_seek_that_was_rolled_ahead_lands_on_the_same_audio() {
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let target = 150_000;
+        let mut fresh = Lookahead::with(&lags);
+        let mut clean = Mixdown::default();
+        let mut want = vec![[0.0; 2]; 1_024];
+        clean.get_ready(&p, target, None, None, 512, Some(&mut fresh), None);
+        mix_tracks_metered(&p, target, &mut want[..512], None, None, &mut clean, Some(&mut fresh));
+        mix_tracks_metered(&p, target + 512, &mut want[512..], None, None, &mut clean, Some(&mut fresh));
+
+        let mut racks = Lookahead::with(&lags);
+        let mut scratch = Mixdown::default();
+        scratch.hurries();
+        let mut out = vec![[0.0; 2]; 1_024];
+        for block in 0..8 {
+            mix_tracks_metered(&p, block * 512, &mut out[..512], None, None, &mut scratch, Some(&mut racks));
+        }
+        scratch.get_ready(&p, target, None, None, 512, Some(&mut racks), None);
+        mix_tracks_metered(&p, target, &mut out[..512], None, None, &mut scratch, Some(&mut racks));
+        mix_tracks_metered(&p, target + 512, &mut out[512..], None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(out, want, "the mix after a rolled seek is not what an untouched render gives");
+        assert!(loud(&want) > 1.0, "the mix is silent");
+    }
+
+    #[test]
+    fn a_hurried_mix_never_primes_more_than_a_block() {
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let mut racks = Lookahead::with(&lags);
+        let mut scratch = Mixdown::default();
+        scratch.hurries();
+        let mut out = vec![[0.0; 2]; 512];
+        for block in 0..8 {
+            mix_tracks_metered(&p, block * 512, &mut out, None, None, &mut scratch, Some(&mut racks));
+        }
+        let settled = racks.frames;
+        mix_tracks_metered(&p, 8 * 512, &mut out, None, None, &mut scratch, Some(&mut racks));
+        let a_block = racks.frames - settled;
+        let before = racks.frames;
+        mix_tracks_metered(&p, 150_000, &mut out, None, None, &mut scratch, Some(&mut racks));
+        let after = racks.frames - before;
+        assert!(after <= 2 * a_block, "a jump put {after} frames through the plugins, a settled block puts {a_block}");
     }
 
     #[test]

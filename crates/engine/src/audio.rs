@@ -13,7 +13,7 @@ use crate::devices::{self, Device, Failure, Running};
 use crate::instrument::Note;
 use crate::midi_in::{KeyEvent, KeySender};
 use crate::model::{ClipId, Frames, Project, TrackId};
-use crate::render::{mix_tracks_metered, pan_gains, scale, shape_of, Chains, Mixdown, Shape};
+use crate::render::{mix_tracks_metered, pan_gains, scale, shape_of, Chains, Mixdown, Round, Shape};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -23,6 +23,8 @@ pub const METERS: usize = 64;
 const TAPE: usize = 4096;
 const LOAD_KEEP: f32 = 0.95;
 const PEAK_KEEP: f32 = 0.995;
+const ROLL_BLOCK: usize = 512;
+const STILL_FOR: f32 = 0.1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Load {
@@ -103,6 +105,53 @@ struct Shared {
     monitor_lag: AtomicU64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Roll {
+    No,
+    Due,
+    Out,
+}
+
+struct Rolled {
+    racks: Option<Box<dyn Chains>>,
+    scratch: Mixdown,
+    project: Arc<Project>,
+    at: Frames,
+    round: Round,
+    only: Option<ClipId>,
+    step: usize,
+}
+
+fn roll_ahead(mut asked: Consumer<Rolled>, mut done: Producer<Rolled>, wanted: Arc<AtomicBool>) {
+    loop {
+        match asked.pop() {
+            Ok(mut parcel) => {
+                let mut racks = parcel.racks.take();
+                if let Some(racks) = racks.as_deref_mut() {
+                    racks.takes_its_time(true);
+                }
+                parcel.scratch.get_ready(&parcel.project, parcel.at, parcel.round, parcel.only, parcel.step, racks.as_deref_mut(), Some(&wanted));
+                if let Some(racks) = racks.as_deref_mut() {
+                    racks.takes_its_time(false);
+                }
+                parcel.racks = racks;
+                if done.push(parcel).is_err() {
+                    return;
+                }
+            }
+            Err(_) if asked.is_abandoned() => return,
+            Err(_) => thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+fn hush(shared: &Shared) {
+    for slot in shared.levels.iter() {
+        slot.store(0f32.to_bits(), Ordering::Relaxed);
+    }
+    shared.master_level.store(0f32.to_bits(), Ordering::Relaxed);
+}
+
 struct Rt {
     scratch: Mixdown,
     load: f32,
@@ -136,6 +185,14 @@ struct Rt {
     ear: Ear,
     hear_through_chain: bool,
     done_feeds: Producer<Consumer<f32>>,
+    roll: Roll,
+    asking: Producer<Rolled>,
+    rolled: Consumer<Rolled>,
+    racks_wanted: bool,
+    asked_back: Arc<AtomicBool>,
+    looked_at: Option<Frames>,
+    still: Frames,
+    step: usize,
 }
 
 const NOT_HEARD: usize = usize::MAX;
@@ -270,8 +327,23 @@ fn pair(rate: u32) -> (Rt, Remote) {
     let (back_tx, back_rx) = RingBuffer::new(QUEUE);
     let (tape_in, tape_out) = RingBuffer::new(TAPE);
     let (done_in, done_out) = RingBuffer::new(4);
+    let (asking, asked) = RingBuffer::new(1);
+    let (rolled_in, rolled_out) = RingBuffer::new(1);
+    let asked_back = Arc::new(AtomicBool::new(false));
+    let theirs = asked_back.clone();
+    thread::Builder::new().name("loupe-preroll".into()).spawn(move || roll_ahead(asked, rolled_in, theirs)).expect("start the pre-roll thread");
     let shared = Arc::new(Shared::default());
+    let mut scratch = Mixdown::default();
+    scratch.hurries();
     let rt = Rt {
+        roll: Roll::No,
+        asking,
+        rolled: rolled_out,
+        racks_wanted: false,
+        asked_back,
+        looked_at: None,
+        still: 0,
+        step: ROLL_BLOCK,
         live: Vec::with_capacity(MOST_LIVE_NOTES),
         keys: keys_out,
         keys_go_to: None,
@@ -286,7 +358,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         ear: Ear { voice: vec![0.0; MAX_BLOCK * MOST_INPUTS], track: vec![[0.0; 2]; MAX_BLOCK], ..Ear::default() },
         hear_through_chain: true,
         done_feeds: done_in,
-        scratch: Mixdown::default(),
+        scratch,
         chains: None,
         peaks: [0.0; METERS],
         project: Arc::new(Project::new(rate)),
@@ -317,6 +389,10 @@ impl Rt {
                     let _ = self.retired.push(old);
                 }
                 Msg::Chains(racks) => {
+                    if self.roll == Roll::Out && racks.is_none() {
+                        self.racks_wanted = true;
+                        self.asked_back.store(true, Ordering::Relaxed);
+                    }
                     if let Some(old) = std::mem::replace(&mut self.chains, racks) {
                         let _ = self.hand_back.push(old);
                     }
@@ -399,25 +475,25 @@ impl Rt {
             }
         }
 
+        self.step = frames.clamp(1, MAX_BLOCK);
+        self.collect_roll();
         let rate = self.project.rate;
         let beat = beat_frames(self.project.bpm, rate);
         let where_we_are = crate::render::Song::where_it_is(&self.project, self.pos, self.playing, self.recording);
         if let Some(racks) = self.chains.as_deref_mut() {
             racks.song_goes(where_we_are);
         }
-        let out = &mut self.block[..frames];
+        let mut block = std::mem::take(&mut self.block);
+        let out = &mut block[..frames];
         let mut done = 0;
         while done < frames {
             if self.fade == 0 {
                 if let Some(to) = self.seek.take() {
                     self.pos = to;
                 }
-                if !self.playing {
+                if !self.playing && self.roll != Roll::Out {
                     out[done..].fill([0.0; 2]);
-                    for slot in self.shared.levels.iter() {
-                        slot.store(0f32.to_bits(), Ordering::Relaxed);
-                    }
-                    self.shared.master_level.store(0f32.to_bits(), Ordering::Relaxed);
+                    hush(&self.shared);
                     break;
                 }
             }
@@ -430,16 +506,27 @@ impl Rt {
                 done += part;
                 continue;
             }
-            let rising = self.playing && self.seek.is_none();
+            let round = self.round_at(self.pos);
+            if self.roll == Roll::No && self.scratch.ready_for(&self.project, self.pos, round, self.chains.as_deref()) > frames {
+                self.roll = Roll::Due;
+            }
+            if self.roll == Roll::Due && self.fade == 0 {
+                self.send_a_roll(self.pos, round);
+            }
+            if self.roll == Roll::Out {
+                out[done..].fill([0.0; 2]);
+                hush(&self.shared);
+                break;
+            }
+            let rising = self.playing && self.seek.is_none() && self.roll == Roll::No;
             let mut part = if rising {
                 frames - done
             } else {
                 (self.fade as usize).clamp(1, frames - done)
             };
-            let (stop_at, go_round_to) = match self.loop_range {
-                _ if self.endless => (Frames::MAX, 0),
-                Some((from, to)) if self.pos >= from && self.pos < to => (to, from),
-                _ => (self.project.length(), 0),
+            let (stop_at, go_round_to) = match round {
+                Some((from, to)) => (to, from),
+                None => (Frames::MAX, 0),
             };
             if self.pos < stop_at {
                 part = part.min((stop_at - self.pos) as usize);
@@ -479,10 +566,91 @@ impl Rt {
                 self.pos = go_round_to;
             }
         }
+        self.block = block;
+        if !self.playing || self.count_in > 0 {
+            self.look_ahead();
+        }
         self.play_live(frames);
         self.hear_input(frames);
         self.shared.pos.store(self.pos, Ordering::Relaxed);
         &self.block[..frames]
+    }
+
+    fn round_at(&self, at: Frames) -> Round {
+        if self.endless {
+            return None;
+        }
+        if let Some((from, to)) = self.loop_range {
+            if at >= from && at < to {
+                return Some((from, to));
+            }
+        }
+        let end = self.project.length();
+        match end > 0 && at < end {
+            true => Some((0, end)),
+            false => None,
+        }
+    }
+
+    fn send_a_roll(&mut self, at: Frames, round: Round) {
+        self.asked_back.store(false, Ordering::Relaxed);
+        let parcel = Rolled {
+            racks: self.chains.take(),
+            scratch: std::mem::take(&mut self.scratch),
+            project: self.project.clone(),
+            at,
+            round,
+            only: self.audition,
+            step: self.step,
+        };
+        match self.asking.push(parcel) {
+            Ok(()) => self.roll = Roll::Out,
+            Err(rtrb::PushError::Full(back)) => {
+                self.scratch = back.scratch;
+                self.chains = back.racks;
+                self.roll = Roll::No;
+            }
+        }
+    }
+
+    fn collect_roll(&mut self) {
+        let Ok(parcel) = self.rolled.pop() else { return };
+        let Rolled { racks, scratch, project, .. } = parcel;
+        self.scratch = scratch;
+        match racks {
+            Some(racks) if self.racks_wanted || self.chains.is_some() => {
+                let _ = self.hand_back.push(racks);
+                self.racks_wanted = false;
+            }
+            Some(racks) => self.chains = Some(racks),
+            None => {}
+        }
+        let _ = self.retired.push(project);
+        self.roll = Roll::No;
+    }
+
+    fn look_ahead(&mut self) {
+        if self.roll != Roll::No || self.fade > 0 {
+            return;
+        }
+        let at = match self.count_in > 0 {
+            true => self.pos,
+            false => self.loop_range.map(|(from, _)| from).unwrap_or(self.pos),
+        };
+        if self.looked_at != Some(at) {
+            self.looked_at = Some(at);
+            self.still = (STILL_FOR * self.project.rate as f32) as Frames;
+            return;
+        }
+        self.still = self.still.saturating_sub(self.step as Frames);
+        if self.still > 0 {
+            return;
+        }
+        let round = self.round_at(at);
+        if self.scratch.ready_for(&self.project, at, round, self.chains.as_deref()) == 0 {
+            return;
+        }
+        self.send_a_roll(at, round);
     }
 
     fn note_monitor_lag(&mut self) {
@@ -1918,5 +2086,306 @@ mod tests {
         let rest = engine.position();
         thread::sleep(Duration::from_millis(60));
         assert_eq!(engine.position(), rest);
+    }
+
+    struct Heavy {
+        lags: Vec<(TrackId, usize)>,
+        held: Vec<(TrackId, Vec<[f32; 2]>, usize)>,
+        counted: Arc<AtomicU64>,
+        slow: bool,
+    }
+
+    impl Heavy {
+        fn with(lags: &[(TrackId, usize)], counted: Arc<AtomicU64>) -> Self {
+            Self { lags: lags.to_vec(), held: Vec::new(), counted, slow: false }
+        }
+
+        fn slowly(mut self) -> Self {
+            self.slow = true;
+            self
+        }
+    }
+
+    impl Chains for Heavy {
+        fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], _: &[[f32; 2]]) {
+            self.counted.fetch_add(audio.len() as u64, Ordering::Relaxed);
+            if self.slow {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let by = self.latency(track);
+            if by == 0 {
+                return;
+            }
+            if !self.held.iter().any(|(id, _, _)| *id == track) {
+                self.held.push((track, vec![[0.0; 2]; by], 0));
+            }
+            let (_, line, at) = self.held.iter_mut().find(|(id, _, _)| *id == track).expect("the line is there");
+            for frame in audio.iter_mut() {
+                std::mem::swap(&mut line[*at], frame);
+                *at = (*at + 1) % line.len();
+            }
+        }
+
+        fn latency(&self, track: TrackId) -> usize {
+            self.lags.iter().find(|(id, _)| *id == track).map(|(_, by)| *by).unwrap_or(0)
+        }
+    }
+
+    fn a_song_of_three_heavy_buses() -> (Project, Vec<(TrackId, usize)>) {
+        let mut p = Project::new(RATE);
+        let mut lags = Vec::new();
+        let source = Arc::new(Source::from_frames("one", vec![[1.0, 1.0]; 300_000]));
+        let Ok(Outcome::Track(verb)) = p.apply(Command::AddTrack { name: "Verb".into() }) else { panic!("no track") };
+        p.apply(Command::AddFx { track: verb, fx: some_fx("verb") }).unwrap();
+        lags.push((verb, 4_096));
+        for which in 0..3 {
+            let Ok(Outcome::Track(bus)) = p.apply(Command::AddTrack { name: format!("Bus {which}") }) else { panic!("no track") };
+            let Ok(Outcome::Track(vox)) = p.apply(Command::AddTrack { name: format!("Vox {which}") }) else { panic!("no track") };
+            p.apply(Command::AddClip { track: vox, source: source.clone(), start: 0 }).unwrap();
+            p.apply(Command::SetTrackParent { track: vox, parent: Some(bus) }).unwrap();
+            p.apply(Command::AddSend { from: bus, to: verb }).unwrap();
+            p.apply(Command::AddFx { track: bus, fx: some_fx("bus") }).unwrap();
+            lags.push((bus, 16_383 + 26_623 + 2_048));
+        }
+        (p, lags)
+    }
+
+    fn rolling(rt: &mut Rt, remote: &Remote, frames: usize, want: Frames) {
+        for _ in 0..2_000 {
+            rt.process(frames);
+            if remote.shared.pos.load(Ordering::Relaxed) > want {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the transport never got past {want}");
+    }
+
+    #[test]
+    fn a_seek_puts_no_more_than_a_block_through_the_plugins() {
+        let counted = Arc::new(AtomicU64::new(0));
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let (mut rt, mut remote) = pair(RATE);
+        remote.outbox.push(Msg::Project(Arc::new(p))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Heavy::with(&lags, counted.clone()))))).ok().unwrap();
+        remote.outbox.push(Msg::Endless(true)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rolling(&mut rt, &remote, 512, 4 * 512);
+        let settled = counted.load(Ordering::Relaxed);
+        rt.process(512);
+        let a_block = counted.load(Ordering::Relaxed) - settled;
+        remote.outbox.push(Msg::Seek(100_000)).ok().unwrap();
+        let mut most = 0;
+        for _ in 0..2_000 {
+            let before = counted.load(Ordering::Relaxed);
+            rt.process(512);
+            most = most.max(counted.load(Ordering::Relaxed) - before);
+            if remote.shared.pos.load(Ordering::Relaxed) > 100_000 + 512 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            most <= a_block,
+            "a seek put {most} frames through the plugins in one callback, a settled block puts {a_block}"
+        );
+    }
+
+    struct Counted;
+
+    thread_local! {
+        static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+    unsafe impl std::alloc::GlobalAlloc for Counted {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            if WATCHING.try_with(|watching| watching.get()).unwrap_or(false) {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTED: Counted = Counted;
+
+    fn watched(run: impl FnOnce()) -> u64 {
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        WATCHING.with(|watching| watching.set(true));
+        run();
+        WATCHING.with(|watching| watching.set(false));
+        ALLOCATIONS.load(Ordering::Relaxed) - before
+    }
+
+    fn heavy_rig(counted: &Arc<AtomicU64>) -> (Arc<Project>, Vec<(TrackId, usize)>, Rt, Remote) {
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let p = Arc::new(p);
+        let (rt, mut remote) = pair(RATE);
+        remote.outbox.push(Msg::Project(p.clone())).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Heavy::with(&lags, counted.clone()))))).ok().unwrap();
+        (p, lags, rt, remote)
+    }
+
+    fn rolled_ahead(rt: &mut Rt, frames: usize) {
+        let mut went_out = false;
+        for _ in 0..4_000 {
+            rt.process(frames);
+            went_out |= rt.roll == Roll::Out;
+            if went_out && rt.roll == Roll::No {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the pre-roll never came back");
+    }
+
+    fn untouched(p: &Project, lags: &[(TrackId, usize)], at: Frames, round: Round, blocks: usize) -> Vec<[f32; 2]> {
+        let mut racks = Heavy::with(lags, Arc::new(AtomicU64::new(0)));
+        let mut scratch = crate::render::Mixdown::default();
+        let mut all = vec![[0.0; 2]; blocks * 512];
+        scratch.get_ready(p, at, round, None, 512, Some(&mut racks), None);
+        for block in 0..blocks {
+            let from = block * 512;
+            mix_tracks_metered(p, at + from as Frames, &mut all[from..from + 512], None, None, &mut scratch, Some(&mut racks));
+        }
+        all
+    }
+
+    #[test]
+    fn play_from_stopped_is_rolled_ahead_while_the_transport_waits() {
+        let counted = Arc::new(AtomicU64::new(0));
+        let (p, lags, mut rt, mut remote) = heavy_rig(&counted);
+        remote.outbox.push(Msg::Endless(true)).ok().unwrap();
+        remote.outbox.push(Msg::Seek(50_000)).ok().unwrap();
+        rolled_ahead(&mut rt, 512);
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 50_000, "the playhead moved while it was parked");
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        let settled = counted.load(Ordering::Relaxed);
+        let first = rt.process(512).to_vec();
+        assert!(counted.load(Ordering::Relaxed) - settled <= 2_048, "pressing play put the pre-roll through the plugins again");
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 50_512, "play did not start at once");
+        assert!(first[..240].windows(2).all(|w| w[1][0].abs() >= w[0][0].abs()), "the fade in is not clean");
+        let second = rt.process(512).to_vec();
+        let want = untouched(&p, &lags, 50_000, None, 2);
+        assert_eq!(second, want[512..], "the first full block of play is not what an untouched render gives");
+        assert!(want.iter().any(|frame| frame[0].abs() > 1.0), "the song is silent");
+    }
+
+    #[test]
+    fn a_seek_while_playing_lands_on_the_same_audio_an_untouched_render_gives() {
+        let counted = Arc::new(AtomicU64::new(0));
+        let (p, lags, mut rt, mut remote) = heavy_rig(&counted);
+        remote.outbox.push(Msg::Endless(true)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rolling(&mut rt, &remote, 512, 4 * 512);
+        remote.outbox.push(Msg::Seek(150_000)).ok().unwrap();
+        for _ in 0..4_000 {
+            rt.process(512);
+            if remote.shared.pos.load(Ordering::Relaxed) >= 150_512 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(remote.shared.pos.load(Ordering::Relaxed), 150_512, "the seek never took");
+        let second = rt.process(512).to_vec();
+        let want = untouched(&p, &lags, 150_000, None, 2);
+        assert_eq!(second, want[512..], "the mix after a seek is not what an untouched render gives");
+    }
+
+    #[test]
+    fn a_loop_wrap_never_pauses_or_asks_for_a_pre_roll() {
+        let counted = Arc::new(AtomicU64::new(0));
+        let (p, lags, mut rt, mut remote) = heavy_rig(&counted);
+        remote.outbox.push(Msg::Loop(Some((100_000, 140_000)))).ok().unwrap();
+        remote.outbox.push(Msg::Seek(100_000)).ok().unwrap();
+        rolled_ahead(&mut rt, 512);
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        let round = Some((100_000, 140_000));
+        let want = untouched(&p, &lags, 100_000, round, 2);
+        rt.process(512);
+        assert_eq!(rt.process(512).to_vec(), want[512..], "the first pass of the loop is not what an untouched render gives");
+        let mut wrapped = false;
+        let mut most = 0;
+        for _ in 0..200 {
+            let was = remote.shared.pos.load(Ordering::Relaxed);
+            let settled = counted.load(Ordering::Relaxed);
+            let heard = rt.process(512).to_vec();
+            most = most.max(counted.load(Ordering::Relaxed) - settled);
+            let now = remote.shared.pos.load(Ordering::Relaxed);
+            assert_ne!(now, was, "the transport stopped at {was}");
+            assert_eq!(rt.roll, Roll::No, "a loop wrap asked for a pre-roll at {was}");
+            assert!(heard.iter().any(|frame| frame[0].abs() > 1.0), "the loop went quiet at {was}");
+            if now < was {
+                wrapped = true;
+                break;
+            }
+        }
+        assert!(wrapped, "the loop never came round");
+        assert!(most <= 2_048, "a loop wrap put {most} frames through the plugins in one callback");
+        let round = rt.process(512).to_vec();
+        assert_eq!(round, want[..512], "the second time round the loop did not come out the same");
+    }
+
+    #[test]
+    fn nothing_more_is_allocated_in_the_callback_when_the_transport_jumps() {
+        let counted = Arc::new(AtomicU64::new(0));
+        let (_, _, mut rt, mut remote) = heavy_rig(&counted);
+        remote.outbox.push(Msg::Endless(true)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rolling(&mut rt, &remote, 512, 8 * 512);
+        let steady = watched(|| {
+            for _ in 0..8 {
+                rt.process(512);
+            }
+        });
+        remote.outbox.push(Msg::Seek(150_000)).ok().unwrap();
+        let jumping = watched(|| {
+            for _ in 0..4_000 {
+                rt.process(512);
+                if rt.roll == Roll::No && remote.shared.pos.load(Ordering::Relaxed) > 150_512 {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+        assert_eq!((steady, jumping), (0, 0), "the callback allocated {steady} times steady and {jumping} times across a jump");
+    }
+
+    #[test]
+    fn a_pre_roll_gives_the_racks_back_the_moment_the_app_asks() {
+        let counted = Arc::new(AtomicU64::new(0));
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let (mut rt, mut remote) = pair(RATE);
+        remote.outbox.push(Msg::Project(Arc::new(p))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Heavy::with(&lags, counted.clone()).slowly())))).ok().unwrap();
+        remote.outbox.push(Msg::Seek(50_000)).ok().unwrap();
+        let mut went_out = false;
+        for _ in 0..4_000 {
+            rt.process(512);
+            went_out |= rt.roll == Roll::Out;
+            if went_out {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(went_out, "the pre-roll never went out");
+        remote.outbox.push(Msg::Chains(None)).ok().unwrap();
+        let mut back = None;
+        for _ in 0..4_000 {
+            rt.process(512);
+            back = remote.handed_back.pop().ok();
+            if back.is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(back.is_some(), "the racks never came back");
+        assert!(counted.load(Ordering::Relaxed) < 198_648 / 2, "the pre-roll ran on after the app asked for the racks");
     }
 }

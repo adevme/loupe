@@ -787,6 +787,10 @@ impl Chains for Racks {
         self.off_the_audio_thread
     }
 
+    fn takes_its_time(&mut self, spare: bool) {
+        self.off_the_audio_thread = spare;
+    }
+
     fn process_wave(&mut self, jobs: &mut [loupe_engine::Job<'_>]) {
         let began = std::time::Instant::now();
         self.run_a_whole_wave(jobs);
