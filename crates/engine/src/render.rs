@@ -286,6 +286,7 @@ pub struct Mixdown {
     shape: Vec<Shape>,
     lags: Vec<usize>,
     ahead: Vec<usize>,
+    ahead_was: Vec<usize>,
     lines: Vec<Line>,
     feed: Vec<usize>,
     waves: Vec<(usize, usize)>,
@@ -311,17 +312,23 @@ impl Mixdown {
         self.shape.len() == project.tracks.len()
             && self.lags.len() == project.tracks.len()
             && project.tracks.iter().zip(&self.shape).all(|(track, known)| shape_of(track) == *known)
-            && project.tracks.iter().zip(&self.lags).all(|(track, known)| own_lag(track, racks) == *known)
+            && (racks.is_none() || project.tracks.iter().zip(&self.lags).all(|(track, known)| own_lag(track, racks) == *known))
+    }
+
+    fn rewired(&self, project: &Project) -> bool {
+        self.shape.len() != project.tracks.len() || project.tracks.iter().zip(&self.shape).any(|(track, known)| shape_of(track) != *known)
     }
 
     fn work_out_order(&mut self, project: &Project, racks: Option<&dyn Chains>) {
+        let rewired = self.rewired(project);
         self.shape.clear();
         self.shape.extend(project.tracks.iter().map(shape_of));
-        self.lags.clear();
-        self.lags.extend(project.tracks.iter().map(|track| own_lag(track, racks)));
+        if racks.is_some() || self.lags.len() != project.tracks.len() {
+            self.lags.clear();
+            self.lags.extend(project.tracks.iter().map(|track| own_lag(track, racks)));
+        }
         self.order.clear();
         self.index.clear();
-        self.next = None;
         self.ordered = match project.render_order() {
             Some(order) => {
                 self.order.extend(order);
@@ -329,15 +336,21 @@ impl Mixdown {
                     self.index.push(project.tracks.iter().position(|t| t.id == *id).unwrap_or(usize::MAX));
                 }
                 self.work_out_waves(project);
-                self.work_out_delays(project);
+                if self.work_out_delays(project, rewired) {
+                    self.next = None;
+                }
                 true
             }
-            None => false,
+            None => {
+                self.next = None;
+                false
+            }
         };
     }
 
-    fn work_out_delays(&mut self, project: &Project) {
+    fn work_out_delays(&mut self, project: &Project, rewired: bool) -> bool {
         let count = project.tracks.len();
+        std::mem::swap(&mut self.ahead, &mut self.ahead_was);
         self.ahead.clear();
         self.ahead.resize(count, 0);
         self.feed.clear();
@@ -347,8 +360,12 @@ impl Mixdown {
             self.feed[index] = next;
             next += 1 + track.sends.len();
         }
-        self.lines.clear();
         self.lines.resize_with(next, Line::default);
+        if rewired {
+            for line in self.lines.iter_mut() {
+                line.delay = 0;
+            }
+        }
         for step in (0..self.order.len()).rev() {
             let index = self.index[step];
             if index == usize::MAX {
@@ -373,9 +390,14 @@ impl Mixdown {
                 };
             }
         }
+        let mut moved = rewired || self.ahead != self.ahead_was;
         for line in self.lines.iter_mut() {
-            line.settle();
+            if rewired || line.held.len() != line.delay {
+                line.settle();
+                moved = true;
+            }
         }
+        moved
     }
 
     fn work_out_waves(&mut self, project: &Project) {
@@ -1515,11 +1537,12 @@ mod tests {
         audio_at: Vec<usize>,
         side_at: Vec<usize>,
         seen: usize,
+        frames: usize,
     }
 
     impl Lookahead {
         fn with(lags: &[(TrackId, usize)]) -> Self {
-            Self { lags: lags.to_vec(), held: Vec::new(), peek: None, audio_at: Vec::new(), side_at: Vec::new(), seen: 0 }
+            Self { lags: lags.to_vec(), held: Vec::new(), peek: None, audio_at: Vec::new(), side_at: Vec::new(), seen: 0, frames: 0 }
         }
 
         fn line(&mut self, track: TrackId, by: usize) -> &mut Vec<[f32; 2]> {
@@ -1532,6 +1555,7 @@ mod tests {
 
     impl Chains for Lookahead {
         fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+            self.frames += audio.len();
             if self.peek == Some(track) {
                 for (at, frame) in audio.iter().enumerate() {
                     if frame[0].abs() > 0.5 {
@@ -1751,6 +1775,47 @@ mod tests {
             assert_eq!(mixed(&p, &lags, 2000, block), reference, "block size {block}");
         }
         assert_eq!(reference, mixed(&p, &[], 2000, 2000), "the compensated mix did not null");
+    }
+
+    fn a_song_of_three_heavy_buses() -> (Project, Vec<(TrackId, usize)>) {
+        let mut p = Project::new(48_000);
+        let mut lags = Vec::new();
+        let verb = track(&mut p);
+        fx(&mut p, verb);
+        lags.push((verb, 4_096));
+        for _ in 0..3 {
+            let bus = track(&mut p);
+            let vox = track(&mut p);
+            clip(&mut p, vox, counting(300_000), 0);
+            p.apply(Command::SetTrackParent { track: vox, parent: Some(bus) }).unwrap();
+            p.apply(Command::AddSend { from: bus, to: verb }).unwrap();
+            fx(&mut p, bus);
+            lags.push((bus, 16_383 + 26_623 + 2_048));
+        }
+        (p, lags)
+    }
+
+    #[test]
+    fn the_racks_leaving_and_coming_back_does_not_re_run_the_lookahead() {
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let mut racks = Lookahead::with(&lags);
+        let mut scratch = Mixdown::default();
+        let mut out = vec![[0.0; 2]; 512];
+        for block in 0..7 {
+            mix_tracks_metered(&p, block * 512, &mut out, None, None, &mut scratch, Some(&mut racks));
+        }
+        let settled = racks.frames;
+        mix_tracks_metered(&p, 7 * 512, &mut out, None, None, &mut scratch, Some(&mut racks));
+        let a_block = racks.frames - settled;
+        let ahead = scratch.ahead.clone();
+        let delays: Vec<usize> = scratch.lines.iter().map(|line| line.delay).collect();
+        mix_tracks_metered(&p, 8 * 512, &mut out, None, None, &mut scratch, None);
+        assert_eq!(scratch.ahead, ahead, "the racks going out moved what the mix reads ahead");
+        assert_eq!(scratch.lines.iter().map(|line| line.delay).collect::<Vec<usize>>(), delays, "the racks going out emptied the delay lines");
+        let before = racks.frames;
+        mix_tracks_metered(&p, 9 * 512, &mut out, None, None, &mut scratch, Some(&mut racks));
+        let after = racks.frames - before;
+        assert_eq!(after, a_block, "the racks coming back put {after} frames through the plugins in one block instead of {a_block}");
     }
 
     #[test]
