@@ -478,6 +478,10 @@ impl App {
                 .padding([7, 14])
                 .style(move |_, status| palette.destructive(status))
                 .on_press(Message::Discard),
+            button(text("Save").size(13).font(palette.medium))
+                .padding([7, 18])
+                .style(move |_, status| palette.solid(status))
+                .on_press(Message::SaveFirst),
         ]
         .spacing(10);
         container(

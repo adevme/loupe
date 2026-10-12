@@ -5,6 +5,7 @@ mod audio_settings;
 mod autosaving;
 mod clip_window;
 mod clipboard;
+mod closing;
 mod crash;
 mod crash_reports;
 mod exporting;
@@ -97,6 +98,7 @@ fn main() -> iced::Result {
         size: first_size,
         icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
         min_size: Some(Size::new(820.0, 420.0)),
+        exit_on_close_request: false,
         ..window::Settings::default()
     };
     let mut loupe = iced::daemon(starting::Loupe::title, starting::Loupe::update, starting::Loupe::view)
@@ -363,6 +365,7 @@ pub enum Message {
     OpenWithPluginsOff,
     PluginsBackOn,
     Discard,
+    SaveFirst,
     GoHome,
     NewBlank,
     NewFromTemplate(PathBuf),
@@ -481,11 +484,15 @@ pub enum Overlay {
     Roll(ClipId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pending {
     Open,
     Home,
     Quit,
+    New,
+    Template(PathBuf),
+    Recent(PathBuf),
+    Dropped(PathBuf),
 }
 
 
@@ -610,6 +617,8 @@ struct App {
     pool_open: bool,
     path: Option<PathBuf>,
     dirty: bool,
+    going: bool,
+    after_saving: Option<Pending>,
     screen: Screen,
     opening: Option<(String, Instant)>,
     templates: Vec<PathBuf>,
@@ -750,6 +759,8 @@ impl App {
             pool_open: false,
             path: None,
             dirty: false,
+            going: false,
+            after_saving: None,
             screen: Screen::Song,
             opening: None,
             templates: Vec::new(),
@@ -1049,6 +1060,9 @@ impl App {
                 if let Overlay::Sampler(track) = self.overlay {
                     return self.load_sample(track, path);
                 }
+                if files::is_a_project(&path) {
+                    return self.ask_before(Pending::Dropped(path));
+                }
                 return self.import(vec![path]);
             }
             Message::Loaded(path, result) => {
@@ -1228,6 +1242,7 @@ impl App {
                 self.problem = None;
                 self.startup_problem = None;
                 self.theme_problem = None;
+                self.after_saving = None;
                 self.overlay = Overlay::None;
                 self.stock = None;
                 self.editing_level = None;
@@ -1502,6 +1517,11 @@ impl App {
                 Overlay::SaveName => {
                     let name = self.entry.clone();
                     self.save_named(&name);
+                    if !self.dirty {
+                        if let Some(pending) = self.after_saving.take() {
+                            return self.go_on(pending);
+                        }
+                    }
                 }
                 _ => {}
             },
@@ -1544,17 +1564,21 @@ impl App {
                 let _ = settings::save("mixer_alone", "yes");
             }
             Message::WindowClosed(window) => {
-                if self.mixer_window == Some(window) {
-                    self.mixer_window = None;
-                    self.mixer_open = false;
-                    let _ = settings::save("mixer", "closed");
-                    return window::close(window);
-                } else if window == self.main_window {
-                    if self.dirty && !self.project.tracks.is_empty() {
-                        self.overlay = Overlay::ConfirmDiscard(Pending::Quit);
-                        return Task::none();
+                match closing::window_closed(window, self.main_window, self.mixer_window, self.going) {
+                    closing::Closing::Redock => {
+                        self.mixer_window = None;
+                        self.mixer_open = false;
+                        let _ = settings::save("mixer", "closed");
+                        return window::close(window);
                     }
-                    return self.shut_down();
+                    closing::Closing::Quit => {
+                        let next = self.ask_before(Pending::Quit);
+                        if matches!(self.overlay, Overlay::ConfirmDiscard(_)) {
+                            return Task::batch([next, window::gain_focus(self.main_window)]);
+                        }
+                        return next;
+                    }
+                    closing::Closing::Ignore => {}
                 }
             }
             Message::MixerGrabbedStrip(index) => {
@@ -2076,27 +2100,15 @@ impl App {
                 return self.ask_to_open();
             }
             Message::PluginsBackOn => self.plugins_back_on(),
-            Message::Discard => match self.overlay {
-                Overlay::ConfirmDiscard(Pending::Open) => return self.pick_project(),
-                Overlay::ConfirmDiscard(Pending::Home) => self.go_home(),
-                Overlay::ConfirmDiscard(Pending::Quit) => return self.shut_down(),
-                _ => {}
-            },
-            Message::GoHome => {
-                if self.dirty && !self.project.tracks.is_empty() {
-                    self.overlay = Overlay::ConfirmDiscard(Pending::Home);
-                } else {
-                    self.go_home();
+            Message::Discard => {
+                if let Overlay::ConfirmDiscard(pending) = self.overlay.clone() {
+                    return self.go_on(pending);
                 }
             }
-            Message::NewBlank => {
-                self.set_plugins_off(false);
-                self.replace_project(Project::new(self.project.rate), HashMap::new());
-                self.overlay = Overlay::None;
-                self.screen = Screen::Song;
-                return self.mixer_follows_the_song();
-            }
-            Message::NewFromTemplate(template) => return self.read_project(template, true, self.wants_safe_open()),
+            Message::SaveFirst => return self.save_then_go_on(),
+            Message::GoHome => return self.ask_before(Pending::Home),
+            Message::NewBlank => return self.ask_before(Pending::New),
+            Message::NewFromTemplate(template) => return self.ask_before(Pending::Template(template)),
             Message::AskDeleteTemplate(template) => self.overlay = Overlay::ConfirmDeleteTemplate(template),
             Message::DeleteTemplate => {
                 if let Overlay::ConfirmDeleteTemplate(template) = self.overlay.clone() {
@@ -2107,7 +2119,7 @@ impl App {
                 }
                 self.overlay = Overlay::None;
             }
-            Message::OpenRecent(project) => return self.read_project(project, false, self.wants_safe_open()),
+            Message::OpenRecent(project) => return self.ask_before(Pending::Recent(project)),
             Message::SaveAsTemplate => {
                 self.overlay = Overlay::TemplateName;
                 self.entry = self.path.as_deref().map(home::stem).unwrap_or_default();
@@ -3000,9 +3012,69 @@ impl App {
     }
 
     fn shut_down(&mut self) -> Task<Message> {
-        match self.mixer_window.take() {
-            Some(mixer) => Task::batch([window::close(mixer), iced::exit()]),
-            None => iced::exit(),
+        self.going = true;
+        self.overlay = Overlay::None;
+        let mixer = self.mixer_window.take();
+        let mut leaving: Vec<Task<Message>> =
+            closing::tear_down(self.main_window, mixer).into_iter().map(window::close).collect();
+        leaving.push(iced::exit());
+        Task::batch(leaving)
+    }
+
+    fn ask_before(&mut self, pending: Pending) -> Task<Message> {
+        match closing::ask_first(self.dirty, self.project.tracks.len(), pending) {
+            closing::Next::Ask(pending) => {
+                self.overlay = Overlay::ConfirmDiscard(pending);
+                Task::none()
+            }
+            closing::Next::GoAhead(pending) => self.go_on(pending),
+        }
+    }
+
+    fn go_on(&mut self, pending: Pending) -> Task<Message> {
+        self.overlay = Overlay::None;
+        match pending {
+            Pending::Open => self.pick_project(),
+            Pending::Home => {
+                self.go_home();
+                Task::none()
+            }
+            Pending::Quit => self.shut_down(),
+            Pending::New => self.new_blank(),
+            Pending::Template(template) => self.read_project(template, true, self.wants_safe_open()),
+            Pending::Recent(project) | Pending::Dropped(project) => {
+                self.read_project(project, false, self.wants_safe_open())
+            }
+        }
+    }
+
+    fn new_blank(&mut self) -> Task<Message> {
+        self.set_plugins_off(false);
+        self.replace_project(Project::new(self.project.rate), HashMap::new());
+        self.overlay = Overlay::None;
+        self.screen = Screen::Song;
+        self.mixer_follows_the_song()
+    }
+
+    fn save_then_go_on(&mut self) -> Task<Message> {
+        let Overlay::ConfirmDiscard(pending) = self.overlay.clone() else {
+            return Task::none();
+        };
+        match closing::save_before(self.path.clone()) {
+            closing::Saving::WriteTo(song) => {
+                self.write_to(song);
+                match closing::after_saving(self.dirty, pending) {
+                    closing::Saved::GoOn(pending) => self.go_on(pending),
+                    closing::Saved::ShowWhyNot => {
+                        self.overlay = Overlay::None;
+                        Task::none()
+                    }
+                }
+            }
+            closing::Saving::AskForAName => {
+                self.after_saving = Some(pending);
+                self.save_as()
+            }
         }
     }
 

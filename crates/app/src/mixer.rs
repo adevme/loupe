@@ -220,6 +220,7 @@ impl App {
             size: MIXER_WINDOW,
             min_size: Some(iced::Size::new(SHORTEST_MIXER_WINDOW, SHORTEST_MIXER)),
             icon: iced::window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
+            exit_on_close_request: false,
             ..iced::window::Settings::default()
         });
         opening.map(Message::MixerWindowOpened)

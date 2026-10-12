@@ -65,6 +65,7 @@ impl Loupe {
                 }
                 Task::none()
             }
+            Message::WindowClosed(_) => iced::exit(),
             Message::FirstFrame => {
                 let Some(waiting) = waiting.take() else { return Task::none() };
                 let Waiting { main, loaded, settings, shift_at_start } = *waiting;
@@ -94,8 +95,9 @@ impl Loupe {
             Loupe::Ready(app) => app.subscription(),
             Loupe::Starting { .. } => Subscription::batch([
                 window::frames().map(|_| Message::FirstFrame),
-                iced::event::listen_with(|event, _status, _window| match event {
+                iced::event::listen_with(|event, _status, from| match event {
                     iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(Message::ModifiersChanged(modifiers)),
+                    iced::Event::Window(window::Event::CloseRequested | window::Event::Closed) => Some(Message::WindowClosed(from)),
                     _ => None,
                 }),
             ]),
