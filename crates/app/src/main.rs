@@ -3441,6 +3441,14 @@ impl App {
             .into()
     }
 
+    fn monitor_lag(&self) -> Option<String> {
+        let frames = self.engine.monitor_lag();
+        if frames == 0 {
+            return None;
+        }
+        Some(format!("{:.1} ms", milliseconds_of(frames, self.engine.rate())))
+    }
+
     fn transport(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let seconds = self.playhead as f64 / self.project.rate as f64;
@@ -3481,12 +3489,19 @@ impl App {
             .padding(0)
             .style(move |_, status| palette.toggled(typing_on, status))
             .on_press(Message::ToggleTypingKeys);
+        let lag = self.monitor_lag().map(|shown| {
+            hinted(
+                text(shown).size(11.5).font(palette.mono).color(palette.text_dim),
+                "How far behind you hear yourself while monitoring, through the Rec plugins on the armed track and the monitoring chain",
+            )
+        });
         let record = row![
             hinted(record, "Record onto every armed track. Ctrl+R does the same."),
             hinted(punch, "Punch: record only inside the part marked on the ruler, replacing what was there."),
             hinted(metronome, "The click you record to. Ctrl+M turns it on and off."),
             hinted(typing_keys, "Play notes with your letter keys, A to L like a keyboard. Ctrl+T turns it on and off."),
         ]
+        .push_maybe(lag)
         .spacing(8)
         .align_y(Alignment::Center);
 
@@ -3870,6 +3885,10 @@ fn transpose_key(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<M
     Some(Message::RollAction(piano_roll::RollAction::Transpose(steps * if modifiers.shift() { 12 } else { 1 })))
 }
 
+fn milliseconds_of(frames: loupe_engine::Frames, rate: u32) -> f64 {
+    frames as f64 * 1000.0 / rate.max(1) as f64
+}
+
 fn hinted<'a>(piece: impl Into<Element<'a, Message>>, words: &'static str) -> Element<'a, Message> {
     iced::widget::mouse_area(piece.into()).on_enter(Message::Hint(Some(words))).on_exit(Message::Hint(None)).into()
 }
@@ -3999,3 +4018,18 @@ impl App {
     }
 }
 
+
+#[cfg(test)]
+mod bar_tests {
+    use super::*;
+
+    #[test]
+    fn the_monitoring_lag_is_shown_in_milliseconds_and_only_while_it_costs_something() {
+        assert_eq!(format!("{:.1} ms", milliseconds_of(1_024, 48_000)), "21.3 ms");
+        assert_eq!(format!("{:.1} ms", milliseconds_of(64, 48_000)), "1.3 ms");
+        assert_eq!(milliseconds_of(0, 48_000), 0.0);
+        assert!(milliseconds_of(480, 0).is_finite(), "a sample rate of nothing must not divide by zero");
+        let app = App::bare();
+        assert_eq!(app.monitor_lag(), None, "a lag was shown with nothing armed");
+    }
+}
