@@ -1,5 +1,5 @@
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{button, canvas, column, container, mouse_area, row as hrow, scrollable, stack, text, text_input, vertical_slider, Space};
+use iced::widget::scrollable::{Direction, Scrollable, Scrollbar};
+use iced::widget::{button, canvas, column, container, mouse_area, row as hrow, stack, text, text_input, vertical_slider, Space};
 use iced::{mouse, Alignment, Color, Element, Length};
 
 use loupe_engine::{ClipId, Command, TrackId};
@@ -379,7 +379,7 @@ impl App {
                 .center_y(self.mixer_tall())
                 .into()
         } else {
-            container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new().width(7).scroller_width(7))))
+            container(Scrollable::with_direction(row, Direction::Horizontal(Scrollbar::new().width(7).scroller_width(7))))
                 .padding([6, 10])
                 .width(Length::Fill)
                 .height(self.mixer_tall())
@@ -516,4 +516,48 @@ impl canvas::Program<Message> for Meter {
 
 pub fn meter(palette: crate::theme::Palette, level: f32) -> Element<'static, Message> {
     canvas(Meter { level, palette }).width(METER_W).height(Length::Fill).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn a_song_with_tracks(how_many: usize) -> App {
+        let mut app = App::bare();
+        for which in 0..how_many {
+            app.project.apply(Command::AddTrack { name: format!("Track {which}") }).unwrap();
+        }
+        app
+    }
+
+    #[test]
+    fn the_mixer_is_laid_out_docked_under_the_song() {
+        let app = a_song_with_tracks(6);
+        let _ = app.mixer();
+    }
+
+    #[test]
+    fn the_mixer_is_laid_out_in_a_window_of_its_own() {
+        let mut app = a_song_with_tracks(6);
+        app.mixer_window = Some(iced::window::Id::unique());
+        let _ = app.mixer_alone();
+    }
+
+    #[test]
+    fn the_mixer_is_laid_out_while_a_strip_is_being_dragged() {
+        let mut app = a_song_with_tracks(6);
+        app.mixer_window = Some(iced::window::Id::unique());
+        app.mixer_drag = Some(1);
+        app.mixer_over = Some(4);
+        let _ = app.mixer_alone();
+        app.mixer_over = Some(app.project.tracks.len());
+        let _ = app.mixer_alone();
+    }
+
+    #[test]
+    fn the_mixer_is_laid_out_with_no_tracks_at_all() {
+        let mut app = a_song_with_tracks(0);
+        app.mixer_window = Some(iced::window::Id::unique());
+        let _ = app.mixer_alone();
+    }
 }
