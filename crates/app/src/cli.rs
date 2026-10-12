@@ -67,9 +67,17 @@ fn speak_to_the_shell() {
     #[link(name = "kernel32")]
     extern "system" {
         fn AttachConsole(process: u32) -> i32;
+        fn GetStdHandle(which: u32) -> isize;
+        fn GetFileType(handle: isize) -> u32;
     }
     const PARENT: u32 = u32::MAX;
+    const STD_OUTPUT: u32 = -11i32 as u32;
+    const UNKNOWN: u32 = 0;
     unsafe {
+        let already = GetStdHandle(STD_OUTPUT);
+        if already != 0 && already != -1 && GetFileType(already) != UNKNOWN {
+            return;
+        }
         AttachConsole(PARENT);
     }
 }

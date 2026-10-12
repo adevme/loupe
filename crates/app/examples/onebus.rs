@@ -6,7 +6,7 @@ use loupe_engine::{Chains, Command, SavedProject, Source};
 #[path = "../src/racks.rs"]
 mod racks;
 
-const BLOCK: usize = 16_384;
+const BLOCK: usize = 512;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
