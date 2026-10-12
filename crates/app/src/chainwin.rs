@@ -87,8 +87,9 @@ impl App {
                 .style(move |_, status| palette.toggled(on, status))
                 .on_press(Message::ShowChain(track, rec))
         };
-        let rec_label = if taking > 0 { format!("Rec ({taking})") } else { "Rec".to_string() };
-        row![tab("Mix".to_string(), false), tab(rec_label, true), Space::with_width(Length::Fill)]
+        let mixing = self.project.tracks.iter().find(|found| found.id == track).map_or(0, |found| found.fx.iter().filter(|fx| !fx.record).count());
+        let counted = |word: &str, many: usize| if many > 0 { format!("{word} ({many})") } else { word.to_string() };
+        row![tab(counted("Mix", mixing), false), tab(counted("Rec", taking), true), Space::with_width(Length::Fill)]
             .spacing(6)
             .align_y(Alignment::Center)
             .into()
