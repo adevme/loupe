@@ -586,7 +586,9 @@ fn show(
         return Err("this plugin has no window for this computer".into());
     }
     let (width, height) = made.size();
-    let title = if name.is_empty() { "Plugin" } else { name };
+    let called = if name.is_empty() { "Plugin" } else { name };
+    let title = if on.0.is_empty() { called.to_string() } else { format!("{} — {called}", on.0) };
+    let title = title.as_str();
 
     let pane = window::Window::open(title, width, height, made.can_resize())?;
     if let Some(folder) = preset_folder(name) {
