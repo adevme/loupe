@@ -54,6 +54,7 @@ impl App {
             Overlay::Sampler(track) => self.centred(self.sampler_sheet(*track)),
             Overlay::Plugins(track) => self.centred(self.plugin_sheet(*track)),
             Overlay::MasterPlugins => self.centred(self.picker("Plugins for Master".to_string(), &Message::AddMasterPlugin)),
+            Overlay::MonitorPlugins => self.centred(self.picker("Plugins for Monitoring".to_string(), &Message::AddMonitorPlugin)),
             Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
             Overlay::RenameFx(..) => self.centred(self.rename_fx_sheet()),

@@ -149,6 +149,7 @@ struct Ear {
     next: [f32; MOST_INPUTS],
     voice: Vec<f32>,
     track: Vec<[f32; 2]>,
+    out: Vec<[f32; 2]>,
     mix: Vec<Vec<[f32; 2]>>,
     sides: Vec<Vec<[f32; 2]>>,
     pre: Vec<[f32; 2]>,
@@ -171,6 +172,7 @@ impl Default for Ear {
             next: [0.0; MOST_INPUTS],
             voice: Vec::new(),
             track: Vec::new(),
+            out: Vec::new(),
             mix: Vec::new(),
             sides: Vec::new(),
             pre: Vec::new(),
@@ -534,10 +536,29 @@ impl Rt {
             }
             ear.phase += step;
         }
+        if self.ear.out.len() < frames {
+            self.ear.out.resize(frames, [0.0; 2]);
+        }
+        self.ear.out[..frames].fill([0.0; 2]);
         match self.hear_through_chain {
             true => self.hear_through_the_chains(frames),
             false => self.hear_straight(frames),
         }
+        self.monitor_chain(frames);
+    }
+
+    fn monitor_chain(&mut self, frames: usize) {
+        let Self { ear, chains, block, shared, .. } = self;
+        if let Some(racks) = chains.as_deref_mut() {
+            racks.process_monitor(&mut ear.out[..frames]);
+        }
+        let mut top = 0.0f32;
+        for (out, heard) in block[..frames].iter_mut().zip(ear.out[..frames].iter()) {
+            top = top.max(heard[0].abs()).max(heard[1].abs());
+            out[0] += heard[0];
+            out[1] += heard[1];
+        }
+        shared.master_level.fetch_max(top.to_bits(), Ordering::Relaxed);
     }
 
     fn hear_straight(&mut self, frames: usize) {
@@ -557,7 +578,7 @@ impl Rt {
             let gain = if track.muted { 0.0 } else { track.gain * master };
             let (left, right) = pan_gains(track.pan);
             let mut top = 0.0f32;
-            for (out, frame) in self.block[..frames].iter_mut().zip(ear.track[..frames].iter()) {
+            for (out, frame) in ear.out[..frames].iter_mut().zip(ear.track[..frames].iter()) {
                 let heard = [frame[0] * gain * left, frame[1] * gain * right];
                 top = top.max(heard[0].abs()).max(heard[1].abs());
                 out[0] += heard[0];
@@ -566,7 +587,6 @@ impl Rt {
             if let Some(level) = self.shared.levels.get(index) {
                 level.fetch_max(top.to_bits(), Ordering::Relaxed);
             }
-            self.shared.master_level.fetch_max(top.to_bits(), Ordering::Relaxed);
         }
     }
 
@@ -647,14 +667,11 @@ impl Rt {
                         }
                     }
                     None => {
-                        let mut top = 0.0f32;
-                        for (out, frame) in self.block[..frames].iter_mut().zip(ear.mix[index][..frames].iter()) {
-                            let heard = [frame[0] * master, frame[1] * master];
-                            top = top.max(heard[0].abs()).max(heard[1].abs());
-                            out[0] += heard[0];
-                            out[1] += heard[1];
+                        let Ear { mix, out, .. } = ear;
+                        for (heard, frame) in out[..frames].iter_mut().zip(mix[index][..frames].iter()) {
+                            heard[0] += frame[0] * master;
+                            heard[1] += frame[1] * master;
                         }
-                        self.shared.master_level.fetch_max(top.to_bits(), Ordering::Relaxed);
                     }
                 }
             }
@@ -1420,6 +1437,107 @@ mod tests {
         assert!(!rt.playing, "hearing the input does not start the song");
         remote.outbox.push(Msg::HearOn([None; MOST_HEARD])).ok().unwrap();
         assert!(rt.process(256).iter().all(|f| *f == [0.0, 0.0]));
+    }
+
+    struct Monitoring {
+        runs: Arc<AtomicU64>,
+    }
+
+    impl Chains for Monitoring {
+        fn process_takes(&mut self, _: TrackId, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                frame[0] *= 0.5;
+                frame[1] *= 0.5;
+            }
+        }
+
+        fn process_monitor(&mut self, audio: &mut [[f32; 2]]) {
+            self.runs.fetch_add(1, Ordering::Relaxed);
+            for frame in audio.iter_mut() {
+                frame[0] *= 0.25;
+                frame[1] *= 0.25;
+            }
+        }
+
+        fn monitor_chain_latency(&self) -> usize {
+            64
+        }
+    }
+
+    fn armed_and_singing(rt: &mut Rt, remote: &mut Remote, runs: Arc<AtomicU64>) -> (TrackId, Producer<f32>) {
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Monitoring { runs })))).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(1 << 14);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE, 1)))).ok().unwrap();
+        for _ in 0..8_000 {
+            mic.push(0.8).unwrap();
+        }
+        rt.process(256);
+        (vocal, mic)
+    }
+
+    #[test]
+    fn the_monitored_input_is_heard_through_the_projects_monitoring_chain() {
+        let (mut rt, mut remote) = pair(RATE);
+        let runs = Arc::new(AtomicU64::new(0));
+        let (vocal, mut mic) = armed_and_singing(&mut rt, &mut remote, runs.clone());
+        assert_eq!(runs.load(Ordering::Relaxed), 0, "the monitoring chain ran with nothing armed");
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        for _ in 0..8_000 {
+            mic.push(0.8).unwrap();
+        }
+        rt.process(256);
+        let heard = rt.process(256).to_vec();
+        let (left, _) = pan_gains(0.0);
+        for frame in heard {
+            assert!((frame[0] - 0.8 * 0.5 * 0.25 * left).abs() < 1e-4, "got {frame:?}");
+        }
+        assert!(runs.load(Ordering::Relaxed) > 0, "the monitoring chain never ran");
+    }
+
+    #[test]
+    fn playback_never_goes_through_the_monitoring_chain() {
+        let (mut rt, mut remote) = pair(RATE);
+        let runs = Arc::new(AtomicU64::new(0));
+        let (_, _mic) = armed_and_singing(&mut rt, &mut remote, runs.clone());
+        remote.outbox.push(Msg::Project(Arc::new(steady(2_048)))).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        for _ in 0..4 {
+            rt.process(256);
+        }
+        assert_eq!(runs.load(Ordering::Relaxed), 0, "playback went through the monitoring chain");
+        assert!(rt.process(256).iter().any(|frame| frame[0].abs() > 1e-6), "the song is silent, so it proves nothing");
+    }
+
+    #[test]
+    fn the_monitoring_chain_is_heard_the_short_way_too() {
+        let (mut rt, mut remote) = pair(RATE);
+        let runs = Arc::new(AtomicU64::new(0));
+        let (vocal, mut mic) = armed_and_singing(&mut rt, &mut remote, runs.clone());
+        remote.outbox.push(Msg::HearThroughChain(false)).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        for _ in 0..8_000 {
+            mic.push(0.8).unwrap();
+        }
+        rt.process(256);
+        let heard = rt.process(256).to_vec();
+        let (left, _) = pan_gains(0.0);
+        for frame in heard {
+            assert!((frame[0] - 0.8 * 0.5 * 0.25 * left).abs() < 1e-4, "got {frame:?}");
+        }
+        assert!(runs.load(Ordering::Relaxed) > 0, "the short way skipped the monitoring chain");
+    }
+
+    #[test]
+    fn what_the_monitoring_chain_adds_is_counted_in_the_lag_the_singer_hears() {
+        let (mut rt, mut remote) = pair(RATE);
+        let runs = Arc::new(AtomicU64::new(0));
+        let (vocal, _mic) = armed_and_singing(&mut rt, &mut remote, runs);
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        rt.process(256);
+        assert_eq!(remote.shared.monitor_lag.load(Ordering::Relaxed), 64);
     }
 
     #[test]

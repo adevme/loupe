@@ -17,6 +17,7 @@ pub struct SavedProject {
     pub master: f32,
     pub master_muted: bool,
     pub master_fx: Vec<SavedFx>,
+    pub monitor_fx: Vec<SavedFx>,
     pub sources: Vec<PathBuf>,
     pub tracks: Vec<SavedTrack>,
     pub envelopes: Vec<SavedEnvelope>,
@@ -83,6 +84,30 @@ pub struct SavedClip {
     pub called: Option<String>,
 }
 
+fn live_fx(fx: &SavedFx) -> crate::model::Fx {
+    crate::model::Fx {
+        mix: fx.mix,
+        path: fx.path.clone(),
+        index: fx.index,
+        name: fx.name.clone(),
+        bypassed: fx.bypassed,
+        state: fx.state.clone(),
+        record: fx.record,
+    }
+}
+
+fn kept_fx(fx: &crate::model::Fx) -> SavedFx {
+    SavedFx {
+        mix: fx.mix,
+        path: fx.path.clone(),
+        index: fx.index,
+        name: fx.name.clone(),
+        bypassed: fx.bypassed,
+        state: fx.state.clone(),
+        record: fx.record,
+    }
+}
+
 impl SavedProject {
     pub fn capture(project: &Project, height_of: impl Fn(TrackId) -> Option<f32>) -> Self {
         let index_of = |clip: &Clip| {
@@ -95,19 +120,8 @@ impl SavedProject {
             bpm: project.bpm,
             master: project.master,
             master_muted: project.master_muted,
-            master_fx: project
-                .master_fx
-                .iter()
-                .map(|fx| SavedFx {
-                    mix: fx.mix,
-                    path: fx.path.clone(),
-                    index: fx.index,
-                    name: fx.name.clone(),
-                    bypassed: fx.bypassed,
-                    state: fx.state.clone(),
-                    record: fx.record,
-                })
-                .collect(),
+            master_fx: project.master_fx.iter().map(kept_fx).collect(),
+            monitor_fx: project.monitor_fx.iter().map(kept_fx).collect(),
             sources: project.sources.iter().map(|source| source.path.clone()).collect(),
             envelopes: {
                 let place = |want: TrackId| project.tracks.iter().position(|t| t.id == want).unwrap_or(usize::MAX);
@@ -220,6 +234,11 @@ impl SavedProject {
             out.push_str(&format!("masterfxpath {}\n", fx.path.display()));
             out.push_str(&format!("masterfx index={} bypass={} mix={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.mix, fx.name));
         }
+        for fx in &self.monitor_fx {
+            let state = if fx.state.is_empty() { "-".to_string() } else { hex_of(&fx.state) };
+            out.push_str(&format!("monitorfxpath {}\n", fx.path.display()));
+            out.push_str(&format!("monitorfx index={} bypass={} mix={} state={state} name={}\n", fx.index, fx.bypassed as u8, fx.mix, fx.name));
+        }
         for track in &self.tracks {
             let colour = track.colour.map_or("-".to_string(), |[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"));
             let height = track.height.map_or("-".to_string(), |h| h.to_string());
@@ -300,7 +319,7 @@ impl SavedProject {
             _ => return Err("this is not a Loupe project file".into()),
         }
         let mut saved =
-            Self { saved_by: None, skipped: Vec::new(), rate: 0, bpm: 120.0, master: 1.0, master_muted: false, master_fx: Vec::new(), sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
+            Self { saved_by: None, skipped: Vec::new(), rate: 0, bpm: 120.0, master: 1.0, master_muted: false, master_fx: Vec::new(), monitor_fx: Vec::new(), sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
         let mut held: Option<PathBuf> = None;
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -344,8 +363,8 @@ impl SavedProject {
                     track.sends.push((to, gain, fields.get("pre") == Some(&"1"), fields.get("side") == Some(&"1")));
                 }
                 "fxpath" | "clipfxpath" => held = Some(PathBuf::from(rest)),
-                "masterfxpath" => held = Some(PathBuf::from(rest)),
-                "clipfx" | "fx" | "masterfx" => {
+                "masterfxpath" | "monitorfxpath" => held = Some(PathBuf::from(rest)),
+                "clipfx" | "fx" | "masterfx" | "monitorfx" => {
                     let (fields, name) = rest.split_once("name=").ok_or_else(|| bad("the plugin has no name"))?;
                     let fields = fields_of(fields);
                     let path = held.take().ok_or_else(|| bad("the plugin has no file"))?;
@@ -364,6 +383,10 @@ impl SavedProject {
                     };
                     if kind == "masterfx" {
                         saved.master_fx.push(fx);
+                        continue;
+                    }
+                    if kind == "monitorfx" {
+                        saved.monitor_fx.push(fx);
                         continue;
                     }
                     let track = saved.tracks.last_mut().ok_or_else(|| bad("a plugin before any track"))?;
@@ -476,15 +499,10 @@ impl SavedProject {
             let _ = project.apply(Command::AddSource(source.clone()));
         }
         for fx in &self.master_fx {
-            let _ = project.apply(Command::AddMasterFx(crate::model::Fx {
-                mix: fx.mix,
-                path: fx.path.clone(),
-                index: fx.index,
-                name: fx.name.clone(),
-                bypassed: fx.bypassed,
-                state: fx.state.clone(),
-                record: fx.record,
-            }));
+            let _ = project.apply(Command::AddMasterFx(live_fx(fx)));
+        }
+        for fx in &self.monitor_fx {
+            let _ = project.apply(Command::AddMonitorFx(live_fx(fx)));
         }
         for saved in &self.tracks {
             let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: saved.name.clone() }) else {
@@ -958,6 +976,59 @@ mod routing_round_trip {
 
         assert!(track.fx.iter().all(|fx| fx.name != "Over the whole mix"));
         assert!(back.master_fx.iter().all(|fx| fx.name != "In the mix"));
+    }
+
+    #[test]
+    fn the_monitoring_chain_is_saved_beside_the_master_chain_and_comes_back() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!() };
+        let fx = |name: &str, record, bypassed, mix| crate::model::Fx {
+            mix,
+            path: PathBuf::from("C:\\VST3\\RVox.vst3"),
+            index: 2,
+            name: name.to_string(),
+            bypassed,
+            state: vec![7, 8, 9],
+            record,
+        };
+        p.apply(Command::AddFx { track, fx: fx("On the take", true, false, 1.0) }).unwrap();
+        p.apply(Command::AddMasterFx(fx("Over the whole mix", false, false, 1.0))).unwrap();
+        p.apply(Command::AddMonitorFx(fx("Denoiser", false, false, 1.0))).unwrap();
+        p.apply(Command::AddMonitorFx(fx("RVox", false, true, 0.4))).unwrap();
+
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        assert!(text.contains("monitorfxpath C:\\VST3\\RVox.vst3"));
+        assert!(text.contains("monitorfx index=2 bypass=0 mix=1 state=070809 name=Denoiser"));
+        let read = SavedProject::parse(&text).expect("the song reads back");
+        assert_eq!(read.monitor_fx.len(), 2);
+        let (back, _) = read.build(&[], 48_000);
+
+        assert_eq!(back.monitor_fx.len(), 2, "the monitoring chain went missing");
+        assert_eq!(back.monitor_fx[0].name, "Denoiser");
+        assert_eq!(back.monitor_fx[0].index, 2);
+        assert_eq!(back.monitor_fx[0].state, vec![7, 8, 9]);
+        assert_eq!(back.monitor_fx[1].name, "RVox");
+        assert!(back.monitor_fx[1].bypassed, "a bypassed monitoring plugin came back switched on");
+        assert!((back.monitor_fx[1].mix - 0.4).abs() < 1e-6);
+        assert_eq!(back.master_fx.len(), 1);
+        assert_eq!(back.master_fx[0].name, "Over the whole mix");
+        assert_eq!(back.tracks[0].fx.len(), 1, "the track's own Rec plugin moved");
+        assert!(back.tracks[0].fx[0].record);
+        assert!(back.monitor_fx.iter().all(|fx| fx.name != "Over the whole mix"));
+        assert!(back.master_fx.iter().all(|fx| fx.name != "Denoiser"));
+    }
+
+    #[test]
+    fn a_song_saved_before_the_monitoring_chain_still_opens() {
+        let older = "loupe project 1\nsaved_by 0.13.5\nrate 48000\nbpm 96\nmaster 1\nmaster_muted 0\nmasterfxpath glue.vst3\nmasterfx index=0 bypass=0 mix=1 state=- name=Glue\ntrack gain=1 muted=0 pan=0 solo=0 keys=0 colour=- height=- parent=- collapsed=0 hidden=0 instrument=none sample=- print=0 input=mono:0 name=Vox 1\nfxpath rvox.vst3\nfx index=0 bypass=0 rec=1 mix=1 state=- name=RVox\n";
+        let read = SavedProject::parse(older).expect("an older song still reads");
+        assert!(read.monitor_fx.is_empty(), "an older song invented a monitoring chain");
+        let (back, _) = read.build(&[], 48_000);
+        assert!(back.monitor_fx.is_empty());
+        assert_eq!(back.bpm, 96.0);
+        assert_eq!(back.master_fx.len(), 1);
+        assert_eq!(back.tracks[0].fx.len(), 1);
+        assert!(back.tracks[0].fx[0].record, "the track's Rec plugin changed meaning");
     }
 
     #[test]

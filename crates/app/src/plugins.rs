@@ -193,6 +193,10 @@ impl App {
                 self.project.master_fx.get(slot).map(|fx| format!("Master {}", fx.name)).unwrap_or_default(),
                 crate::racks::Spot::Master(slot),
             ),
+            crate::stockwin::Spot::Monitor => (
+                self.project.monitor_fx.get(slot).map(|fx| format!("Monitoring {}", fx.name)).unwrap_or_default(),
+                crate::racks::Spot::Monitor(slot),
+            ),
         };
         let knobs = self.peek_at(where_).knobs;
         let heading = text(format!("Automate on {name}")).size(14).font(palette.semibold);
@@ -203,12 +207,13 @@ impl App {
             if !needle.is_empty() && !label.to_lowercase().contains(&needle) {
                 continue;
             }
-            shown += 1;
             let target = match spot {
                 crate::stockwin::Spot::Track(track) => loupe_engine::Target::TrackFx { track, slot, knob },
                 crate::stockwin::Spot::Clip(clip) => loupe_engine::Target::ClipFx { clip, slot, knob },
                 crate::stockwin::Spot::Master => loupe_engine::Target::MasterFx { slot, knob },
+                crate::stockwin::Spot::Monitor => continue,
             };
+            shown += 1;
             let on = self.project.envelope(target).is_some();
             list = list.push(
                 button(text(label.clone()).size(12.5))

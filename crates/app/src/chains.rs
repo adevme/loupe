@@ -46,6 +46,7 @@ impl App {
             }
             Overlay::Chain(Spot::Clip(clip)) => Some(self.project.clip(*clip)?.fx.clone()),
             Overlay::Chain(Spot::Master) => Some(self.project.master_fx.clone()),
+            Overlay::MonitorPlugins | Overlay::Chain(Spot::Monitor) => Some(self.project.monitor_fx.clone()),
             _ => None,
         }
     }
@@ -95,6 +96,7 @@ impl App {
                     Overlay::Plugins(track) | Overlay::Chain(Spot::Track(track)) => project.apply(Command::AddFx { track: *track, fx })?,
                     Overlay::ClipPlugins(clip) | Overlay::Chain(Spot::Clip(clip)) => project.apply(Command::AddClipFx { clip: *clip, fx })?,
                     Overlay::MasterPlugins | Overlay::Chain(Spot::Master) => project.apply(Command::AddMasterFx(fx))?,
+                    Overlay::MonitorPlugins | Overlay::Chain(Spot::Monitor) => project.apply(Command::AddMonitorFx(fx))?,
                     _ => return Ok(Outcome::Done),
                 };
             }

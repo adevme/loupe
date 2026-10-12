@@ -22,6 +22,7 @@ pub struct Saved {
     pub tracks: Vec<(TrackId, usize, Vec<u8>)>,
     pub clips: Vec<(ClipId, usize, Vec<u8>)>,
     pub master: Vec<(usize, Vec<u8>)>,
+    pub monitor: Vec<(usize, Vec<u8>)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,6 +30,7 @@ pub enum Touched {
     Track(TrackId, usize),
     Clip(ClipId, usize),
     Master(usize),
+    Monitor(usize),
 }
 
 pub trait Chains: Send {
@@ -59,6 +61,14 @@ pub trait Chains: Send {
         let _ = (track, audio);
     }
 
+    fn process_monitor(&mut self, audio: &mut [[f32; 2]]) {
+        let _ = audio;
+    }
+
+    fn monitor_chain_latency(&self) -> usize {
+        0
+    }
+
     fn follow(&mut self, project: &Project) -> Vec<String> {
         let _ = project;
         Vec::new()
@@ -76,8 +86,12 @@ pub trait Chains: Send {
         Vec::new()
     }
 
+    fn harvest_monitor(&mut self) -> Vec<(usize, Vec<u8>)> {
+        Vec::new()
+    }
+
     fn everything_saved(&mut self) -> Saved {
-        Saved { tracks: self.harvest(), clips: self.harvest_clips(), master: self.harvest_master() }
+        Saved { tracks: self.harvest(), clips: self.harvest_clips(), master: self.harvest_master(), monitor: self.harvest_monitor() }
     }
 
     fn knob_readings(&mut self, track: TrackId, slot: usize) -> Vec<(String, f32, String)> {
@@ -130,6 +144,11 @@ pub trait Chains: Send {
     }
 
     fn load_master(&mut self, slot: usize) -> Result<(), String> {
+        let _ = slot;
+        Err("plugins are not wired up".into())
+    }
+
+    fn load_monitor(&mut self, slot: usize) -> Result<(), String> {
         let _ = slot;
         Err("plugins are not wired up".into())
     }
@@ -188,6 +207,11 @@ pub trait Chains: Send {
     }
 
     fn show_master(&mut self, slot: usize) -> Result<(), String> {
+        let _ = slot;
+        Err("plugin windows are not wired up".into())
+    }
+
+    fn show_monitor(&mut self, slot: usize) -> Result<(), String> {
         let _ = slot;
         Err("plugin windows are not wired up".into())
     }
@@ -2011,7 +2035,7 @@ fn below(project: &Project, track: &Track, racks: &dyn Chains, depth: usize) -> 
 
 pub fn monitor_latency(project: &Project, track: TrackId, racks: &dyn Chains) -> usize {
     let Some(found) = project.tracks.iter().find(|t| t.id == track) else { return 0 };
-    racks.takes_latency(track) + below(project, found, racks, 0)
+    racks.takes_latency(track) + below(project, found, racks, 0) + racks.monitor_chain_latency()
 }
 
 fn automated(project: &Project, target: crate::envelope::Target, at: Frames, fallback: f32) -> f32 {

@@ -249,6 +249,7 @@ pub struct Project {
     pub master: f32,
     pub master_muted: bool,
     pub master_fx: Vec<Fx>,
+    pub monitor_fx: Vec<Fx>,
     pub tracks: Vec<Track>,
     pub sources: Vec<Arc<Source>>,
     pub envelopes: Vec<crate::envelope::Envelope>,
@@ -325,6 +326,13 @@ pub enum Command {
     BypassMasterFx { slot: usize, bypassed: bool },
     SetMasterFxMix { slot: usize, mix: f32 },
     SetMasterFxState { slot: usize, state: Vec<u8> },
+    RenameMonitorFx { slot: usize, name: String },
+    AddMonitorFx(Fx),
+    RemoveMonitorFx(usize),
+    MoveMonitorFx { slot: usize, to: usize },
+    BypassMonitorFx { slot: usize, bypassed: bool },
+    SetMonitorFxMix { slot: usize, mix: f32 },
+    SetMonitorFxState { slot: usize, state: Vec<u8> },
     AddNotesClip { track: TrackId, name: String, start: Frames, len: Frames, notes: Vec<Note> },
     SetNotes { clip: ClipId, notes: Vec<Note> },
     SetInstrument { track: TrackId, instrument: Instrument },
@@ -357,6 +365,7 @@ impl Project {
             master: 1.0,
             master_muted: false,
             master_fx: Vec::new(),
+            monitor_fx: Vec::new(),
             tracks: Vec::new(),
             sources: Vec::new(),
             envelopes: Vec::new(),
@@ -1019,6 +1028,45 @@ impl Project {
             }
             Command::SetMasterFxState { slot, state } => {
                 let fx = self.master_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.state = state;
+                Ok(Outcome::Done)
+            }
+            Command::RenameMonitorFx { slot, name } => {
+                let fx = self.monitor_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.name = named(name)?;
+                Ok(Outcome::Done)
+            }
+            Command::AddMonitorFx(fx) => {
+                self.monitor_fx.push(fx);
+                Ok(Outcome::Done)
+            }
+            Command::RemoveMonitorFx(slot) => {
+                if slot >= self.monitor_fx.len() {
+                    return Err(CommandError::InvalidValue);
+                }
+                self.monitor_fx.remove(slot);
+                Ok(Outcome::Done)
+            }
+            Command::MoveMonitorFx { slot, to } => {
+                if slot >= self.monitor_fx.len() || to >= self.monitor_fx.len() {
+                    return Err(CommandError::InvalidValue);
+                }
+                let moved = self.monitor_fx.remove(slot);
+                self.monitor_fx.insert(to, moved);
+                Ok(Outcome::Done)
+            }
+            Command::BypassMonitorFx { slot, bypassed } => {
+                let fx = self.monitor_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.bypassed = bypassed;
+                Ok(Outcome::Done)
+            }
+            Command::SetMonitorFxMix { slot, mix } => {
+                let fx = self.monitor_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
+                fx.mix = valid_mix(mix)?;
+                Ok(Outcome::Done)
+            }
+            Command::SetMonitorFxState { slot, state } => {
+                let fx = self.monitor_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
                 fx.state = state;
                 Ok(Outcome::Done)
             }

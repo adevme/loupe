@@ -903,6 +903,41 @@ mod tests {
         levels_of(&mut meter, 48_000)
     }
 
+    struct Ruinous {
+        runs: usize,
+    }
+
+    impl crate::render::Chains for Ruinous {
+        fn process_monitor(&mut self, audio: &mut [[f32; 2]]) {
+            self.runs += 1;
+            audio.fill([1.0; 2]);
+        }
+    }
+
+    #[test]
+    fn an_export_never_touches_the_monitoring_chain() {
+        let mut project = song();
+        project
+            .apply(Command::AddMonitorFx(crate::model::Fx {
+                mix: 1.0,
+                path: PathBuf::from("rvox.vst3"),
+                index: 0,
+                name: "RVox".into(),
+                bypassed: false,
+                state: Vec::new(),
+                record: false,
+            }))
+            .unwrap();
+        let folder = scratch("monitorfx");
+        let plan = plan_for(&folder);
+        let mut racks = Ruinous { runs: 0 };
+        export_through(&project, &plan, &|_| true, Some(&mut racks)).unwrap();
+        let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
+        assert_eq!(racks.runs, 0, "the export ran the monitoring chain");
+        assert_eq!(read.frames, heard(&project), "the monitoring chain leaked into the export");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
     #[test]
     fn the_exported_mix_is_exactly_what_plays() {
         let project = song();

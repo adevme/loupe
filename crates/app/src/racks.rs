@@ -27,6 +27,7 @@ pub enum Spot {
     Track(TrackId, usize),
     Clip(ClipId, usize),
     Master(usize),
+    Monitor(usize),
 }
 
 pub type Peeks = Arc<Mutex<HashMap<Spot, Peek>>>;
@@ -145,6 +146,19 @@ enum Which {
     Track(TrackId),
     Clip(ClipId),
     Master,
+    Monitor,
+}
+
+fn wanted_from(fx: &loupe_engine::Fx) -> Wanted {
+    Wanted {
+        mix: fx.mix,
+        path: fx.path.clone(),
+        index: fx.index,
+        name: fx.name.clone(),
+        bypassed: fx.bypassed,
+        state: fx.state.clone(),
+        record: fx.record,
+    }
 }
 
 pub struct Racks {
@@ -154,6 +168,7 @@ pub struct Racks {
     chains: HashMap<TrackId, Rack>,
     clips: HashMap<ClipId, Rack>,
     master: Option<Rack>,
+    monitor: Option<Rack>,
     scratch: Vec<[f32; 2]>,
     peeks: Peeks,
     off: PluginsOff,
@@ -175,6 +190,7 @@ impl Racks {
             chains: HashMap::new(),
             clips: HashMap::new(),
             master: None,
+            monitor: None,
             scratch: Vec::new(),
             peeks,
             off,
@@ -202,7 +218,7 @@ impl Racks {
     }
 
     fn held_back(&self) -> usize {
-        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).map(Rack::held_back).sum()
+        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).chain(self.monitor.iter()).map(Rack::held_back).sum()
     }
 
     fn running(&self) -> usize {
@@ -210,6 +226,7 @@ impl Racks {
             .values()
             .chain(self.clips.values())
             .chain(self.master.iter())
+            .chain(self.monitor.iter())
             .flat_map(Rack::slots)
             .filter(|slot| !slot.held_back && slot.trouble.is_none() && !slot.bypassed)
             .count()
@@ -275,6 +292,7 @@ impl Racks {
         let mut going: Vec<Rack> = self.chains.drain().map(|(_, rack)| rack).collect();
         going.extend(self.clips.drain().map(|(_, rack)| rack));
         going.extend(self.master.take());
+        going.extend(self.monitor.take());
         going
     }
 
@@ -285,6 +303,9 @@ impl Racks {
         let mut going = Vec::new();
         if project.master_fx.is_empty() {
             going.extend(self.master.take());
+        }
+        if project.monitor_fx.is_empty() {
+            going.extend(self.monitor.take());
         }
         let staying: Vec<TrackId> = project.tracks.iter().filter(|track| !track.fx.is_empty()).map(|track| track.id).collect();
         let tracks: Vec<TrackId> = self.chains.keys().copied().filter(|id| !staying.contains(id)).collect();
@@ -310,21 +331,15 @@ impl Racks {
         }
         let mut troubles = Vec::new();
         if !project.master_fx.is_empty() {
-            let want: Vec<_> = project
-                .master_fx
-                .iter()
-                .map(|fx| Wanted {
-                    mix: fx.mix,
-                    path: fx.path.clone(),
-                    index: fx.index,
-                    name: fx.name.clone(),
-                    bypassed: fx.bypassed,
-                    state: fx.state.clone(),
-                    record: fx.record,
-                })
-                .collect();
+            let want: Vec<_> = project.master_fx.iter().map(wanted_from).collect();
             let fresh = self.a_new_rack();
             let rack = self.master.get_or_insert(fresh);
+            troubles.extend(rack.reconcile(&want));
+        }
+        if !project.monitor_fx.is_empty() {
+            let want: Vec<_> = project.monitor_fx.iter().map(wanted_from).collect();
+            let fresh = self.a_new_rack();
+            let rack = self.monitor.get_or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
         }
         for track in &project.tracks {
@@ -397,10 +412,13 @@ impl Racks {
         if let Some(rack) = self.master.as_mut().filter(|rack| rack.has_fallen()) {
             tell_falls(&self.falls, rack.take_fallen(), Spot::Master);
         }
+        if let Some(rack) = self.monitor.as_mut().filter(|rack| rack.has_fallen()) {
+            tell_falls(&self.falls, rack.take_fallen(), Spot::Monitor);
+        }
     }
 
     fn publish(&mut self) {
-        for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()) {
+        for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()).chain(self.monitor.iter_mut()) {
             let _ = rack.open_waiting();
         }
         for rack in self.clips.values_mut() {
@@ -448,6 +466,17 @@ impl Racks {
                 found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, spectra, knobs, held_back, host: rack.host_pid(slot) }));
 
 
+            }
+        }
+        if let Some(rack) = self.monitor.as_mut() {
+            for slot in 0..rack.len() {
+                let knobs = rack.knobs(slot);
+                let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
+                let (scopes, history, meter, findings, spectra) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra()),
+                    None => (None, None, None, None, None),
+                };
+                found.push((Spot::Monitor(slot), Peek { scopes, history, meter, findings, spectra, knobs, held_back, host: rack.host_pid(slot) }));
             }
         }
         let Ok(mut held) = self.peeks.lock() else { return };
@@ -520,6 +549,13 @@ impl Chains for Racks {
                 }
             }
         }
+        if let Some(rack) = self.monitor.as_mut() {
+            for slot in 0..rack.len() {
+                if rack.was_touched(slot) {
+                    found.push(Touched::Monitor(slot));
+                }
+            }
+        }
         found
     }
 
@@ -528,6 +564,7 @@ impl Chains for Racks {
             Touched::Track(track, slot) => self.chains.get_mut(&track)?.save(slot),
             Touched::Clip(clip, slot) => self.clips.get_mut(&clip)?.save(slot),
             Touched::Master(slot) => self.master.as_mut()?.save(slot),
+            Touched::Monitor(slot) => self.monitor.as_mut()?.save(slot),
         }
     }
 
@@ -563,6 +600,20 @@ impl Chains for Racks {
         match self.master.as_mut() {
             Some(rack) => rack.show(slot),
             None => Err("the master has no plugins".into()),
+        }
+    }
+
+    fn load_monitor(&mut self, slot: usize) -> Result<(), String> {
+        match self.monitor.as_mut() {
+            Some(rack) => rack.load_held_back(slot),
+            None => Err("the monitoring chain has no plugins".into()),
+        }
+    }
+
+    fn show_monitor(&mut self, slot: usize) -> Result<(), String> {
+        match self.monitor.as_mut() {
+            Some(rack) => rack.show(slot),
+            None => Err("the monitoring chain has no plugins".into()),
         }
     }
 
@@ -662,7 +713,7 @@ impl Chains for Racks {
     }
 
     fn still_opening(&self) -> bool {
-        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).any(|rack| rack.still_opening())
+        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).chain(self.monitor.iter()).any(|rack| rack.still_opening())
     }
 
     fn nudge(&mut self) {
@@ -681,6 +732,13 @@ impl Chains for Racks {
         }
     }
 
+    fn harvest_monitor(&mut self) -> Vec<(usize, Vec<u8>)> {
+        match self.monitor.as_mut() {
+            Some(rack) => rack.all_they_remember(),
+            None => Vec::new(),
+        }
+    }
+
     fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
         all_at_once(self.chains.iter_mut().map(|(id, rack)| (*id, rack)).collect())
     }
@@ -690,12 +748,14 @@ impl Chains for Racks {
         everyone.extend(self.chains.iter_mut().map(|(id, rack)| (Which::Track(*id), rack)));
         everyone.extend(self.clips.iter_mut().map(|(id, rack)| (Which::Clip(*id), rack)));
         everyone.extend(self.master.iter_mut().map(|rack| (Which::Master, rack)));
+        everyone.extend(self.monitor.iter_mut().map(|rack| (Which::Monitor, rack)));
         let mut saved = Saved::default();
         for (which, slot, state) in all_at_once(everyone) {
             match which {
                 Which::Track(id) => saved.tracks.push((id, slot, state)),
                 Which::Clip(id) => saved.clips.push((id, slot, state)),
                 Which::Master => saved.master.push((slot, state)),
+                Which::Monitor => saved.monitor.push((slot, state)),
             }
         }
         saved
@@ -756,6 +816,28 @@ impl Chains for Racks {
         }
         let shared = scratch.len().min(audio.len());
         audio[..shared].copy_from_slice(&scratch[..shared]);
+    }
+
+    fn process_monitor(&mut self, audio: &mut [[f32; 2]]) {
+        let Self { monitor, scratch, falls, spent_in_plugins, .. } = self;
+        let Some(rack) = monitor.as_mut() else { return };
+        if rack.is_empty() {
+            return;
+        }
+        let began = std::time::Instant::now();
+        scratch.clear();
+        scratch.extend_from_slice(audio);
+        rack.process(scratch);
+        note_plugin_time(spent_in_plugins, began);
+        if rack.has_fallen() {
+            tell_falls(falls, rack.take_fallen(), Spot::Monitor);
+        }
+        let shared = scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&scratch[..shared]);
+    }
+
+    fn monitor_chain_latency(&self) -> usize {
+        self.monitor.as_ref().map(|rack| rack.latency()).unwrap_or(0)
     }
 
     fn process_master(&mut self, audio: &mut [[f32; 2]]) {
@@ -958,6 +1040,63 @@ mod tests {
         again.follow(&reopened);
         assert_eq!(again.master.as_ref().map(Rack::len), Some(1));
         assert_eq!(again.harvest_master(), vec![(0, kept)]);
+    }
+
+    #[test]
+    fn the_monitoring_chain_runs_on_its_own_rack_and_its_settings_are_saved() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!("no track") };
+        let mut taking = fx(loupe_plugins::BUILT_IN, 1, &[]);
+        taking.record = true;
+        project.apply(Command::AddFx { track, fx: taking }).unwrap();
+        project.apply(Command::AddMasterFx(fx(loupe_plugins::BUILT_IN, 2, &[]))).unwrap();
+        project.apply(Command::AddMonitorFx(fx(loupe_plugins::BUILT_IN, 1, &[]))).unwrap();
+        let mut racks = racks(false);
+        racks.follow(&project);
+        assert_eq!(racks.monitor.as_ref().map(Rack::len), Some(1), "the monitoring chain has no rack of its own");
+        assert_eq!(racks.master.as_ref().map(Rack::len), Some(1));
+        assert_eq!(racks.chains.get(&track).map(Rack::len), Some(1));
+        assert_eq!(racks.chains[&track].takes_latency(), racks.takes_latency(track));
+
+        let found = racks.harvest_monitor();
+        assert_eq!(found.len(), 1, "the monitoring rack was not harvested");
+        assert!(!found[0].1.is_empty(), "the monitoring plugin saved nothing");
+        for (slot, state) in racks.everything_saved().monitor {
+            project.apply(Command::SetMonitorFxState { slot, state }).unwrap();
+        }
+        let kept = project.monitor_fx[0].state.clone();
+        assert!(!kept.is_empty());
+        let text = loupe_engine::SavedProject::capture(&project, |_| None).to_text();
+        let (reopened, _) = loupe_engine::SavedProject::parse(&text).expect("it reads back").build(&[], 48_000);
+        assert_eq!(reopened.monitor_fx[0].state, kept, "the monitoring plugin came back on defaults");
+
+        project.apply(Command::RemoveMonitorFx(0)).unwrap();
+        racks.follow(&project);
+        assert!(racks.monitor.is_none(), "the monitoring rack stayed behind with nothing on it");
+        assert_eq!(racks.monitor_chain_latency(), 0);
+    }
+
+    #[test]
+    fn the_monitoring_chain_is_heard_but_never_printed_or_mixed() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox 1".into() }) else { panic!("no track") };
+        let source = Arc::new(Source::from_frames("take", vec![[0.4, -0.4]; 4_800]));
+        project.apply(Command::AddClip { track, source, start: 0 }).unwrap();
+        project.apply(Command::AddMonitorFx(fx(loupe_plugins::BUILT_IN, 1, &[]))).unwrap();
+        let mut racks = racks(false);
+        racks.follow(&project);
+        let mut out = vec![[0.0f32; 2]; 512];
+        let mut scratch = loupe_engine::Mixdown::default();
+        loupe_engine::render_through(&project, 0, &mut out, &mut scratch, Some(&mut racks));
+        let mut plain = vec![[0.0f32; 2]; 512];
+        let mut other = loupe_engine::Mixdown::default();
+        loupe_engine::render_through(&project, 0, &mut plain, &mut other, None);
+        assert_eq!(out, plain, "the monitoring chain was heard in the mix");
+        assert!(crate::printing::wanted(&project.tracks[0].fx).is_empty(), "a printed take would pick up the monitoring chain");
+
+        let mut sound = vec![[0.5f32, -0.5]; 512];
+        racks.process_monitor(&mut sound);
+        assert!(sound.iter().any(|frame| (frame[0] - 0.5).abs() > 1e-6), "the monitoring chain did nothing to the input");
     }
 
     #[test]

@@ -53,6 +53,7 @@ fn state_in(project: &Project, which: Touched) -> Option<&Vec<u8>> {
             project.tracks.iter().flat_map(|track| track.clips.iter()).find(|found| found.id == clip)?.fx.get(slot).map(|fx| &fx.state)
         }
         Touched::Master(slot) => project.master_fx.get(slot).map(|fx| &fx.state),
+        Touched::Monitor(slot) => project.monitor_fx.get(slot).map(|fx| &fx.state),
     }
 }
 
@@ -61,6 +62,7 @@ fn change_for(which: Touched, state: Vec<u8>) -> Command {
         Touched::Track(track, slot) => Command::SetFxState { track, slot, state },
         Touched::Clip(clip, slot) => Command::SetClipFxState { clip, slot, state },
         Touched::Master(slot) => Command::SetMasterFxState { slot, state },
+        Touched::Monitor(slot) => Command::SetMonitorFxState { slot, state },
     }
 }
 
@@ -240,6 +242,19 @@ mod tests {
         assert!(matches!(&changes[0], Command::SetClipFxState { clip: at, slot: 0, state } if *at == clip && state == &vec![40]));
         assert!(matches!(&changes[1], Command::SetMasterFxState { slot: 0, state } if state == &vec![30]));
         let _ = track;
+    }
+
+    #[test]
+    fn the_monitoring_chain_is_kept_with_its_own_command() {
+        let (mut project, _) = song();
+        project.apply(Command::AddMonitorFx(fx("/nowhere/Denoiser.vst3", &[9]))).unwrap();
+        let on_monitor = Touched::Monitor(0);
+        let gone = Touched::Monitor(4);
+        let mut racks = Pretend { states: vec![(on_monitor, vec![90]), (gone, vec![91])], asked: Vec::new() };
+        let changes = edits(&mut racks, &project, &[on_monitor, gone]);
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(&changes[0], Command::SetMonitorFxState { slot: 0, state } if state == &vec![90]));
+        assert_eq!(racks.asked, vec![on_monitor], "a monitoring slot the song has not got was still asked to save");
     }
 }
 

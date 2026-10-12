@@ -173,6 +173,7 @@ impl App {
                 }),
                 strip_title(palette, "", "Master".to_string(), None, None),
                 self.fx_button(crate::stockwin::Spot::Master),
+                self.fx_button(crate::stockwin::Spot::Monitor),
                 hrow![
                     mouse_area(
                         vertical_slider(0.0..=LOUDEST_MASTER_PERCENT, percent, Message::MasterPercent)

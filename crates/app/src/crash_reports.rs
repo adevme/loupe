@@ -23,7 +23,7 @@ impl App {
     pub(crate) fn note_plugins_for_crashes(&self) {
         let on_tracks = self.project.tracks.iter().flat_map(|track| track.fx.iter());
         let on_clips = self.project.tracks.iter().flat_map(|track| track.clips.iter()).flat_map(|clip| clip.fx.iter());
-        crash::note_plugins(on_tracks.chain(on_clips).chain(self.project.master_fx.iter()).map(|fx| fx.name.clone()));
+        crash::note_plugins(on_tracks.chain(on_clips).chain(self.project.master_fx.iter()).chain(self.project.monitor_fx.iter()).map(|fx| fx.name.clone()));
     }
 
     pub(crate) fn note_audio_for_crashes(&self) {
@@ -43,6 +43,7 @@ impl App {
                 self.project.tracks.iter().flat_map(|track| track.clips.iter()).find(|found| found.id == clip)?.fx.get(slot)
             }
             Spot::Master(slot) => self.project.master_fx.get(slot),
+            Spot::Monitor(slot) => self.project.monitor_fx.get(slot),
         }
     }
 
@@ -92,6 +93,7 @@ impl App {
                 Spot::Track(track, slot) => Command::BypassFx { track, slot, bypassed: true },
                 Spot::Clip(clip, slot) => Command::BypassClipFx { clip, slot, bypassed: true },
                 Spot::Master(slot) => Command::BypassMasterFx { slot, bypassed: true },
+                Spot::Monitor(slot) => Command::BypassMonitorFx { slot, bypassed: true },
             };
             self.edit(None, command);
         }

@@ -76,6 +76,7 @@ const SETTLE_TICKS: u8 = 6;
 const STATUS_HEIGHT: f32 = 30.0;
 const LOOK_IN_EVERY: u8 = 12;
 pub const MASTER_OWNER: u64 = u64::MAX;
+pub const MONITOR_OWNER: u64 = u64::MAX - 1;
 const SETTLES_IN: std::time::Duration = std::time::Duration::from_millis(180);
 const METER_FALL_PER_TICK: f32 = 0.86;
 const FADER_STEP_DB: f32 = 0.5;
@@ -361,6 +362,11 @@ pub enum Message {
     RemoveMasterPlugin(usize),
     BypassMasterPlugin(usize),
     ShowMasterPlugin(usize),
+    OpenMonitorPlugins,
+    AddMonitorPlugin(usize),
+    RemoveMonitorPlugin(usize),
+    BypassMonitorPlugin(usize),
+    ShowMonitorPlugin(usize),
     AudioDriverChosen(audio_settings::Driver),
     AudioOutputChosen(String),
     AudioRateChosen(audio_settings::Rate),
@@ -485,6 +491,7 @@ pub enum Overlay {
     RenameInMixer(TrackId),
     Automation(loupe_engine::Target),
     MasterPlugins,
+    MonitorPlugins,
     Stock,
     Matrix,
     Recover,
@@ -1683,6 +1690,7 @@ impl App {
                         stockwin::Spot::Track(track) => Command::RenameFx { track, slot, name },
                         stockwin::Spot::Clip(clip) => Command::RenameClipFx { clip, slot, name },
                         stockwin::Spot::Master => Command::RenameMasterFx { slot, name },
+                        stockwin::Spot::Monitor => Command::RenameMonitorFx { slot, name },
                     };
                     self.edit(None, wanted);
                     self.overlay = Overlay::None;
@@ -1878,6 +1886,38 @@ impl App {
                 }
             }
             Message::ShowMasterPlugin(slot) => self.open_master_window(slot),
+            Message::OpenMonitorPlugins => {
+                self.refresh_chains();
+                self.plugin_filter.clear();
+                self.plugin_highlight = 0;
+                self.overlay = Overlay::MonitorPlugins;
+                return text_input::focus(plugins::FILTER_ID);
+            }
+            Message::AddMonitorPlugin(which) => {
+                if let Some(plugin) = self.found.get(which).cloned() {
+                    let fx = loupe_engine::Fx {
+                        mix: 1.0,
+                        path: plugin.path.clone(),
+                        index: plugin.index,
+                        name: plugin.name.clone(),
+                        bypassed: false,
+                        state: Vec::new(),
+                        record: false,
+                    };
+                    self.overlay = Overlay::None;
+                    self.plugin_uses.reached_for(&plugin.name);
+                    self.edit(None, Command::AddMonitorFx(fx));
+                }
+            }
+            Message::RemoveMonitorPlugin(slot) => {
+                self.edit(None, Command::RemoveMonitorFx(slot));
+            }
+            Message::BypassMonitorPlugin(slot) => {
+                if let Some(bypassed) = self.project.monitor_fx.get(slot).map(|fx| !fx.bypassed) {
+                    self.edit(None, Command::BypassMonitorFx { slot, bypassed });
+                }
+            }
+            Message::ShowMonitorPlugin(slot) => self.open_monitor_window(slot),
             Message::MidiInputToggled(port) => self.toggle_midi_input(port),
             Message::ToggleSnap => {
                 self.snap = !self.snap;
@@ -2693,6 +2733,7 @@ impl App {
 
     pub(crate) fn gather_fx_state(&mut self) {
         let bare = self.project.master_fx.is_empty()
+            && self.project.monitor_fx.is_empty()
             && self.project.tracks.iter().all(|track| track.fx.is_empty())
             && self.project.tracks.iter().flat_map(|track| track.clips.iter()).all(|clip| clip.fx.is_empty());
         if bare {
@@ -2709,6 +2750,9 @@ impl App {
         }
         for (slot, state) in saved.master {
             let _ = self.project.apply(Command::SetMasterFxState { slot, state });
+        }
+        for (slot, state) in saved.monitor {
+            let _ = self.project.apply(Command::SetMonitorFxState { slot, state });
         }
         self.hand_racks_over();
     }
@@ -2859,12 +2903,13 @@ impl App {
                 .map(|fx| fx.state.clone())
                 .unwrap_or_default(),
             stockwin::Spot::Master => self.project.master_fx.get(slot).map(|fx| fx.state.clone()).unwrap_or_default(),
+            stockwin::Spot::Monitor => self.project.monitor_fx.get(slot).map(|fx| fx.state.clone()).unwrap_or_default(),
         };
         for (knob, value) in &changes {
             match spot {
                 stockwin::Spot::Track(track) => self.engine.tweak(track, slot, *knob, *value),
                 stockwin::Spot::Clip(clip) => self.engine.tweak_clip(clip, slot, *knob, *value),
-                stockwin::Spot::Master => {}
+                stockwin::Spot::Master | stockwin::Spot::Monitor => {}
             }
             let at = knob * 4;
             if state.len() < at + 4 {
@@ -2876,6 +2921,7 @@ impl App {
             stockwin::Spot::Track(track) => self.project.apply(Command::SetFxState { track, slot, state }),
             stockwin::Spot::Clip(clip) => self.project.apply(Command::SetClipFxState { clip, slot, state }),
             stockwin::Spot::Master => self.project.apply(Command::SetMasterFxState { slot, state }),
+            stockwin::Spot::Monitor => self.project.apply(Command::SetMonitorFxState { slot, state }),
         };
         self.dirty = true;
         self.revision += 1;
@@ -2928,6 +2974,15 @@ impl App {
     fn fx_shape(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for fx in &self.project.monitor_fx {
+            fx.path.hash(&mut hasher);
+            fx.index.hash(&mut hasher);
+            fx.bypassed.hash(&mut hasher);
+            fx.mix.to_bits().hash(&mut hasher);
+            if !loupe_plugins::rack::is_built_in(&fx.path) {
+                fx.state.hash(&mut hasher);
+            }
+        }
         for track in &self.project.tracks {
             if track.fx.is_empty() {
                 continue;
@@ -3850,6 +3905,37 @@ impl App {
             self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
         }
     }
+
+    fn open_monitor_window(&mut self, slot: usize) {
+        if self.plugins_are_off() {
+            self.problem = Some(safe_mode::PLUGINS_OFF_PROBLEM.into());
+            return;
+        }
+        let Some(fx) = self.project.monitor_fx.get(slot).cloned() else {
+            return;
+        };
+        if loupe_plugins::rack::is_built_in(&fx.path) {
+            let values: Vec<f32> = fx.state.chunks_exact(4).map(|four| f32::from_le_bytes([four[0], four[1], four[2], four[3]])).collect();
+            let peek = self.peek_at(racks::Spot::Monitor(slot));
+            let rate = self.engine.rate() as f32;
+            let bpm = self.project.bpm as f32;
+            if let Some(window) = stockwin::Window::open(stockwin::Spot::Monitor, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
+                self.stock = Some(window);
+            }
+            return;
+        }
+        if let Some(mut racks) = self.take_or_make_racks() {
+            racks.follow(&self.project);
+            if let Err(why) = racks.show_monitor(slot) {
+                self.problem = Some(why);
+            }
+            self.plugins_opening = racks.still_opening();
+            self.racks.keep(racks);
+            self.hand_racks_over();
+        } else {
+            self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
+        }
+    }
 }
 
 impl App {
@@ -3871,6 +3957,7 @@ impl App {
                 racks::Spot::Track(track, slot) => (track.0, *slot, false),
                 racks::Spot::Clip(clip, slot) => (clip.0, *slot, true),
                 racks::Spot::Master(slot) => (MASTER_OWNER, *slot, false),
+                racks::Spot::Monitor(slot) => (MONITOR_OWNER, *slot, false),
             };
             if peek.held_back {
                 self.held_back.insert((owner, slot, on_clip));
@@ -3886,6 +3973,7 @@ impl App {
             stockwin::Spot::Track(track) => (track.0, slot, false),
             stockwin::Spot::Clip(clip) => (clip.0, slot, true),
             stockwin::Spot::Master => (MASTER_OWNER, slot, false),
+            stockwin::Spot::Monitor => (MONITOR_OWNER, slot, false),
         };
         self.held_back.contains(&key)
     }
@@ -3899,6 +3987,7 @@ impl App {
             stockwin::Spot::Track(track) => racks.load(track, slot),
             stockwin::Spot::Clip(clip) => racks.load_clip(clip, slot),
             stockwin::Spot::Master => racks.load_master(slot),
+            stockwin::Spot::Monitor => racks.load_monitor(slot),
         };
         if let Err(why) = asked {
             self.problem = Some(why);

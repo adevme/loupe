@@ -35,6 +35,7 @@ pub enum Spot {
     Track(TrackId),
     Clip(loupe_engine::ClipId),
     Master,
+    Monitor,
 }
 
 pub struct Window {

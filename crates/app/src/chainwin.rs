@@ -19,6 +19,7 @@ impl App {
             Spot::Track(track) => self.project.tracks.iter().find(|found| found.id == track).map(|found| found.fx.as_slice()),
             Spot::Clip(clip) => self.project.clip(clip).map(|found| found.fx.as_slice()),
             Spot::Master => Some(self.project.master_fx.as_slice()),
+            Spot::Monitor => Some(self.project.monitor_fx.as_slice()),
         }
     }
 
@@ -33,6 +34,7 @@ impl App {
                 .unwrap_or_else(|| "Track".to_string()),
             Spot::Clip(clip) => self.project.clip(clip).map(|found| found.called().to_string()).unwrap_or_else(|| "Clip".to_string()),
             Spot::Master => "Master".to_string(),
+            Spot::Monitor => "Monitoring".to_string(),
         }
     }
 
@@ -164,6 +166,7 @@ impl App {
             Spot::Track(track) => Message::OpenPlugins(track),
             Spot::Clip(clip) => Message::OpenClipPlugins(clip),
             Spot::Master => Message::OpenMasterPlugins,
+            Spot::Monitor => Message::OpenMonitorPlugins,
         }
     }
 
@@ -172,6 +175,7 @@ impl App {
             Spot::Track(track) => Message::BypassPlugin(track, slot),
             Spot::Clip(clip) => Message::BypassClipPlugin(clip, slot),
             Spot::Master => Message::BypassMasterPlugin(slot),
+            Spot::Monitor => Message::BypassMonitorPlugin(slot),
         }
     }
 
@@ -180,6 +184,7 @@ impl App {
             Spot::Track(track) => Message::ShowPlugin(track, slot),
             Spot::Clip(clip) => Message::ShowClipPlugin(clip, slot),
             Spot::Master => Message::ShowMasterPlugin(slot),
+            Spot::Monitor => Message::ShowMonitorPlugin(slot),
         }
     }
 
@@ -188,6 +193,7 @@ impl App {
             Spot::Track(track) => Message::RemovePlugin(track, slot),
             Spot::Clip(clip) => Message::RemoveClipPlugin(clip, slot),
             Spot::Master => Message::RemoveMasterPlugin(slot),
+            Spot::Monitor => Message::RemoveMonitorPlugin(slot),
         }
     }
 }
@@ -198,6 +204,7 @@ impl App {
             Spot::Track(track) => loupe_engine::Command::SetFxMix { track, slot, mix },
             Spot::Clip(clip) => loupe_engine::Command::SetClipFxMix { clip, slot, mix },
             Spot::Master => loupe_engine::Command::SetMasterFxMix { slot, mix },
+            Spot::Monitor => loupe_engine::Command::SetMonitorFxMix { slot, mix },
         };
         self.edit(Some(crate::Run::FxMix(spot, slot)), command);
     }
@@ -213,6 +220,7 @@ impl App {
             Spot::Track(track) => loupe_engine::Command::MoveFx { track, slot: from, to },
             Spot::Clip(clip) => loupe_engine::Command::MoveClipFx { clip, slot: from, to },
             Spot::Master => loupe_engine::Command::MoveMasterFx { slot: from, to },
+            Spot::Monitor => loupe_engine::Command::MoveMonitorFx { slot: from, to },
         };
         self.edit(None, command);
     }
@@ -222,12 +230,62 @@ impl App {
     pub(crate) fn fx_button(&self, spot: Spot) -> Element<'_, Message> {
         let palette = self.palette;
         let count = self.chain_of(spot).map_or(0, <[Fx]>::len);
-        let label = if count > 0 { format!("FX {count}") } else { "FX".to_string() };
+        let word = if spot == Spot::Monitor { "Mon FX" } else { "FX" };
+        let label = if count > 0 { format!("{word} {count}") } else { word.to_string() };
         button(text(label).size(11).font(palette.medium).width(Length::Fill).center())
             .padding([3, 0])
             .width(Length::Fill)
             .style(move |_, status| palette.outlined(status))
             .on_press(Message::OpenChainInMixer(spot))
             .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use loupe_engine::Command;
+
+    use super::*;
+    use crate::Overlay;
+
+    fn plugin(name: &str) -> Fx {
+        Fx { path: PathBuf::from(format!("/nowhere/{name}.vst3")), index: 0, name: name.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }
+    }
+
+    fn named(app: &App) -> Vec<String> {
+        app.project.monitor_fx.iter().map(|fx| fx.name.clone()).collect()
+    }
+
+    #[test]
+    fn the_chain_window_edits_the_monitoring_chain_the_way_it_edits_the_master() {
+        let mut app = App::bare();
+        assert_eq!(app.chain_name(Spot::Monitor), "Monitoring");
+        assert!(matches!(app.add_to(Spot::Monitor), Message::OpenMonitorPlugins));
+        for name in ["Denoiser", "RVox", "Pro-R 2"] {
+            app.project.apply(Command::AddMonitorFx(plugin(name))).unwrap();
+        }
+        assert_eq!(app.chain_of(Spot::Monitor).map(<[Fx]>::len), Some(3));
+
+        let _ = app.update(Message::BypassMonitorPlugin(1));
+        assert!(app.project.monitor_fx[1].bypassed, "the dot did not switch the plugin off");
+        let _ = app.update(Message::SetFxMix(Spot::Monitor, 2, 0.35));
+        assert!((app.project.monitor_fx[2].mix - 0.35).abs() < 1e-6, "the mix slider did nothing");
+
+        app.chain_drag = Some((Spot::Monitor, 0));
+        app.chain_over = Some((Spot::Monitor, 2));
+        app.drop_chain();
+        assert_eq!(named(&app), ["RVox", "Pro-R 2", "Denoiser"], "dragging did not reorder the chain");
+
+        let _ = app.update(Message::StartRenameFx(Spot::Monitor, 0));
+        assert_eq!(app.overlay, Overlay::RenameFx(Spot::Monitor, 0));
+        let _ = app.update(Message::EntryTyped("Waves RVox".into()));
+        let _ = app.update(Message::EntryEntered);
+        assert_eq!(named(&app)[0], "Waves RVox");
+
+        let _ = app.update(Message::RemoveMonitorPlugin(1));
+        assert_eq!(named(&app), ["Waves RVox", "Denoiser"]);
+        assert!(app.project.master_fx.is_empty(), "the monitoring chain reached into the master chain");
     }
 }
