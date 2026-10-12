@@ -270,6 +270,7 @@ impl Sandbox {
         }
         let _ = Ask::Quit.write(&mut self.writing);
         self.said_bye = true;
+        self.seat.take();
     }
 
     pub fn has_gone(&mut self) -> bool {

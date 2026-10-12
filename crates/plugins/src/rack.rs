@@ -508,28 +508,35 @@ impl Rack {
     }
 
     pub fn save(&mut self, slot: usize) -> Option<Vec<u8>> {
-        let found = self.slots.get_mut(slot)?;
-        if let Some(made) = found.built.as_ref() {
-            return Some(take_knobs(made.as_ref()));
+        if self.slots.get(slot).is_none() {
+            return None;
         }
-        let host = found.host.as_mut()?;
-        let asked = host.ask(Ask::Save);
-        let fell = host.gone();
-        match asked {
-            Ok(Reply::State(state)) => {
-                found.known = state.clone();
-                Some(state)
-            }
-            Ok(Reply::Trouble(why)) => {
-                self.lost_host(slot, why, false);
-                None
-            }
-            Ok(_) => None,
-            Err(why) => {
+        match what_it_remembers(&mut self.slots[slot]) {
+            Kept::Settings(state) => Some(state),
+            Kept::Nothing => None,
+            Kept::Lost(why, fell) => {
                 self.lost_host(slot, why, fell);
                 None
             }
         }
+    }
+
+    pub fn all_they_remember(&mut self) -> Vec<(usize, Vec<u8>)> {
+        let asked: Vec<(usize, Kept)> = std::thread::scope(|scope| {
+            let asking: Vec<_> =
+                self.slots.iter_mut().enumerate().map(|(at, slot)| scope.spawn(move || (at, what_it_remembers(slot)))).collect();
+            asking.into_iter().filter_map(|one| one.join().ok()).collect()
+        });
+        let mut found = Vec::new();
+        for (at, kept) in asked {
+            match kept {
+                Kept::Settings(state) => found.push((at, state)),
+                Kept::Nothing => {}
+                Kept::Lost(why, fell) => self.lost_host(at, why, fell),
+            }
+        }
+        found.sort_by_key(|(at, _)| *at);
+        found
     }
 
     pub fn process(&mut self, audio: &mut Vec<[f32; 2]>) {
@@ -723,7 +730,7 @@ impl Rack {
                 }
             }
         }
-        crate::sandbox::see_them_out(hosts_in(&mut pool));
+        these_can_go(pool);
         self.start_what_there_is_room_to_start();
         troubles
     }
@@ -1506,12 +1513,64 @@ mod growing_tests {
     }
 }
 
+enum Kept {
+    Settings(Vec<u8>),
+    Nothing,
+    Lost(String, bool),
+}
+
+fn what_it_remembers(slot: &mut Slot) -> Kept {
+    if let Some(made) = slot.built.as_ref() {
+        return Kept::Settings(take_knobs(made.as_ref()));
+    }
+    let Some(host) = slot.host.as_mut() else { return Kept::Nothing };
+    let asked = host.ask(Ask::Save);
+    let fell = host.gone();
+    match asked {
+        Ok(Reply::State(state)) => {
+            slot.known = state.clone();
+            Kept::Settings(state)
+        }
+        Ok(Reply::Trouble(why)) => Kept::Lost(why, false),
+        Ok(_) => Kept::Nothing,
+        Err(why) => Kept::Lost(why, fell),
+    }
+}
+
 fn hosts_in(slots: &mut [Slot]) -> Vec<&mut Sandbox> {
     slots.iter_mut().filter_map(|slot| slot.host.as_mut()).collect()
 }
 
+fn the_waving_crew() -> &'static std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> {
+    static CREW: std::sync::OnceLock<std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>> = std::sync::OnceLock::new();
+    CREW.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+pub fn these_can_go(slots: Vec<Slot>) {
+    if slots.iter().all(|slot| slot.host.is_none()) {
+        return;
+    }
+    let waving = std::thread::spawn(move || {
+        let mut leaving = slots;
+        crate::sandbox::see_them_out(hosts_in(&mut leaving));
+    });
+    let Ok(mut crew) = the_waving_crew().lock() else { return };
+    crew.retain(|hand| !hand.is_finished());
+    crew.push(waving);
+}
+
+pub fn wave_them_all_off() {
+    let waiting: Vec<std::thread::JoinHandle<()>> = match the_waving_crew().lock() {
+        Ok(mut crew) => crew.drain(..).collect(),
+        Err(_) => return,
+    };
+    for hand in waiting {
+        let _ = hand.join();
+    }
+}
+
 pub fn let_them_go(mut going: Vec<Rack>) {
-    crate::sandbox::see_them_out(going.iter_mut().flat_map(|rack| hosts_in(&mut rack.slots)).collect());
+    these_can_go(going.iter_mut().flat_map(|rack| rack.slots.drain(..)).collect());
 }
 
 impl Drop for Rack {
@@ -1598,6 +1657,21 @@ mod closing_tests {
         let took = began.elapsed();
         assert!(took < Duration::from_millis(1_200), "closing 36 hosts took {took:?}, as if one at a time");
         nobody_left(&hosts);
+        wave_them_all_off();
+    }
+
+    #[test]
+    fn closing_does_not_keep_the_window_waiting() {
+        let fake = fake_host("lingering", "sleep 5 ; exit 0");
+        let racks = running(&fake.0, 8, 3);
+        let hosts = pids(&racks);
+        assert_eq!(hosts.len(), 24);
+        let began = Instant::now();
+        let_them_go(racks);
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(50), "closing held the window for {took:?}");
+        nobody_left(&hosts);
+        wave_them_all_off();
     }
 
     #[test]
@@ -1608,10 +1682,48 @@ mod closing_tests {
         assert_eq!(hosts.len(), 20);
         let began = Instant::now();
         let_them_go(racks);
+        assert!(began.elapsed() < Duration::from_millis(50), "closing held the window up");
+        wave_them_all_off();
         let took = began.elapsed();
         assert!(took >= crate::sandbox::GOODBYE_PATIENCE, "the hosts were given no time to quit on their own");
         assert!(took < Duration::from_millis(2_000), "closing 20 stubborn hosts took {took:?}, as if one at a time");
         nobody_left(&hosts);
+    }
+
+    #[test]
+    fn a_plugin_taken_off_a_chain_does_not_keep_the_window_waiting() {
+        let fake = fake_host("removed", "sleep 5 ; exit 0");
+        let mut racks = running(&fake.0, 1, 3);
+        let hosts = pids(&racks);
+        assert_eq!(hosts.len(), 3);
+        let mut rack = racks.pop().expect("there is a rack");
+        let began = Instant::now();
+        assert!(rack.reconcile(&[]).is_empty());
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(50), "taking three plugins off held the window for {took:?}");
+        assert_eq!(rack.len(), 0);
+        nobody_left(&hosts);
+        wave_them_all_off();
+    }
+
+    #[test]
+    fn a_rack_saves_all_its_plugins_at_once() {
+        let folder = std::env::temp_dir().join(format!("loupe-saving-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("loupe-host");
+        let script = "#!/bin/sh\nwhile IFS= read -r ask ; do\n  case \"$ask\" in\n    load*) printf 'loaded\\t2\\t2\\t0\\t0\\n' ;;\n    save) sleep 0.4 ; printf 'state\\tdeadbeef\\n' ;;\n    quit) exit 0 ;;\n    *) printf 'fine\\n' ;;\n  esac\ndone\n";
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fake = Fake(file);
+        let mut racks = running(&fake.0, 1, 5);
+        let mut rack = racks.pop().expect("there is a rack");
+        let began = Instant::now();
+        let kept = rack.all_they_remember();
+        let took = began.elapsed();
+        assert_eq!(kept.len(), 5);
+        assert_eq!(kept.iter().map(|(slot, _)| *slot).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+        assert!(kept.iter().all(|(_, state)| !state.is_empty()), "a plugin saved nothing");
+        assert!(took < Duration::from_millis(1_200), "saving 5 plugins took {took:?}, as if one at a time");
     }
 
     #[test]

@@ -119,6 +119,7 @@ fn main() -> iced::Result {
         let (state, task) = starting::Loupe::starting(id, loaded, settings, shift_at_start);
         (state, Task::batch([opening.discard(), task]))
     });
+    loupe_plugins::rack::wave_them_all_off();
     backup::mark_closed();
     usage::finish();
     ran
@@ -2504,17 +2505,15 @@ impl App {
             return;
         }
         let Some(mut racks) = self.borrow_racks() else { return };
-        let found = racks.harvest();
-        let on_clips = racks.harvest_clips();
-        let on_master = racks.harvest_master();
+        let saved = racks.everything_saved();
         self.racks = Some(racks);
-        for (track, slot, state) in found {
+        for (track, slot, state) in saved.tracks {
             let _ = self.project.apply(Command::SetFxState { track, slot, state });
         }
-        for (clip, slot, state) in on_clips {
+        for (clip, slot, state) in saved.clips {
             let _ = self.project.apply(Command::SetClipFxState { clip, slot, state });
         }
-        for (slot, state) in on_master {
+        for (slot, state) in saved.master {
             let _ = self.project.apply(Command::SetMasterFxState { slot, state });
         }
         self.hand_racks_over();

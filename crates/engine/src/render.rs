@@ -17,6 +17,13 @@ pub struct PluginSpending {
     pub at_once: usize,
 }
 
+#[derive(Default)]
+pub struct Saved {
+    pub tracks: Vec<(TrackId, usize, Vec<u8>)>,
+    pub clips: Vec<(ClipId, usize, Vec<u8>)>,
+    pub master: Vec<(usize, Vec<u8>)>,
+}
+
 pub trait Chains: Send {
     fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
         self.process_with(track, audio, &[]);
@@ -60,6 +67,10 @@ pub trait Chains: Send {
 
     fn harvest_master(&mut self) -> Vec<(usize, Vec<u8>)> {
         Vec::new()
+    }
+
+    fn everything_saved(&mut self) -> Saved {
+        Saved { tracks: self.harvest(), clips: self.harvest_clips(), master: self.harvest_master() }
     }
 
     fn knob_readings(&mut self, track: TrackId, slot: usize) -> Vec<(String, f32, String)> {

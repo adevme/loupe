@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use loupe_engine::{Chains, Clip, ClipId, PluginSpending, Project, TrackId};
+use loupe_engine::{Chains, Clip, ClipId, PluginSpending, Project, Saved, TrackId};
 use loupe_plugins::rack::{let_them_go, Fallen, Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_plugins::wire::Region;
@@ -49,20 +49,17 @@ fn all_at_once<Of: Copy + Send>(racks: Vec<(Of, &mut Rack)>) -> Vec<(Of, usize, 
     std::thread::scope(|scope| {
         let asking: Vec<_> = racks
             .into_iter()
-            .map(|(of, rack)| {
-                scope.spawn(move || {
-                    let mut found = Vec::new();
-                    for slot in 0..rack.len() {
-                        if let Some(state) = rack.save(slot) {
-                            found.push((of, slot, state));
-                        }
-                    }
-                    found
-                })
-            })
+            .map(|(of, rack)| scope.spawn(move || rack.all_they_remember().into_iter().map(|(slot, state)| (of, slot, state)).collect::<Vec<_>>()))
             .collect();
         asking.into_iter().flat_map(|one| one.join().unwrap_or_default()).collect()
     })
+}
+
+#[derive(Clone, Copy)]
+enum Which {
+    Track(TrackId),
+    Clip(ClipId),
+    Master,
 }
 
 pub struct Racks {
@@ -564,19 +561,30 @@ impl Chains for Racks {
     }
 
     fn harvest_master(&mut self) -> Vec<(usize, Vec<u8>)> {
-        let mut out = Vec::new();
-        if let Some(rack) = self.master.as_mut() {
-            for slot in 0..rack.len() {
-                if let Some(state) = rack.save(slot) {
-                    out.push((slot, state));
-                }
-            }
+        match self.master.as_mut() {
+            Some(rack) => rack.all_they_remember(),
+            None => Vec::new(),
         }
-        out
     }
 
     fn harvest(&mut self) -> Vec<(TrackId, usize, Vec<u8>)> {
         all_at_once(self.chains.iter_mut().map(|(id, rack)| (*id, rack)).collect())
+    }
+
+    fn everything_saved(&mut self) -> Saved {
+        let mut everyone: Vec<(Which, &mut Rack)> = Vec::new();
+        everyone.extend(self.chains.iter_mut().map(|(id, rack)| (Which::Track(*id), rack)));
+        everyone.extend(self.clips.iter_mut().map(|(id, rack)| (Which::Clip(*id), rack)));
+        everyone.extend(self.master.iter_mut().map(|rack| (Which::Master, rack)));
+        let mut saved = Saved::default();
+        for (which, slot, state) in all_at_once(everyone) {
+            match which {
+                Which::Track(id) => saved.tracks.push((id, slot, state)),
+                Which::Clip(id) => saved.clips.push((id, slot, state)),
+                Which::Master => saved.master.push((slot, state)),
+            }
+        }
+        saved
     }
 
     fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
@@ -906,5 +914,128 @@ impl Drop for Racks {
     fn drop(&mut self) {
         let going = self.everything_leaving();
         let_them_go(going);
+    }
+}
+
+
+#[cfg(all(test, target_os = "linux"))]
+mod closing_tests {
+    use super::*;
+    use loupe_engine::{Command, Fx, Outcome, Source};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    const HOW_LONG_A_PLUGIN_TAKES_TO_SAVE: &str = "0.4";
+
+    struct Fake(PathBuf);
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            if let Some(folder) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+
+    fn slow_to_answer(name: &str) -> Fake {
+        let folder = std::env::temp_dir().join(format!("loupe-closing-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("loupe-host");
+        let script = format!(
+            "#!/bin/sh\nwhile IFS= read -r ask ; do\n  case \"$ask\" in\n    load*) printf 'loaded\\t2\\t2\\t0\\t0\\n' ;;\n    save) sleep {HOW_LONG_A_PLUGIN_TAKES_TO_SAVE} ; printf 'state\\tdeadbeef\\n' ;;\n    knobs) printf 'knobs\\tGain\\n' ;;\n    quit) sleep 5 ; exit 0 ;;\n    *) printf 'fine\\n' ;;\n  esac\ndone\n"
+        );
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Fake(file)
+    }
+
+    fn plugin(name: &str) -> Fx {
+        Fx { path: PathBuf::from("/nowhere/Slow.vst3"), index: 0, name: name.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }
+    }
+
+    fn a_song_with_plugins_everywhere() -> Project {
+        let mut project = Project::new(48_000);
+        for at in 0..6 {
+            let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: format!("T{at}") }) else { panic!("no track") };
+            let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 4_800]));
+            let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!("no clip") };
+            project.apply(Command::AddFx { track, fx: plugin(&format!("A{at}")) }).unwrap();
+            project.apply(Command::AddFx { track, fx: plugin(&format!("B{at}")) }).unwrap();
+            if at < 2 {
+                project.apply(Command::AddClipFx { clip, fx: plugin(&format!("C{at}")) }).unwrap();
+            }
+        }
+        for at in 0..3 {
+            project.apply(Command::AddMasterFx(plugin(&format!("M{at}")))).unwrap();
+        }
+        project
+    }
+
+    fn all_running(host: &Path, project: &Project) -> Racks {
+        let mut racks = Racks::new(48_000, 512, Peeks::default(), Arc::new(AtomicBool::new(false)), Falls::default());
+        racks.host = host.to_path_buf();
+        racks.follow(project);
+        let gave_up = Instant::now();
+        while racks.still_opening() {
+            assert!(gave_up.elapsed() < Duration::from_secs(120), "the fake hosts never started");
+            racks.follow(project);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        racks
+    }
+
+    fn hosts_in(racks: &Racks) -> Vec<u32> {
+        let mut out = Vec::new();
+        for rack in racks.chains.values().chain(racks.clips.values()).chain(racks.master.iter()) {
+            out.extend((0..rack.len()).filter_map(|slot| rack.host_pid(slot)));
+        }
+        out
+    }
+
+    fn still_about(pid: u32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    fn nobody_left(hosts: &[u32]) {
+        let gave_up = Instant::now();
+        while let Some(pid) = hosts.iter().copied().find(|pid| still_about(*pid)) {
+            assert!(gave_up.elapsed() < Duration::from_secs(10), "host {pid} was left behind");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn every_plugin_in_the_song_saves_in_one_wave() {
+        let fake = slow_to_answer("one-wave");
+        let project = a_song_with_plugins_everywhere();
+        let mut racks = all_running(&fake.0, &project);
+        let hosts = hosts_in(&racks);
+        assert_eq!(hosts.len(), 17, "the song should be running 17 plugins");
+        let began = Instant::now();
+        let saved = racks.everything_saved();
+        let took = began.elapsed();
+        assert_eq!(saved.tracks.len(), 12);
+        assert_eq!(saved.clips.len(), 2);
+        assert_eq!(saved.master.len(), 3);
+        assert!(took < Duration::from_millis(1_600), "saving 17 plugins took {took:?}, as if a chain at a time");
+        drop(racks);
+        nobody_left(&hosts);
+    }
+
+    #[test]
+    fn closing_a_song_lets_the_window_carry_on() {
+        let fake = slow_to_answer("carry-on");
+        let project = a_song_with_plugins_everywhere();
+        let mut racks = all_running(&fake.0, &project);
+        let hosts = hosts_in(&racks);
+        assert_eq!(hosts.len(), 17);
+        let began = Instant::now();
+        racks.follow(&Project::new(48_000));
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(50), "closing the song held the window for {took:?}");
+        assert!(racks.chains.is_empty() && racks.clips.is_empty() && racks.master.is_none());
+        nobody_left(&hosts);
+        drop(racks);
     }
 }
