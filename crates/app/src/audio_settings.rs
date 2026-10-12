@@ -2,15 +2,16 @@ use std::collections::HashMap;
 use std::fmt;
 
 use iced::futures::channel::oneshot;
-use iced::widget::{checkbox, column, row, text};
-use iced::{Element, Length, Task};
-use loupe_engine::{milliseconds, Device, Engine, Output, SavedProject};
+use iced::widget::{button, checkbox, column, container, horizontal_space, row, text};
+use iced::{Alignment, Element, Length, Task};
+use loupe_engine::{milliseconds, Device, Engine, Failure, Output, SavedProject};
 
 use crate::files::{read_text, Opened};
 use crate::theme;
 use crate::{settings, App, Message};
 
 pub const SYSTEM_OUTPUT: &str = "System default";
+const BANNER_HEIGHT: f32 = 34.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Driver(pub String);
@@ -58,6 +59,19 @@ pub struct Lists {
     outputs: Vec<String>,
     rates: Vec<Rate>,
     buffers: Vec<u32>,
+}
+
+pub fn trouble_words(failure: Option<&Failure>) -> Option<String> {
+    let failure = failure?;
+    let output = failure.output.clone().unwrap_or_else(|| SYSTEM_OUTPUT.to_string());
+    let through = match &failure.driver {
+        Some(driver) => format!(" through {}", Driver(driver.clone())),
+        None => String::new(),
+    };
+    Some(format!(
+        "No sound: Loupe could not open {output}{through} — {}. Nothing will be heard until a sound output opens. Everything else keeps working.",
+        failure.reason
+    ))
 }
 
 pub fn running_text(engine: &Engine) -> String {
@@ -118,7 +132,7 @@ impl App {
         task
     }
 
-    fn restart_audio(&mut self) -> Task<Message> {
+    pub(crate) fn restart_audio(&mut self) -> Task<Message> {
         if self.playing {
             self.engine.stop();
             self.playing = false;
@@ -131,6 +145,7 @@ impl App {
         self.engine = Engine::start(output);
         self.note_audio_for_crashes();
         self.problem = self.engine.output_error().map(|e| format!("Sound output: {e}"));
+        self.audio_trouble = trouble_words(self.engine.output_failure());
         self.engine.set_metronome(self.metronome);
         self.engine.hear_through_the_chains(self.hear_through_chain);
         self.engine.seek(self.playhead);
@@ -184,6 +199,28 @@ impl App {
         self.notice = Some("The song moved to the new sample rate. Undo history starts again from here.".into());
     }
 
+    pub(crate) fn audio_banner(&self) -> Option<Element<'_, Message>> {
+        let words = self.audio_trouble.as_deref()?;
+        let palette = self.palette;
+        let line = row![
+            text(words).size(12).color(palette.text),
+            horizontal_space(),
+            button(text("Try again").size(12).font(palette.medium)).padding([3, 12]).style(move |_, status| palette.solid(status)).on_press(Message::RetryAudio),
+            button(text("Sound settings").size(12)).padding([3, 10]).style(move |_, status| palette.ghost(status)).on_press(Message::OpenAudioSettings),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        Some(
+            container(line)
+                .padding([0, 16])
+                .width(Length::Fill)
+                .height(BANNER_HEIGHT)
+                .align_y(Alignment::Center)
+                .style(move |_| palette.bar())
+                .into(),
+        )
+    }
+
     pub(crate) fn audio_settings(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let lists = &self.audio_lists;
@@ -219,5 +256,41 @@ impl App {
         ]
         .spacing(8)
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn busy(output: Option<&str>, driver: Option<&str>) -> Failure {
+        Failure {
+            driver: driver.map(str::to_string),
+            output: output.map(str::to_string),
+            reason: "the device is already in use by another program".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_sound_output_that_will_not_open_is_named_with_the_reason() {
+        let words = trouble_words(Some(&busy(Some("Focusrite USB ASIO"), Some("ASIO")))).expect("something to say");
+        assert!(words.contains("Focusrite USB ASIO"), "{words}");
+        assert!(words.contains("ASIO"), "{words}");
+        assert!(words.contains("the device is already in use by another program"), "{words}");
+        assert!(words.starts_with("No sound"), "{words}");
+    }
+
+    #[test]
+    fn the_system_default_is_named_when_no_output_was_chosen() {
+        let words = trouble_words(Some(&busy(None, Some("WASAPI")))).expect("something to say");
+        assert!(words.contains(SYSTEM_OUTPUT), "{words}");
+        assert!(words.contains("Windows audio"), "{words}");
+    }
+
+    #[test]
+    fn a_sound_output_that_opens_leaves_nothing_to_say() {
+        assert_eq!(trouble_words(None), None);
+        let engine = Engine::start(Output::Silent);
+        assert_eq!(trouble_words(engine.output_failure()), None);
     }
 }

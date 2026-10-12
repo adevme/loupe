@@ -175,6 +175,8 @@ pub enum Message {
     SetView(View),
     Resized(Size),
     OpenSettings,
+    OpenAudioSettings,
+    RetryAudio,
     CloseOverlay,
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
@@ -591,6 +593,7 @@ struct App {
     export_began: Option<Instant>,
     export_progress: Arc<AtomicU32>,
     startup_problem: Option<String>,
+    audio_trouble: Option<String>,
     scale: f64,
     pending_scale: f64,
     scale_text: String,
@@ -680,6 +683,7 @@ impl App {
         engine.set_metronome(settings.metronome);
         engine.hear_through_the_chains(settings.hear_through_chain);
         let no_sound = engine.output_error().map(|e| format!("No sound: {e}"));
+        let audio_trouble = audio_settings::trouble_words(engine.output_failure());
         let no_folder = settings::make_folders(settings.folder.as_deref()).err().map(|why| format!("Could not make the Loupe folder: {why}"));
         loupe_plugins::presets::keep_in(settings::presets_folder(settings.folder.as_deref()));
         loupe_plugins::chrome::wear(loaded.palette.chrome());
@@ -719,6 +723,7 @@ impl App {
             export_began: None,
             export_progress: Arc::new(AtomicU32::new(0)),
             startup_problem: no_sound.or(no_folder),
+            audio_trouble,
             bpm: format_bpm(project.bpm),
             engine,
             project,
@@ -1230,6 +1235,16 @@ impl App {
                 self.pending_scale = self.scale;
                 self.scale_text = format_scale(self.scale);
             }
+            Message::OpenAudioSettings => {
+                self.settings_tab = SettingsTab::Audio;
+                self.refresh_audio_lists();
+                self.input_names = loupe_engine::input_devices();
+                self.theme_names = theme::available();
+                self.overlay = Overlay::Settings;
+                self.pending_scale = self.scale;
+                self.scale_text = format_scale(self.scale);
+            }
+            Message::RetryAudio => return self.restart_audio(),
             Message::CloseOverlay if self.overlay == Overlay::PluginFell => self.settle_fallen(false),
             Message::CloseOverlay => {
                 if matches!(self.overlay, Overlay::Roll(_)) {
@@ -3115,6 +3130,9 @@ impl App {
             (true, Side::Left) => row![self.pool(), upright_rule(palette), timeline],
         };
         let mut song = column![self.transport(), rule(palette)];
+        if let Some(banner) = self.audio_banner() {
+            song = song.push(banner).push(rule(palette));
+        }
         if let Some(banner) = self.safe_banner() {
             song = song.push(banner).push(rule(palette));
         }

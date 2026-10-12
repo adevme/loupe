@@ -96,7 +96,11 @@ impl App {
             .center_x(Length::Fill)
             .padding(iced::Padding { top: PAGE_TOP, right: PAGE_SIDE, bottom: PAGE_SIDE, left: PAGE_SIDE })
             .height(Length::Fill);
-        column![bar, rule(palette), page].into()
+        let mut whole = column![bar, rule(palette)];
+        if let Some(banner) = self.audio_banner() {
+            whole = whole.push(banner).push(rule(palette));
+        }
+        whole.push(page).into()
     }
 }
 

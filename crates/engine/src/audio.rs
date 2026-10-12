@@ -9,7 +9,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use crate::clock;
 use crate::input::MOST_INPUTS;
-use crate::devices::{self, Device, Running};
+use crate::devices::{self, Device, Failure, Running};
 use crate::instrument::Note;
 use crate::midi_in::{KeyEvent, KeySender};
 use crate::model::{ClipId, Frames, Project, TrackId};
@@ -713,6 +713,7 @@ pub struct Engine {
     rate: u32,
     running: Option<Running>,
     output_error: Option<String>,
+    output_failure: Option<Failure>,
     quit: Arc<AtomicBool>,
     host: Option<thread::JoinHandle<()>>,
 }
@@ -722,6 +723,7 @@ struct Ready {
     rate: u32,
     running: Option<Running>,
     error: Option<String>,
+    failure: Option<Failure>,
 }
 
 impl Engine {
@@ -745,6 +747,7 @@ impl Engine {
             rate: ready.rate,
             running: ready.running,
             output_error: ready.error,
+            output_failure: ready.failure,
             quit,
             host: Some(host),
         }
@@ -760,6 +763,10 @@ impl Engine {
 
     pub fn output_error(&self) -> Option<&str> {
         self.output_error.as_deref()
+    }
+
+    pub fn output_failure(&self) -> Option<&Failure> {
+        self.output_failure.as_ref()
     }
 
     pub fn set_project(&mut self, project: &Project) {
@@ -988,17 +995,21 @@ fn add_clicks(out: &mut [[f32; 2]], from: f64, beat: f64, rate: u32) {
 
 fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
     let mut error = None;
+    let mut failure = None;
     if let Output::Device(choice) = &output {
         match open_device(choice) {
             Ok((stream, remote, running, warning)) => {
-                let _ = ready.send(Ready { remote, rate: running.rate, running: Some(running), error: warning });
+                let _ = ready.send(Ready { remote, rate: running.rate, running: Some(running), error: warning, failure: None });
                 while !quit.load(Ordering::Relaxed) {
                     thread::park_timeout(Duration::from_millis(200));
                 }
                 drop(stream);
                 return;
             }
-            Err(e) => error = Some(e),
+            Err(e) => {
+                failure = Some(Failure { driver: choice.driver.clone(), output: choice.output.clone(), reason: e.clone() });
+                error = Some(e);
+            }
         }
     }
 
@@ -1007,7 +1018,7 @@ fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
         _ => SILENT_RATE,
     };
     let (mut rt, remote) = pair(rate);
-    let _ = ready.send(Ready { remote, rate, running: None, error });
+    let _ = ready.send(Ready { remote, rate, running: None, error, failure });
     let block = rate as usize / 100;
     let mut next = Instant::now();
     while !quit.load(Ordering::Relaxed) {
@@ -1300,6 +1311,26 @@ mod tests {
         assert!((was - 10_000).abs() < 1_500, "play was pressed at about 10000, got {was}");
         let now = engine.position_at(Instant::now());
         assert!((now - was - 14_400).abs() < 1_500, "0.3 s later, got {} more", now - was);
+    }
+
+    #[test]
+    fn a_sound_output_that_will_not_open_is_named_with_the_reason() {
+        let choice = Device { driver: Some("No such driver".into()), output: Some("Not a real sound card".into()), rate: None, buffer: None };
+        let engine = Engine::start(Output::Device(choice));
+        match engine.output_failure() {
+            Some(failure) => {
+                assert_eq!(failure.output.as_deref(), Some("Not a real sound card"));
+                assert!(!failure.reason.is_empty());
+                assert!(engine.running().is_none());
+            }
+            None => assert!(engine.running().is_some(), "no failure and nothing running"),
+        }
+    }
+
+    #[test]
+    fn a_silent_engine_has_no_sound_output_to_fail() {
+        let engine = Engine::start(Output::Silent);
+        assert!(engine.output_failure().is_none() && engine.running().is_none());
     }
 
     #[test]

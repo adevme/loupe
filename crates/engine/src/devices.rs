@@ -29,6 +29,13 @@ pub struct Running {
     pub buffer: Option<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub driver: Option<String>,
+    pub output: Option<String>,
+    pub reason: String,
+}
+
 pub fn drivers() -> Vec<String> {
     cpal::available_hosts().into_iter().map(|id| id.name().to_string()).collect()
 }
