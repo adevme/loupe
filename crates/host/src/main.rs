@@ -336,6 +336,9 @@ fn main() {
             for chord in chords {
                 let _ = chord.write(&mut out);
             }
+            if made.latency_moved() {
+                say_if_it_moved(&mut seats, seat, &mut out);
+            }
             if let Some((width, height)) = made.wanted_size() {
                 let scale = pane.screen_scale();
                 let own = made.size();
@@ -485,8 +488,12 @@ fn main() {
                 Reply::Fine
             }
             Ask::Hide => {
-                if let Some((_, pane, _)) = editor.as_ref() {
+                let shut = editor.as_ref().map(|(_, pane, seat)| {
                     pane.hide();
+                    *seat
+                });
+                if let Some(seat) = shut {
+                    say_if_it_moved(&mut seats, seat, &mut out);
                 }
                 Reply::Fine
             }
@@ -527,9 +534,11 @@ fn main() {
                 None => Reply::Trouble("no plugin is open".into()),
             },
             Ask::Turn { knob, value } => {
+                let here = seats.at;
                 if let Some(seated) = seats.here() {
                     seated.open.turn(knob, value);
                 }
+                say_if_it_moved(&mut seats, here, &mut out);
                 Reply::Fine
             }
             Ask::Save => match seats.here() {
@@ -547,7 +556,10 @@ fn main() {
                         let put = seated.open.restore(&state);
                         blame::finished();
                         match put {
-                            Ok(()) => Reply::Fine,
+                            Ok(()) => {
+                                say_if_it_moved(&mut seats, here, &mut out);
+                                Reply::Fine
+                            }
                             Err(why) => Reply::Trouble(why),
                         }
                     }
@@ -634,6 +646,22 @@ const ROOM_ON_SCREEN: f32 = 1.0;
 fn preset_folder(plugin: &str) -> Option<PathBuf> {
     let root = std::env::var_os(loupe_plugins::presets::FOLDER_VARIABLE)?;
     Some(loupe_plugins::presets::folder_for(Path::new(&root), plugin))
+}
+
+fn how_late_it_is_now(seats: &mut Seats, seat: usize) -> Option<usize> {
+    let seated = seats.at(seat)?;
+    let now = seated.open.latency();
+    if now == seated.latency {
+        return None;
+    }
+    seated.latency = now;
+    Some(now)
+}
+
+fn say_if_it_moved(seats: &mut Seats, seat: usize, out: &mut impl Write) {
+    if let Some(frames) = how_late_it_is_now(seats, seat) {
+        let _ = Reply::LatencyMoved { seat, frames }.write(out);
+    }
 }
 
 fn told_the_song(asked: &window::Asked) -> Option<Reply> {
