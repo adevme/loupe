@@ -24,6 +24,10 @@ fn make_project_folders(project_file: &Path) {
     }
 }
 
+pub(crate) fn is_a_project(path: &Path) -> bool {
+    path.extension().is_some_and(|ending| ending.eq_ignore_ascii_case(EXTENSION))
+}
+
 pub(crate) fn file_safe(typed: &str) -> String {
     typed.trim().trim_end_matches('.').chars().filter(|c| !NOT_IN_FILE_NAMES.contains(c)).collect()
 }
@@ -148,11 +152,7 @@ impl App {
     }
 
     pub(crate) fn ask_to_open(&mut self) -> Task<Message> {
-        if self.dirty && !self.project.tracks.is_empty() {
-            self.overlay = Overlay::ConfirmDiscard(Pending::Open);
-            return Task::none();
-        }
-        self.pick_project()
+        self.ask_before(Pending::Open)
     }
 
     pub(crate) fn pick_project(&mut self) -> Task<Message> {
@@ -334,4 +334,17 @@ pub fn show_in_folder(file: &Path) -> std::io::Result<()> {
         opener
     };
     opener.spawn().map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dropped_song_is_told_apart_from_dropped_audio() {
+        assert!(is_a_project(Path::new("/songs/Get High/Get High.lp")));
+        assert!(is_a_project(Path::new("C:\\Songs\\Trap.LP")));
+        assert!(!is_a_project(Path::new("/songs/Get High/Audio/lead.wav")));
+        assert!(!is_a_project(Path::new("/songs/lead")));
+    }
 }
