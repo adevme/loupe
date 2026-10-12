@@ -2,6 +2,7 @@
 
 mod backup;
 mod audio_settings;
+mod cli;
 mod autosaving;
 mod clip_window;
 mod clipboard;
@@ -87,6 +88,11 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const SETTINGS_PAGE_HEIGHT: f32 = 330.0;
 
 fn main() -> iced::Result {
+    let typed: Vec<String> = std::env::args_os().skip(1).map(|arg| arg.to_string_lossy().into_owned()).collect();
+    let asked = cli::asked_for(&typed);
+    if asked != cli::Asked::Gui {
+        std::process::exit(cli::run(asked));
+    }
     let shift_at_start = safe_mode::shift_held();
     crash::keep_a_record();
     let settings = Settings::load();

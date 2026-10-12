@@ -43,6 +43,10 @@ impl Opened {
     pub(crate) fn build(&self, rate: u32) -> (Project, Vec<(TrackId, f32)>) {
         self.saved.build(&self.sources, rate)
     }
+
+    pub(crate) fn missing(&self) -> &[String] {
+        &self.not_found
+    }
 }
 
 impl App {

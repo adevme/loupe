@@ -481,7 +481,7 @@ pub fn export_through(
     if plan.split {
         let stems_folder = plan.folder.join(STEMS_FOLDER);
         fs::create_dir_all(&stems_folder).map_err(|why| failed(&stems_folder, why))?;
-        write_stems(&stems_folder, &stems, plan, project, from, to, gain.linear(), &mut pacer, chains.as_deref_mut())?;
+        write_stems(&stems_folder, &stems, plan.format, plan.dither, project, from, to, gain.linear(), &mut pacer, chains.as_deref_mut())?;
         pacer.finished_a_stage();
     }
     let mut notes: Vec<String> = gain.note.into_iter().collect();
@@ -528,6 +528,32 @@ pub fn render_to_wav_through(
     }]);
     write_file(path, Format::WavFloat, false, project, from, to, 1.0, &mut pacer, chains)
         .map_err(|why| format!("{}: {why}", path.display()))
+}
+
+pub fn render_stems_through(
+    project: &Project,
+    folder: &Path,
+    from: Frames,
+    to: Frames,
+    chains: Option<&mut (dyn crate::render::Chains + '_)>,
+) -> Result<Vec<PathBuf>, String> {
+    if to <= from {
+        return Err("there is nothing to write".into());
+    }
+    let stems: Vec<&Track> = project.tracks.iter().filter(|track| !track.muted).collect();
+    if stems.is_empty() {
+        return Err("every track is muted, so there is nothing to write".into());
+    }
+    fs::create_dir_all(folder).map_err(|why| format!("{}: {why}", folder.display()))?;
+    let quiet = |_: Going| true;
+    let span = to - from;
+    let mut pacer = Pacer::new(&quiet, vec![Stage {
+        what: "render and encode",
+        frames: span,
+        render_units: render_units(project),
+        other_nanoseconds_a_frame: Format::WavFloat.nanoseconds_a_frame(),
+    }]);
+    write_stems(folder, &stems, Format::WavFloat, false, project, from, to, 1.0, &mut pacer, chains)
 }
 
 pub fn next_version_folder(exports: &Path) -> PathBuf {
@@ -624,22 +650,23 @@ fn write_file(
 fn write_stems(
     folder: &Path,
     stems: &[&Track],
-    plan: &ExportPlan,
+    format: Format,
+    dither: bool,
     project: &Project,
     from: Frames,
     to: Frames,
     gain: f32,
     pacer: &mut Pacer<'_>,
     chains: Option<&mut (dyn crate::render::Chains + '_)>,
-) -> Result<(), String> {
+) -> Result<Vec<PathBuf>, String> {
     let failed = |what: &Path, why: io::Error| format!("{}: {why}", what.display());
-    let extension = plan.format.extension();
+    let extension = format.extension();
     let mut used: Vec<String> = Vec::new();
     let mut writing = Vec::with_capacity(stems.len());
     for track in stems {
         let at = project.tracks.iter().position(|other| other.id == track.id);
         let file = folder.join(format!("{}.{extension}", unused_name(&track.name, &mut used)));
-        let writer = timed_on_files(pacer, || Writer::create(&file, plan.format, project.rate, to - from, plan.dither))
+        let writer = timed_on_files(pacer, || Writer::create(&file, format, project.rate, to - from, dither))
             .map_err(|why| failed(&file, why))?;
         writing.push((at, file, writer));
     }
@@ -661,10 +688,12 @@ fn write_stems(
     })
     .map_err(|why| failed(folder, why))?;
     pacer.spent_encoding(encoding);
+    let mut written = Vec::with_capacity(writing.len());
     for (_, file, writer) in writing {
         timed_on_files(pacer, || writer.finish()).map_err(|why| failed(&file, why))?;
+        written.push(file);
     }
-    Ok(())
+    Ok(written)
 }
 
 fn timed_on_files<T>(pacer: &mut Pacer<'_>, work: impl FnOnce() -> T) -> T {
