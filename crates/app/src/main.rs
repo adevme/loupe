@@ -60,7 +60,7 @@ use iced::widget::{
     button, canvas, column, container, horizontal_space, progress_bar, row, slider, stack, text,
     text_input, Space,
 };
-use iced::{keyboard, window, Alignment, Element, Length, Point, Size, Subscription, Task};
+use iced::{keyboard, window, Alignment, Element, Length, Point, Rectangle, Size, Subscription, Task};
 use loupe_engine::{
     Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChannels, InputChoice, Instrument, Note, Outcome,
     Output, Device, Project, Source, TrackId,
@@ -206,7 +206,7 @@ pub enum Message {
     StartRename(TrackId),
     StartRenameFx(stockwin::Spot, usize),
     MixerNameClicked(TrackId),
-    PointerAt(Point),
+    PointerAt(window::Id, Point),
     OpenChainInMixer(stockwin::Spot),
     RenameTrackAt { track: TrackId, at: Point },
     StartColour(TrackId),
@@ -524,6 +524,11 @@ pub enum Screen {
     Song,
 }
 
+struct Aim {
+    at: Point,
+    taken: usize,
+}
+
 struct App {
     palette: Palette,
     heights: HashMap<TrackId, f32>,
@@ -609,6 +614,8 @@ struct App {
     entry: String,
     clip_name: String,
     pointer: Point,
+    canvas_at: std::cell::Cell<Rectangle>,
+    aim: Option<Aim>,
     chain_from_mixer: bool,
     chain_drag: Option<(stockwin::Spot, usize)>,
     name_clicked: Option<(TrackId, std::time::Instant)>,
@@ -756,6 +763,8 @@ impl App {
             chain_drag: None,
             name_clicked: None,
             pointer: Point::ORIGIN,
+            canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
+            aim: None,
             chain_from_mixer: false,
             chain_over: None,
             entry_problem: None,
@@ -954,6 +963,8 @@ impl App {
             chain_drag: None,
             name_clicked: None,
             pointer: Point::ORIGIN,
+            canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
+            aim: None,
             chain_from_mixer: false,
             chain_over: None,
             entry_problem: None,
@@ -1220,7 +1231,10 @@ impl App {
                     Message::Picked,
                 );
             }
-            Message::Picked(paths) => return self.import(paths),
+            Message::Picked(paths) => {
+                self.aim = None;
+                return self.import(paths);
+            }
             Message::KeyTold(message) => self.key_told(message),
             Message::KeyFileHeard(name, result) => self.key_file_heard(name, result),
             Message::DroppedOn(window, path) if window == self.main_window => return self.update(Message::Dropped(path)),
@@ -1236,6 +1250,7 @@ impl App {
                 if files::is_a_project(&path) {
                     return self.ask_before(Pending::Dropped(path));
                 }
+                self.take_aim();
                 return self.import(vec![path]);
             }
             Message::Loaded(path, result) => {
@@ -1250,6 +1265,9 @@ impl App {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         self.problem = Some(format!("Could not import {name}: {why}"));
                     }
+                }
+                if self.loading == 0 {
+                    self.aim = None;
                 }
             }
             Message::Select(clip) => self.choose(clip),
@@ -1620,7 +1638,11 @@ impl App {
                     return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
                 }
             }
-            Message::PointerAt(at) => self.pointer = at,
+            Message::PointerAt(window, at) => {
+                if window == self.main_window {
+                    self.pointer = at;
+                }
+            }
             Message::MixerNameClicked(track) => {
                 let now = std::time::Instant::now();
                 let again = self.name_clicked.is_some_and(|(was, when)| was == track && now.duration_since(when) < DOUBLE_CLICK);
@@ -2578,8 +2600,8 @@ impl App {
         } else {
             Subscription::none()
         };
-        let following = iced::event::listen_with(|event, _status, _window| match event {
-            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::PointerAt(position)),
+        let following = iced::event::listen_with(|event, _status, window| match event {
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => Some(Message::PointerAt(window, position)),
             _ => None,
         });
         let mixer_drag = if self.resizing_mixer {
@@ -3113,15 +3135,30 @@ impl App {
         }))
     }
 
+    fn take_aim(&mut self) {
+        let at = crate::pointer::where_it_is_now(self.scale).unwrap_or(self.pointer);
+        let taken = self.aim.as_ref().map_or(0, |held| held.taken);
+        self.aim = Some(Aim { at, taken });
+    }
+
+    fn aimed_at(&mut self) -> Option<(Option<TrackId>, Frames)> {
+        let aim = self.aim.as_mut()?;
+        let at = aim.at;
+        let down = aim.taken;
+        aim.taken += 1;
+        let (track, start) = self.dropped_onto(at)?;
+        Some((self.below(track, down), start))
+    }
+
     fn place(&mut self, source: Arc<Source>) {
         let first = self.project.tracks.is_empty();
-        let at = crate::pointer::where_it_is_now().unwrap_or(self.pointer);
-        let onto = self.dropped_onto(at);
-        let start = onto.map_or(self.playhead, |(_, at)| at);
+        let aimed = self.aimed_at();
+        let start = aimed.map_or(self.playhead, |(_, at)| at);
+        let onto = aimed.and_then(|(track, _)| track);
         let name = source.name.clone();
         let placed = self.transact(None, |project| {
             let track = match onto {
-                Some((track, _)) => track,
+                Some(track) => track,
                 None => match project.apply(Command::AddTrack { name })? {
                     Outcome::Track(made) => made,
                     _ => return Err(CommandError::NoSuchTrack),
@@ -3285,6 +3322,7 @@ impl App {
             opening: self.opening.is_some(),
             width: self.canvas_width(),
             cache: &self.cache,
+            at: &self.canvas_at,
         })
         .width(Length::Fill)
         .height(Length::Fill);

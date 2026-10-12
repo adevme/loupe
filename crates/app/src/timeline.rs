@@ -128,6 +128,7 @@ pub struct Timeline<'a> {
     pub width: f32,
     pub knobs: &'a HashMap<(u64, usize, usize, bool), String>,
     pub cache: &'a Cache,
+    pub at: &'a std::cell::Cell<Rectangle>,
 }
 
 #[derive(Default)]
@@ -1291,6 +1292,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let p = self.palette;
+        self.at.set(bounds);
         let content = self.cache.draw(renderer, bounds.size(), |frame| {
             let lanes = Rectangle::new(
                 Point::new(self.lanes_left(), self.lanes_top()),
@@ -2378,13 +2380,18 @@ mod hints {
 }
 
 impl crate::App {
-    pub(crate) fn dropped_onto(&self, at: iced::Point) -> Option<(TrackId, Frames)> {
+    pub(crate) fn dropped_onto(&self, in_window: iced::Point) -> Option<(TrackId, Frames)> {
+        let canvas = self.canvas_at.get();
+        if canvas.width <= 0.0 || canvas.height <= 0.0 {
+            return None;
+        }
+        let at = iced::Point::new(in_window.x - canvas.x, in_window.y - canvas.y);
         let top = self.palette.scrollbar_height + self.palette.ruler_height;
-        let left = match self.palette.headers {
-            Side::Left => self.palette.header_width,
-            Side::Right => 0.0,
+        let (left, right) = match self.palette.headers {
+            Side::Left => (self.palette.header_width, canvas.width),
+            Side::Right => (0.0, (canvas.width - self.palette.header_width).max(0.0)),
         };
-        if at.y < top || at.x < left {
+        if at.y < top || at.y >= canvas.height || at.x < left || at.x >= right {
             return None;
         }
         let mut y = top - self.view.scroll_y;
@@ -2407,5 +2414,158 @@ impl crate::App {
             y += tall;
         }
         None
+    }
+
+    pub(crate) fn below(&self, track: TrackId, down: usize) -> Option<TrackId> {
+        self.project
+            .tracks
+            .iter()
+            .filter(|found| !out_of_sight(&self.project, found))
+            .skip_while(|found| found.id != track)
+            .nth(down)
+            .map(|found| found.id)
+    }
+}
+
+#[cfg(test)]
+mod dropping {
+    use super::*;
+    use crate::App;
+    use loupe_engine::{Command, Outcome};
+
+    const CANVAS: Rectangle = Rectangle { x: 0.0, y: 100.0, width: 1200.0, height: 700.0 };
+    const TOP: f32 = theme::NEUTRAL.scrollbar_height + theme::NEUTRAL.ruler_height;
+    const TALL: f32 = theme::NEUTRAL.track_height;
+    const LEFT: f32 = theme::NEUTRAL.header_width;
+
+    fn a_song_with(names: &[&str]) -> (App, Vec<TrackId>) {
+        let mut app = App::bare();
+        app.canvas_at.set(CANVAS);
+        app.view = View { zoom: 100.0, scroll: 0.0, scroll_y: 0.0 };
+        let made = names
+            .iter()
+            .map(|name| match app.project.apply(Command::AddTrack { name: (*name).into() }) {
+                Ok(Outcome::Track(track)) => track,
+                _ => panic!("no track"),
+            })
+            .collect();
+        (app, made)
+    }
+
+    fn in_window(x: f32, y: f32) -> Point {
+        Point::new(CANVAS.x + x, CANVAS.y + y)
+    }
+
+    fn row(index: usize) -> f32 {
+        TOP + TALL * index as f32 + TALL / 2.0
+    }
+
+    #[test]
+    fn a_drop_on_the_second_track_lands_on_that_track() {
+        let (app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        let (track, _) = app.dropped_onto(in_window(LEFT + 10.0, row(1))).expect("a track");
+        assert_eq!(track, tracks[1]);
+    }
+
+    #[test]
+    fn a_drop_takes_the_frame_under_the_pointer() {
+        let (app, _) = a_song_with(&["Drums"]);
+        let rate = app.project.rate as Frames;
+        let (_, start) = app.dropped_onto(in_window(LEFT + 200.0, row(0))).expect("a track");
+        assert_eq!(start, rate * 2);
+    }
+
+    #[test]
+    fn the_window_offset_comes_off_before_the_hit_test() {
+        let (app, tracks) = a_song_with(&["Drums", "Bass"]);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(0))).map(|(track, _)| track), Some(tracks[0]));
+        assert_eq!(
+            app.dropped_onto(Point::new(CANVAS.x + LEFT + 10.0, row(0))),
+            None,
+            "a point read as if the canvas sat at the window origin lands on the ruler"
+        );
+    }
+
+    #[test]
+    fn a_drop_below_the_last_track_asks_for_a_new_one() {
+        let (app, _) = a_song_with(&["Drums", "Bass"]);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(2))), None);
+    }
+
+    #[test]
+    fn a_drop_on_the_ruler_or_the_headers_asks_for_a_new_track() {
+        let (app, _) = a_song_with(&["Drums"]);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, TOP - 1.0)), None, "the ruler");
+        assert_eq!(app.dropped_onto(in_window(LEFT - 1.0, row(0))), None, "the headers");
+        assert_eq!(app.dropped_onto(in_window(CANVAS.width + 10.0, row(0))), None, "past the right edge");
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, CANVAS.height + 10.0)), None, "below the canvas");
+    }
+
+    #[test]
+    fn headers_on_the_right_leave_the_tracks_at_the_left_edge() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass"]);
+        app.palette.headers = Side::Right;
+        let rate = app.project.rate as Frames;
+        let (track, start) = app.dropped_onto(in_window(300.0, row(1))).expect("a track");
+        assert_eq!(track, tracks[1]);
+        assert_eq!(start, rate * 3);
+        assert_eq!(app.dropped_onto(in_window(CANVAS.width - LEFT + 10.0, row(1))), None, "the headers on the right");
+    }
+
+    #[test]
+    fn a_scrolled_arrangement_still_finds_the_track_under_the_pointer() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        app.view = View { zoom: 100.0, scroll: 4.0, scroll_y: TALL };
+        let rate = app.project.rate as Frames;
+        let (track, start) = app.dropped_onto(in_window(LEFT + 100.0, row(0))).expect("a track");
+        assert_eq!(track, tracks[1], "scrolling down a track brings the second one to the top row");
+        assert_eq!(start, rate * 5, "the horizontal scroll counts too");
+    }
+
+    #[test]
+    fn a_taller_track_claims_its_extra_room() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass"]);
+        app.heights.insert(tracks[0], 200.0);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, TOP + 150.0)).map(|(track, _)| track), Some(tracks[0]));
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, TOP + 240.0)).map(|(track, _)| track), Some(tracks[1]));
+    }
+
+    #[test]
+    fn a_collapsed_folder_hands_the_row_below_to_the_next_track_in_sight() {
+        let (mut app, tracks) = a_song_with(&["Vox Chain", "Vox 1", "Drums"]);
+        app.project.apply(Command::SetTrackParent { track: tracks[1], parent: Some(tracks[0]) }).unwrap();
+        app.project.apply(Command::ToggleCollapsed(tracks[0])).unwrap();
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(1))).map(|(track, _)| track), Some(tracks[2]));
+    }
+
+    #[test]
+    fn a_hidden_track_takes_up_no_room() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        app.project.apply(Command::SetTrackHidden { track: tracks[1], hidden: true }).unwrap();
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(1))).map(|(track, _)| track), Some(tracks[2]));
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(2))), None);
+    }
+
+    #[test]
+    fn an_unmeasured_canvas_takes_no_drops() {
+        let (mut app, _) = a_song_with(&["Drums"]);
+        app.canvas_at.set(Rectangle { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(0))), None);
+    }
+
+    #[test]
+    fn the_next_file_in_a_drop_goes_on_the_track_below() {
+        let (app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        assert_eq!(app.below(tracks[0], 0), Some(tracks[0]));
+        assert_eq!(app.below(tracks[0], 1), Some(tracks[1]));
+        assert_eq!(app.below(tracks[0], 2), Some(tracks[2]));
+        assert_eq!(app.below(tracks[0], 3), None, "once the tracks run out the drop makes a new one");
+    }
+
+    #[test]
+    fn going_down_skips_the_tracks_out_of_sight() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        app.project.apply(Command::SetTrackHidden { track: tracks[1], hidden: true }).unwrap();
+        assert_eq!(app.below(tracks[0], 1), Some(tracks[2]));
     }
 }
