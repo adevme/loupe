@@ -247,6 +247,8 @@ pub enum Message {
     AddPlugin(TrackId, usize),
     RemovePlugin(TrackId, usize),
     BypassPlugin(TrackId, usize),
+    BypassChain(stockwin::Spot),
+    BypassAllFx,
     WheelOverFader(mixer::Level, iced::mouse::ScrollDelta),
     ShowPlugin(TrackId, usize),
     OpenClipPlugins(ClipId),
@@ -2240,6 +2242,21 @@ impl App {
                     .unwrap_or(false);
                 self.edit(None, Command::BypassFx { track, slot, bypassed });
             }
+            Message::BypassChain(spot) => {
+                let turn = match spot {
+                    stockwin::Spot::Track(track) => {
+                        self.project.tracks.iter().find(|t| t.id == track).map(|t| Command::BypassChain { track, bypassed: t.fx_on })
+                    }
+                    stockwin::Spot::Master => Some(Command::BypassMasterChain { bypassed: self.project.master_fx_on }),
+                    stockwin::Spot::Clip(_) => None,
+                };
+                if let Some(command) = turn {
+                    self.edit(None, command);
+                }
+            }
+            Message::BypassAllFx => {
+                self.edit(None, Command::BypassAllFx { bypassed: self.project.all_fx_on });
+            }
             Message::OpenMatrix => self.overlay = Overlay::Matrix,
             Message::AddSend { from, to } => {
                 self.edit(None, Command::AddSend { from, to });
@@ -2950,11 +2967,22 @@ impl App {
     fn fx_shape(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.project.all_fx_on.hash(&mut hasher);
+        self.project.master_fx_on.hash(&mut hasher);
+        for fx in &self.project.master_fx {
+            fx.path.hash(&mut hasher);
+            fx.index.hash(&mut hasher);
+            fx.bypassed.hash(&mut hasher);
+            if !loupe_plugins::rack::is_built_in(&fx.path) {
+                fx.state.hash(&mut hasher);
+            }
+        }
         for track in &self.project.tracks {
             if track.fx.is_empty() {
                 continue;
             }
             track.id.hash(&mut hasher);
+            track.fx_on.hash(&mut hasher);
             for fx in &track.fx {
                 fx.path.hash(&mut hasher);
                 fx.index.hash(&mut hasher);
@@ -3473,6 +3501,12 @@ impl App {
         .spacing(8)
         .align_y(Alignment::Center);
 
+        let all_off = !self.project.all_fx_on;
+        let all_fx = button(container(text(if all_off { "FX off" } else { "FX" }).size(11.5).font(palette.medium)).center_y(30).padding([0, 8]))
+            .padding(0)
+            .style(move |_, status| palette.toggled(all_off, status))
+            .on_press(Message::BypassAllFx);
+
         let tempo = text_input("", &self.bpm)
             .on_input(Message::BpmTyped)
             .on_submit(Message::BpmEntered)
@@ -3536,6 +3570,7 @@ impl App {
             (BarItem::ToStart, icon_button(palette, "skip-back", Some(Message::ToStart))),
             (BarItem::Play, play.into()),
             (BarItem::Record, record.into()),
+            (BarItem::AllFx, all_fx.into()),
             (BarItem::Position, text(position).size(13).font(palette.mono).width(52).into()),
             (BarItem::Clock, text(clock).size(13).font(palette.mono).color(palette.text_dim).width(84).into()),
             (BarItem::Tempo, tempo.into()),
@@ -3732,6 +3767,7 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
                 ("d", false, _) => Some(Message::SetTool(Tool::Delete)),
                 ("k", false, _) => Some(Message::SetTool(Tool::Comp)),
                 ("m", true, _) => Some(Message::ToggleMetronome),
+                ("b", true, _) => Some(Message::BypassAllFx),
                 ("t", true, _) => Some(Message::ToggleTypingKeys),
                 ("q", true, _) => Some(Message::RollAction(piano_roll::RollAction::Quantize)),
                 ("c", true, _) => Some(Message::CopyClips),
@@ -3832,6 +3868,7 @@ fn hint_for(item: BarItem) -> Option<&'static str> {
         BarItem::ToStart => "Jump back to the start of the song",
         BarItem::Play => "Play or pause the song. Space does the same.",
         BarItem::Record => return None,
+        BarItem::AllFx => "Take every plugin out of circuit, to hear the song dry without losing a thing. Ctrl+B does the same.",
         BarItem::Position => "Where the playhead is, as bar and beat",
         BarItem::Clock => "Where the playhead is, as minutes and seconds",
         BarItem::Tempo => "The tempo of the song in beats per minute",

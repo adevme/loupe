@@ -989,6 +989,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     },
                     (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
                     (_, Hit::Solo(track)) => Some(Message::ToggleSolo(track.id)),
+                    (_, Hit::Fx(track)) if state.modifiers.command() => Some(Message::BypassChain(crate::stockwin::Spot::Track(track.id))),
                     (_, Hit::Fx(track)) => Some(Message::OpenChain(crate::stockwin::Spot::Track(track.id))),
                     (_, Hit::Pan(track)) => {
                         let again = state.last_pan_press.is_some_and(|(id, at)| id == track.id && at.elapsed() < DOUBLE_CLICK);
@@ -2257,7 +2258,13 @@ impl Timeline<'_> {
             frame.fill_text(Text {
                 content: "FX".into(),
                 position: Point::new(fx_at.center_x(), fx_at.center_y() - self.lanes_top()),
-                color: if loaded > 0 { p.accent } else { p.text_dim },
+                color: if (!track.fx_on || !self.project.all_fx_on) && !track.fx.is_empty() {
+                    p.danger
+                } else if loaded > 0 {
+                    p.accent
+                } else {
+                    p.text_dim
+                },
                 size: 11.0.into(),
                 font: p.medium,
                 horizontal_alignment: alignment::Horizontal::Center,

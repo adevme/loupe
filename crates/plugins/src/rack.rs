@@ -197,6 +197,9 @@ pub struct Rack {
     fallen: Vec<Fallen>,
     region: Option<Region>,
     ceiling: Arc<Ceiling>,
+    off: bool,
+    waiting: Dry,
+    waiting_takes: Dry,
 }
 
 impl Rack {
@@ -209,7 +212,18 @@ impl Rack {
     }
 
     pub fn sharing(host: PathBuf, rate: u32, block: usize, ceiling: Arc<Ceiling>) -> Self {
-        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new(), region: None, ceiling }
+        Self {
+            host,
+            rate,
+            block,
+            slots: Vec::new(),
+            fallen: Vec::new(),
+            region: None,
+            ceiling,
+            off: false,
+            waiting: Dry::empty(),
+            waiting_takes: Dry::empty(),
+        }
     }
 
     pub fn held_back(&self) -> usize {
@@ -404,6 +418,20 @@ impl Rack {
         }
     }
 
+    pub fn bypass_chain(&mut self, bypassed: bool) {
+        if self.off == bypassed {
+            return;
+        }
+        self.off = bypassed;
+        for slot in self.slots.iter_mut() {
+            slot.quiet_for = 0;
+        }
+    }
+
+    pub fn chain_bypassed(&self) -> bool {
+        self.off
+    }
+
     pub fn dozing(&self) -> usize {
         self.slots.iter().filter(|slot| slot.dozing(self.rate)).count()
     }
@@ -596,9 +624,21 @@ impl Rack {
         troubles
     }
 
+    fn hold_the_line(&mut self, audio: &mut [[f32; 2]], takes: bool) {
+        let keeping = if takes { self.takes_latency() } else { self.latency() };
+        let held = if takes { &mut self.waiting_takes } else { &mut self.waiting };
+        held.room_for(keeping, audio.len());
+        held.remember(audio);
+        held.blend(audio, 0.0);
+    }
+
     fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool, at: Option<i64>) {
         self.take_arrivals();
         let block = audio.len();
+        if self.off {
+            self.hold_the_line(audio, takes);
+            return;
+        }
         let rate = self.rate;
         for (which, slot) in self.slots.iter_mut().enumerate() {
             if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
@@ -1123,6 +1163,100 @@ mod dozing_tests {
         let came_in = first_loud_frame(&dozing).expect("something came out");
         assert_eq!(came_in, first_loud_frame(&awake).expect("something came out"));
         assert!(came_in >= latency, "the limiter's own delay went missing: {came_in} < {latency}");
+    }
+
+    fn a_click(frames: usize, at: usize) -> Vec<[f32; 2]> {
+        let mut song = vec![[0.0f32; 2]; frames];
+        song[at] = [1.0, 1.0];
+        song
+    }
+
+    #[test]
+    fn a_chain_that_is_off_hands_the_sound_straight_back() {
+        let song = tone(BLOCK * 4, 0);
+        let mut off = rack_of(&[COMPRESSOR, SATURATION]);
+        off.bypass_chain(true);
+        let through = render(&mut off, &song);
+        assert_eq!(through, song, "a chain that is off changed the sound");
+        let mut on = rack_of(&[COMPRESSOR, SATURATION]);
+        let worked = render(&mut on, &song);
+        assert_ne!(worked, song, "the chain does nothing even when it is on, so this proves nothing");
+    }
+
+    #[test]
+    fn a_chain_that_is_off_still_delays_by_what_it_did() {
+        let mut working = rack_of(&[LIMITER]);
+        let latency = working.latency();
+        assert!(latency > 0, "the limiter reported no latency");
+        let song = a_click(BLOCK * 8, BLOCK);
+        let heard = render(&mut working, &song);
+        let on_time = first_loud_frame(&heard).expect("the click came through");
+        let mut off = rack_of(&[LIMITER]);
+        off.bypass_chain(true);
+        assert_eq!(off.latency(), latency, "a chain that is off stopped reporting its latency");
+        let held = render(&mut off, &song);
+        let late = first_loud_frame(&held).expect("the click came through the chain that is off");
+        assert_eq!(late, on_time, "turning the chain off moved the click by {} frames", late as i64 - on_time as i64);
+        assert_eq!(late, BLOCK + latency, "the click did not arrive where the chain's latency puts it");
+        assert_eq!(held[late], [1.0, 1.0], "the click came out of a chain that is off changed");
+    }
+
+    #[test]
+    fn a_chain_that_is_off_holds_the_delay_of_its_recording_plugins() {
+        let want = vec![Wanted {
+            mix: 1.0,
+            path: PathBuf::from(crate::BUILT_IN),
+            index: LIMITER,
+            name: loupe_stock::NAMES[LIMITER].into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: true,
+        }];
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), RATE, BLOCK);
+        assert!(rack.reconcile(&want).is_empty());
+        let latency = rack.takes_latency();
+        assert!(latency > 0, "the limiter reported no latency on the Rec chain");
+        rack.bypass_chain(true);
+        assert_eq!(rack.takes_latency(), latency);
+        let song = a_click(BLOCK * 8, BLOCK);
+        let mut out = Vec::with_capacity(song.len());
+        for mut block in blocks_of(&song) {
+            rack.process_takes(&mut block);
+            out.extend_from_slice(&block);
+        }
+        assert_eq!(first_loud_frame(&out), Some(BLOCK + latency), "the take moved when the chain went off");
+    }
+
+    #[test]
+    fn turning_a_chain_off_and_on_leaves_every_slot_as_it_was() {
+        let mut rack = rack_of(&[COMPRESSOR, LIMITER, SATURATION]);
+        rack.bypass(1, true);
+        let before: Vec<bool> = rack.slots().iter().map(|slot| slot.bypassed).collect();
+        let settings: Vec<Option<Vec<u8>>> = (0..rack.len()).map(|slot| rack.save(slot)).collect();
+        rack.bypass_chain(true);
+        assert!(rack.chain_bypassed());
+        let while_off: Vec<bool> = rack.slots().iter().map(|slot| slot.bypassed).collect();
+        assert_eq!(while_off, before, "turning the chain off changed the slots underneath");
+        rack.bypass_chain(false);
+        assert!(!rack.chain_bypassed());
+        let after: Vec<bool> = rack.slots().iter().map(|slot| slot.bypassed).collect();
+        assert_eq!(after, before, "the slots did not come back as they were");
+        assert_eq!(before, vec![false, true, false]);
+        let back: Vec<Option<Vec<u8>>> = (0..rack.len()).map(|slot| rack.save(slot)).collect();
+        assert_eq!(back, settings, "a plugin lost its settings while the chain was off");
+    }
+
+    #[test]
+    fn a_chain_that_is_off_leaves_out_a_slot_that_failed_to_open() {
+        let mut rack = rack_of(&[LIMITER]);
+        let latency = rack.latency();
+        rack.add(Path::new("/nowhere/Missing.vst3"), 0, "Missing").expect_err("it cannot open");
+        assert_eq!(rack.latency(), latency, "a plugin that would not open counted towards the latency");
+        rack.bypass_chain(true);
+        assert_eq!(rack.latency(), latency, "the chain reported a different latency once it was off");
+        let song = a_click(BLOCK * 8, BLOCK);
+        let held = render(&mut rack, &song);
+        assert_eq!(first_loud_frame(&held), Some(BLOCK + latency));
     }
 
     #[test]
