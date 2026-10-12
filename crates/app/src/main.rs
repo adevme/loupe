@@ -84,7 +84,6 @@ const MASTER_STEP_PERCENT: f32 = 1.0;
 const SYSTEM_INPUT: &str = "System default";
 const COPIED_SHOWN_FOR: Duration = Duration::from_millis(1500);
 const EXPORT_PROGRESS_STEPS: u32 = 1000;
-const MASTER_PERCENT_PER_PX: f32 = 0.5;
 const EMPTY_SONG_ZOOM: f64 = 100.0;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 const SETTINGS_PAGE_HEIGHT: f32 = 330.0;
@@ -623,6 +622,7 @@ struct App {
     entry: String,
     clip_name: String,
     pointer: Point,
+    pixels_per_point: f32,
     canvas_at: std::cell::Cell<Rectangle>,
     aim: Option<Aim>,
     chain_from_mixer: bool,
@@ -772,6 +772,7 @@ impl App {
             chain_drag: None,
             name_clicked: None,
             pointer: Point::ORIGIN,
+            pixels_per_point: 1.0,
             canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
             aim: None,
             chain_from_mixer: false,
@@ -972,6 +973,7 @@ impl App {
             chain_drag: None,
             name_clicked: None,
             pointer: Point::ORIGIN,
+            pixels_per_point: 1.0,
             canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
             aim: None,
             chain_from_mixer: false,
@@ -1650,6 +1652,7 @@ impl App {
             Message::PointerAt(window, at) => {
                 if window == self.main_window {
                     self.pointer = at;
+                    self.pixels_per_point = pointer::pixels_per_point(self.scale);
                 }
             }
             Message::MixerNameClicked(track) => {
@@ -3149,6 +3152,7 @@ impl App {
         self.scale = scale;
         self.pending_scale = scale;
         self.scale_text = format_scale(scale);
+        self.pixels_per_point = pointer::pixels_per_point(scale);
         self.cache.clear();
         if let Err(why) = settings::save("scale", &format_scale(scale)) {
             self.problem = Some(format!("Could not save settings: {why}"));
@@ -3400,6 +3404,7 @@ impl App {
             width: self.canvas_width(),
             cache: &self.cache,
             at: &self.canvas_at,
+            pixels_per_point: self.pixels_per_point,
         })
         .width(Length::Fill)
         .height(Length::Fill);
@@ -3601,7 +3606,8 @@ impl App {
                 lowest: 0.0,
                 highest: mixer::LOUDEST_MASTER_PERCENT,
                 resting: 100.0,
-                per_px: MASTER_PERCENT_PER_PX,
+                step: MASTER_STEP_PERCENT,
+                pixels_per_point: self.pixels_per_point,
                 centred: false,
                 on_turn: Box::new(Message::MasterPercent),
             })

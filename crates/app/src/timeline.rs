@@ -31,7 +31,7 @@ const NAME_NARROWEST: f32 = 26.0;
 const NAME_LETTER: f32 = 7.0;
 const NAME_LINE: f32 = 16.0;
 const PAN_KNOB: f32 = 24.0;
-const PAN_PER_PX: f32 = 0.01;
+const PAN_PER_PX: f32 = 2.0 / crate::knob::SWEEP_PX;
 const ARM_DOT_RADIUS: f32 = 5.0;
 const PLAYHEAD_CAP: f32 = 11.0;
 const PLAYHEAD_CAP_DROP: f32 = 9.0;
@@ -139,6 +139,7 @@ pub struct Timeline<'a> {
     pub knobs: &'a HashMap<(u64, usize, usize, bool), String>,
     pub cache: &'a Cache,
     pub at: &'a std::cell::Cell<Rectangle>,
+    pub pixels_per_point: f32,
 }
 
 #[derive(Default)]
@@ -874,6 +875,7 @@ impl canvas::Program<Message> for Timeline<'_> {
 
         let anywhere = cursor.position().map(|p| Point::new(p.x - bounds.x, p.y - bounds.y));
         let free = !self.snap || state.modifiers.shift();
+        let pace = if state.modifiers.shift() { crate::knob::FINE } else { 1.0 };
 
         match event {
             canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
@@ -1007,7 +1009,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         if again {
                             Some(Message::TrackPan(track.id, 0.0))
                         } else {
-                            state.drag = Some(Drag::Pan { track: track.id, pull: EndlessDrag::start(p, true), pan_at_grab: track.pan });
+                            state.drag = Some(Drag::Pan { track: track.id, pull: EndlessDrag::start(p, true, self.pixels_per_point), pan_at_grab: track.pan });
                             None
                         }
                     }
@@ -1022,7 +1024,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             _ => clip.fade_in.curve,
                         };
                         let db_at_grab = (20.0 * clip.gain.max(1e-6).log10()).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-                        let pull = EndlessDrag::start(p, !grip.moves_sideways());
+                        let pull = EndlessDrag::start(p, !grip.moves_sideways(), self.pixels_per_point);
                         state.drag = Some(Drag::Grip { clip: clip.id, grip, pull, curve_at_grab, db_at_grab });
                         None
                     }
@@ -1111,7 +1113,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         (Captured, changed.then_some(Message::MoveClip { clip: *id, track, start }))
                     }
                     Drag::Pan { track, pull, pan_at_grab } => {
-                        let Some(travel_up) = pull.moved(p) else {
+                        let Some(travel_up) = pull.moved(p, pace) else {
                             return (Captured, None);
                         };
                         let pan = (*pan_at_grab + travel_up * PAN_PER_PX).clamp(-1.0, 1.0);
@@ -1122,7 +1124,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let Some(clip) = self.project.clip(*clip) else {
                             return (Captured, None);
                         };
-                        let Some(travel_up) = pull.moved(p) else {
+                        let Some(travel_up) = pull.moved(p, pace) else {
                             return (Captured, None);
                         };
                         let at = self.snap(self.frames_at(p.x), free);

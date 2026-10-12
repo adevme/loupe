@@ -15,7 +15,7 @@ const MENU_INSET: f32 = 12.0;
 const STRIP_MARGIN: f32 = 24.0;
 const STRIP_WIDTH: f32 = 134.0;
 const NAME_LENGTH: usize = 11;
-const PAN_PER_PX: f32 = 1.0;
+const PAN_STEP_PERCENT: f32 = 2.0;
 pub const SILENT_DB: f32 = -60.0;
 pub const LOUDEST_DB: f32 = 6.0;
 pub const LEVEL_ENTRY_ID: &str = "level-entry";
@@ -107,7 +107,8 @@ impl App {
                 lowest: -100.0,
                 highest: 100.0,
                 resting: 0.0,
-                per_px: PAN_PER_PX,
+                step: PAN_STEP_PERCENT,
+                pixels_per_point: self.pixels_per_point,
                 centred: true,
                 on_turn: Box::new(move |percent| Message::TrackPan(track, percent / 100.0)),
             })
