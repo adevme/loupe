@@ -2256,7 +2256,7 @@ impl Timeline<'_> {
             frame.fill_text(Text {
                 content: "FX".into(),
                 position: Point::new(fx_at.center_x(), fx_at.center_y() - self.lanes_top()),
-                color: if !track.fx_on && !track.fx.is_empty() {
+                color: if (!track.fx_on || !self.project.all_fx_on) && !track.fx.is_empty() {
                     p.danger
                 } else if loaded > 0 {
                     p.accent

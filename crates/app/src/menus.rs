@@ -99,6 +99,8 @@ impl App {
             }
             let audio = if self.pool_open { "All audio ✓" } else { "All audio" };
             items.push(self.item(audio, "", Some(Message::TogglePool)));
+            let dry = if self.project.all_fx_on { "Hear it dry, no plugins" } else { "Hear it dry, no plugins ✓" };
+            items.push(self.item(dry, "Ctrl+B", Some(Message::BypassAllFx)));
             let out_of_sight = self.project.tracks.iter().filter(|track| track.hidden).count();
             if out_of_sight > 0 {
                 let how_many = match out_of_sight {

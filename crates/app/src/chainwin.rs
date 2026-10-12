@@ -30,6 +30,10 @@ impl App {
         }
     }
 
+    pub(crate) fn chain_is_running(&self, spot: Spot) -> bool {
+        self.project.all_fx_on && self.chain_is_on(spot)
+    }
+
     fn chain_switch(&self, spot: Spot) -> Element<'_, Message> {
         let palette = self.palette;
         let on = self.chain_is_on(spot);
@@ -95,6 +99,9 @@ impl App {
             .style(move |_, status| palette.solid(status))
             .on_press(self.add_to(spot));
         let mut body = column![].spacing(12);
+        if !self.project.all_fx_on {
+            body = body.push(text("Every plugin in the song is off while you listen dry.").size(12).color(palette.danger));
+        }
         match spot {
             Spot::Track(track) => {
                 body = body.push(row![self.chain_tabs(track, recording), self.chain_switch(spot)].spacing(6).align_y(Alignment::Center));
@@ -256,7 +263,7 @@ impl App {
     pub(crate) fn fx_button(&self, spot: Spot) -> Element<'_, Message> {
         let palette = self.palette;
         let count = self.chain_of(spot).map_or(0, <[Fx]>::len);
-        let on = self.chain_is_on(spot);
+        let on = self.chain_is_running(spot);
         let label = if count > 0 { format!("FX {count}") } else { "FX".to_string() };
         let wording = text(label).size(11).font(palette.medium).width(Length::Fill).center();
         let pressed = button(if on { wording } else { wording.color(palette.danger) })
@@ -315,6 +322,47 @@ mod tests {
         assert!(app.chain_is_on(Spot::Track(track)), "undo did not put the chain back on");
         let _ = app.update(Message::Redo);
         assert!(!app.chain_is_on(Spot::Track(track)), "redo did not turn the chain off again");
+    }
+
+    fn every_switch(app: &App) -> Vec<bool> {
+        let mut found = vec![app.project.master_fx_on];
+        found.extend(app.project.master_fx.iter().map(|fx| !fx.bypassed));
+        for track in &app.project.tracks {
+            found.push(track.fx_on);
+            found.extend(track.fx.iter().map(|fx| !fx.bypassed));
+        }
+        found
+    }
+
+    #[test]
+    fn listening_dry_puts_every_switch_back_exactly_as_it_was() {
+        let (mut app, track) = song_with_a_chain();
+        let Ok(Outcome::Track(other)) = app.project.apply(Command::AddTrack { name: "Gtr".into() }) else { panic!("no track") };
+        app.project.apply(Command::AddFx { track: other, fx: plugin("Three") }).unwrap();
+        let _ = app.update(Message::BypassPlugin(track, 1));
+        let _ = app.update(Message::BypassChain(Spot::Track(other)));
+        let before = every_switch(&app);
+        let _ = app.update(Message::BypassAllFx);
+        assert!(!app.project.all_fx_on, "listening dry never took hold");
+        assert!(!app.chain_is_running(Spot::Track(track)), "a chain is still running");
+        assert!(!app.chain_is_running(Spot::Master), "the master chain is still running");
+        assert_eq!(every_switch(&app), before, "listening dry moved the switches underneath");
+        let _ = app.update(Message::BypassAllFx);
+        assert!(app.project.all_fx_on);
+        assert_eq!(every_switch(&app), before, "the switches did not come back as they were");
+        assert!(app.chain_is_running(Spot::Track(track)), "the first chain did not come back");
+        assert!(!app.chain_is_running(Spot::Track(other)), "a chain that was off came back on");
+    }
+
+    #[test]
+    fn listening_dry_is_undone_and_redone() {
+        let (mut app, _) = song_with_a_chain();
+        let _ = app.update(Message::BypassAllFx);
+        assert!(!app.project.all_fx_on);
+        let _ = app.update(Message::Undo);
+        assert!(app.project.all_fx_on, "undo did not put the plugins back in circuit");
+        let _ = app.update(Message::Redo);
+        assert!(!app.project.all_fx_on, "redo did not take them back out");
     }
 
     #[test]

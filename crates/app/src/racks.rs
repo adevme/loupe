@@ -326,7 +326,7 @@ impl Racks {
             let fresh = self.a_new_rack();
             let rack = self.master.get_or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
-            rack.bypass_chain(!project.master_fx_on);
+            rack.bypass_chain(!project.all_fx_on || !project.master_fx_on);
         }
         for track in &project.tracks {
             if track.fx.is_empty() {
@@ -351,7 +351,7 @@ impl Racks {
                 .entry(track.id)
                 .or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
-            rack.bypass_chain(!track.fx_on);
+            rack.bypass_chain(!project.all_fx_on || !track.fx_on);
         }
         for track in &project.tracks {
             for clip in &track.clips {
@@ -375,6 +375,7 @@ impl Racks {
                 let rack = self.clips.entry(clip.id).or_insert(fresh);
                 troubles.extend(rack.follow_region(region_of(project, clip)));
                 troubles.extend(rack.reconcile(&want));
+                rack.bypass_chain(!project.all_fx_on);
             }
         }
         self.publish();
@@ -940,6 +941,31 @@ mod tests {
         assert!(off.chains[&latent].chain_bypassed(), "the rack never heard that the chain was off");
         assert_eq!(loud_frames(&held), vec![CLICK], "the track with the chain off moved in the mix");
         assert_eq!(held[CLICK], [0.8, 0.8], "the two clicks did not add up dry on the same frame");
+    }
+
+    #[test]
+    fn listening_dry_takes_every_chain_out_of_circuit_without_moving_the_mix() {
+        const CLICK: usize = 1_000;
+        let mut project = Project::new(48_000);
+        let latent = a_click_track(&mut project, "Vox", CLICK as u64);
+        let plain = a_click_track(&mut project, "Gtr", CLICK as u64);
+        let clip = project.tracks.iter().find(|found| found.id == plain).expect("the track").clips[0].id;
+        project.apply(Command::AddFx { track: latent, fx: fx(loupe_plugins::BUILT_IN, LIMITER, &[]) }).unwrap();
+        project.apply(Command::AddMasterFx(fx(loupe_plugins::BUILT_IN, LIMITER, &[]))).unwrap();
+        project.apply(Command::AddClipFx { clip, fx: fx(loupe_plugins::BUILT_IN, 1, &[]) }).unwrap();
+        let mut on = racks(false);
+        let heard = whole_mix(&project, &mut on, 4_096);
+        let lag = on.master.as_ref().map(Rack::latency).unwrap_or(0);
+        assert!(lag > 0, "the master limiter reported no latency");
+        assert_eq!(loud_frames(&heard), vec![CLICK + lag], "the mix was not in time to begin with");
+        project.apply(Command::BypassAllFx { bypassed: true }).unwrap();
+        let mut off = racks(false);
+        let held = whole_mix(&project, &mut off, 4_096);
+        assert!(off.chains[&latent].chain_bypassed(), "a track chain kept running");
+        assert!(off.clips[&clip].chain_bypassed(), "a clip chain kept running");
+        assert!(off.master.as_ref().is_some_and(Rack::chain_bypassed), "the master chain kept running");
+        assert_eq!(loud_frames(&held), vec![CLICK + lag], "listening dry moved the mix");
+        assert_eq!(held[CLICK + lag], [0.8, 0.8], "the mix did not come through dry");
     }
 
     #[test]

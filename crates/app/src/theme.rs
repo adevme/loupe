@@ -51,6 +51,7 @@ pub enum BarItem {
     ToStart,
     Play,
     Record,
+    AllFx,
     Position,
     Clock,
     Tempo,
@@ -64,10 +65,11 @@ pub enum BarItem {
     End,
 }
 
-const BAR_NAMES: [(&str, BarItem); 13] = [
+const BAR_NAMES: [(&str, BarItem); 14] = [
     ("to_start", BarItem::ToStart),
     ("play", BarItem::Play),
     ("record", BarItem::Record),
+    ("all_fx", BarItem::AllFx),
     ("position", BarItem::Position),
     ("clock", BarItem::Clock),
     ("tempo", BarItem::Tempo),
@@ -186,6 +188,7 @@ pub const NEUTRAL: Palette = Palette {
         BarItem::ToStart,
         BarItem::Play,
         BarItem::Record,
+        BarItem::AllFx,
         BarItem::Space,
         BarItem::Position,
         BarItem::Clock,
@@ -195,7 +198,6 @@ pub const NEUTRAL: Palette = Palette {
         BarItem::Mixer,
         BarItem::Settings,
         BarItem::Import,
-        BarItem::End,
         BarItem::End,
         BarItem::End,
         BarItem::End,

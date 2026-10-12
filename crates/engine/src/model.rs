@@ -251,6 +251,7 @@ pub struct Project {
     pub master_muted: bool,
     pub master_fx: Vec<Fx>,
     pub master_fx_on: bool,
+    pub all_fx_on: bool,
     pub tracks: Vec<Track>,
     pub sources: Vec<Arc<Source>>,
     pub envelopes: Vec<crate::envelope::Envelope>,
@@ -327,6 +328,7 @@ pub enum Command {
     MoveMasterFx { slot: usize, to: usize },
     BypassMasterFx { slot: usize, bypassed: bool },
     BypassMasterChain { bypassed: bool },
+    BypassAllFx { bypassed: bool },
     SetMasterFxMix { slot: usize, mix: f32 },
     SetMasterFxState { slot: usize, state: Vec<u8> },
     AddNotesClip { track: TrackId, name: String, start: Frames, len: Frames, notes: Vec<Note> },
@@ -362,6 +364,7 @@ impl Project {
             master_muted: false,
             master_fx: Vec::new(),
             master_fx_on: true,
+            all_fx_on: true,
             tracks: Vec::new(),
             sources: Vec::new(),
             envelopes: Vec::new(),
@@ -1024,6 +1027,10 @@ impl Project {
             }
             Command::BypassMasterChain { bypassed } => {
                 self.master_fx_on = !bypassed;
+                Ok(Outcome::Done)
+            }
+            Command::BypassAllFx { bypassed } => {
+                self.all_fx_on = !bypassed;
                 Ok(Outcome::Done)
             }
             Command::SetMasterFxMix { slot, mix } => {

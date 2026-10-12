@@ -921,6 +921,20 @@ mod routing_round_trip {
     }
 
     #[test]
+    fn listening_dry_is_never_saved_with_the_song() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let glue = crate::model::Fx { path: PathBuf::from("glue.vst3"), index: 0, name: "Glue".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        p.apply(Command::AddFx { track, fx: glue }).unwrap();
+        p.apply(Command::BypassChain { track, bypassed: true }).unwrap();
+        p.apply(Command::BypassAllFx { bypassed: true }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert!(back.all_fx_on, "a song opened with every plugin out of circuit");
+        assert!(!back.tracks[0].fx_on, "the one chain he turned off should still be off");
+    }
+
+    #[test]
     fn an_older_song_with_no_chain_flag_opens_with_its_chains_on() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
