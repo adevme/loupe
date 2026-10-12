@@ -280,7 +280,7 @@ impl App {
             .padding([3, 0])
             .width(Length::Fill)
             .style(move |_, status| palette.outlined(status))
-            .on_press(Message::OpenChainInMixer(spot));
+            .on_press(Message::OpenChain(spot));
         mouse_area(pressed).on_right_press(Message::BypassChain(spot)).into()
     }
 }
