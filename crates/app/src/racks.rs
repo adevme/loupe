@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use loupe_engine::{Chains, Clip, ClipId, PluginSpending, Project, Saved, TrackId};
+use loupe_engine::{Chains, Clip, ClipId, Engine, PluginSpending, Project, Saved, TrackId};
 use loupe_plugins::rack::{let_them_go, Fallen, Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_plugins::wire::Region;
@@ -30,6 +31,90 @@ pub enum Spot {
 
 pub type Peeks = Arc<Mutex<HashMap<Spot, Peek>>>;
 pub type PluginsOff = Arc<AtomicBool>;
+
+pub struct Lending<T> {
+    held: Option<T>,
+    out: bool,
+}
+
+impl<T> Default for Lending<T> {
+    fn default() -> Self {
+        Self { held: None, out: false }
+    }
+}
+
+impl<T> Lending<T> {
+    pub fn take(&mut self) -> Option<T> {
+        self.held.take()
+    }
+
+    pub fn keep(&mut self, thing: T) {
+        self.out = false;
+        self.held = Some(thing);
+    }
+
+    pub fn gone_out(&mut self) {
+        self.held = None;
+        self.out = true;
+    }
+
+    pub fn is_out(&self) -> bool {
+        self.out
+    }
+
+    pub fn came_back(&mut self, thing: T) -> T {
+        self.out = false;
+        thing
+    }
+
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+
+    pub fn forget(&mut self) {
+        self.held = None;
+        self.out = false;
+    }
+}
+
+const CHAIN_BLOCK: usize = 512;
+const WAIT_FOR_CHAINS: u32 = 500;
+
+pub fn lend(engine: &mut Engine, holder: &mut Lending<Box<dyn Chains>>, racks: Box<dyn Chains>) {
+    if engine.running().is_none() {
+        holder.keep(racks);
+        return;
+    }
+    engine.use_chains(racks);
+    holder.gone_out();
+}
+
+pub fn borrow(engine: &mut Engine, holder: &mut Lending<Box<dyn Chains>>) -> Option<Box<dyn Chains>> {
+    if let Some(racks) = holder.take() {
+        return Some(racks);
+    }
+    if !holder.is_out() {
+        return None;
+    }
+    engine.drop_chains();
+    for _ in 0..WAIT_FOR_CHAINS {
+        if let Some(got) = engine.chains_back() {
+            return Some(holder.came_back(got));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    None
+}
+
+pub fn borrow_or_make(engine: &mut Engine, holder: &mut Lending<Box<dyn Chains>>, peeks: &Peeks, off: &PluginsOff, falls: &Falls) -> Option<Box<dyn Chains>> {
+    if let Some(racks) = borrow(engine, holder) {
+        return Some(racks);
+    }
+    if holder.is_out() {
+        return None;
+    }
+    Some(Box::new(Racks::new(engine.rate(), CHAIN_BLOCK, peeks.clone(), off.clone(), falls.clone())) as Box<dyn Chains>)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Fell {
@@ -1041,5 +1126,71 @@ mod closing_tests {
         assert!(racks.chains.is_empty() && racks.clips.is_empty() && racks.master.is_none());
         nobody_left(&hosts);
         drop(racks);
+    }
+}
+
+#[cfg(test)]
+mod lending_tests {
+    use loupe_engine::Output;
+
+    use super::*;
+
+    fn holder() -> Lending<Box<dyn Chains>> {
+        Lending::default()
+    }
+
+    #[test]
+    fn a_set_the_app_holds_comes_straight_back() {
+        let mut lending: Lending<u32> = Lending::default();
+        lending.keep(7);
+        assert!(lending.holding() && !lending.is_out());
+        assert_eq!(lending.take(), Some(7));
+        assert!(!lending.holding() && !lending.is_out());
+    }
+
+    #[test]
+    fn a_set_that_went_out_is_not_held_here_as_well() {
+        let mut lending: Lending<u32> = Lending::default();
+        lending.keep(7);
+        lending.gone_out();
+        assert!(!lending.holding() && lending.is_out());
+    }
+
+    #[test]
+    fn a_set_that_came_back_is_no_longer_out() {
+        let mut lending: Lending<u32> = Lending::default();
+        lending.gone_out();
+        assert_eq!(lending.came_back(3), 3);
+        assert!(!lending.is_out());
+    }
+
+    #[test]
+    fn an_engine_that_went_away_takes_its_loan_with_it() {
+        let mut lending: Lending<u32> = Lending::default();
+        lending.gone_out();
+        lending.forget();
+        assert!(!lending.is_out() && !lending.holding());
+    }
+
+    #[test]
+    fn with_no_sound_output_the_app_keeps_the_racks_itself() {
+        let mut engine = Engine::start(Output::Silent);
+        let mut held = holder();
+        let made = borrow_or_make(&mut engine, &mut held, &Peeks::default(), &PluginsOff::default(), &Falls::default());
+        assert!(made.is_some());
+        lend(&mut engine, &mut held, made.unwrap());
+        assert!(held.holding() && !held.is_out());
+        assert!(borrow(&mut engine, &mut held).is_some());
+    }
+
+    #[test]
+    fn a_timed_out_handover_can_be_asked_again_and_strands_nothing() {
+        let mut engine = Engine::start(Output::Silent);
+        let mut held = holder();
+        held.gone_out();
+        assert!(borrow(&mut engine, &mut held).is_none());
+        assert!(held.is_out() && !held.holding());
+        assert!(borrow_or_make(&mut engine, &mut held, &Peeks::default(), &PluginsOff::default(), &Falls::default()).is_none());
+        assert!(held.is_out() && !held.holding());
     }
 }

@@ -146,6 +146,9 @@ impl App {
         self.note_audio_for_crashes();
         self.problem = self.engine.output_error().map(|e| format!("Sound output: {e}"));
         self.audio_trouble = trouble_words(self.engine.output_failure());
+        if racks.is_none() {
+            self.racks.forget();
+        }
         self.engine.set_metronome(self.metronome);
         self.engine.hear_through_the_chains(self.hear_through_chain);
         self.engine.seek(self.playhead);
@@ -158,7 +161,9 @@ impl App {
         let new_rate = self.engine.rate();
         if new_rate == old_rate {
             self.engine.set_project(&self.project);
-            self.racks = racks;
+            if let Some(racks) = racks {
+                self.racks.keep(racks);
+            }
             self.hand_racks_over();
             return Task::none();
         }

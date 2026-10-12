@@ -543,8 +543,7 @@ struct App {
     input_names: Vec<String>,
     practice_input: bool,
     engine: Engine,
-    racks: Option<Box<dyn Chains>>,
-    racks_lent: bool,
+    racks: racks::Lending<Box<dyn Chains>>,
     fx_was: u64,
     peeks: racks::Peeks,
     stock: Option<stockwin::Window>,
@@ -813,8 +812,7 @@ impl App {
             audio: settings.audio.clone(),
             audio_lists: audio_settings::Lists::default(),
             silent,
-            racks: None,
-            racks_lent: false,
+            racks: racks::Lending::default(),
             fx_was: 0,
             peeks: racks::Peeks::default(),
             stock: None,
@@ -982,7 +980,7 @@ impl App {
                 self.resources.look(&hosts);
                 if let Some(mut racks) = self.borrow_racks() {
                     let touched = racks.any_plugin_touched();
-                    self.racks = Some(racks);
+                    self.racks.keep(racks);
                     if touched {
                         self.dirty = true;
                     }
@@ -2518,9 +2516,8 @@ impl App {
 
     fn chains_if_changed(&mut self) {
         let shape = self.fx_shape();
-        if shape != self.fx_was {
+        if shape != self.fx_was && self.follow_chains() {
             self.fx_was = shape;
-            self.follow_chains();
         }
     }
 
@@ -2533,7 +2530,7 @@ impl App {
         }
         let Some(mut racks) = self.borrow_racks() else { return };
         let saved = racks.everything_saved();
-        self.racks = Some(racks);
+        self.racks.keep(racks);
         for (track, slot, state) in saved.tracks {
             let _ = self.project.apply(Command::SetFxState { track, slot, state });
         }
@@ -2554,26 +2551,15 @@ impl App {
     }
 
     fn borrow_racks(&mut self) -> Option<Box<dyn Chains>> {
-        if let Some(racks) = self.racks.take() {
-            return Some(racks);
-        }
-        if !self.racks_lent {
-            return None;
-        }
-        self.racks_lent = false;
-        self.engine.drop_chains();
-        for _ in 0..500 {
-            if let Some(got) = self.engine.chains_back() {
-                return Some(got);
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        None
+        racks::borrow(&mut self.engine, &mut self.racks)
+    }
+
+    fn take_or_make_racks(&mut self) -> Option<Box<dyn Chains>> {
+        racks::borrow_or_make(&mut self.engine, &mut self.racks, &self.peeks, &self.plugins_off, &self.falls)
     }
 
     fn lend_racks(&mut self, racks: Box<dyn Chains>) {
-        self.engine.use_chains(racks);
-        self.racks_lent = true;
+        racks::lend(&mut self.engine, &mut self.racks, racks)
     }
 
     fn hand_racks_over(&mut self) {
@@ -2608,7 +2594,7 @@ impl App {
         };
         let label = self.fx_label(track, slot);
         if !loupe_plugins::rack::is_built_in(&fx.path) {
-            if let Some(mut racks) = self.borrow_racks() {
+            if let Some(mut racks) = self.take_or_make_racks() {
                 racks.follow(&self.project);
                 let seat = self.project.tracks.iter().position(|t| t.id == track).unwrap_or(0) as i64;
                 let on = self.project.tracks.iter().find(|t| t.id == track).map(|t| t.name.clone()).unwrap_or_default();
@@ -2618,7 +2604,7 @@ impl App {
                     self.problem = Some(why);
                 }
                 self.plugins_opening = racks.still_opening();
-                self.racks = Some(racks);
+                self.racks.keep(racks);
                 self.hand_racks_over();
             } else {
                 self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
@@ -2654,12 +2640,16 @@ impl App {
             return;
         };
         if !loupe_plugins::rack::is_built_in(&fx.path) {
-            if let Some(mut racks) = self.borrow_racks() {
+            if let Some(mut racks) = self.take_or_make_racks() {
+                racks.follow(&self.project);
                 if let Err(why) = racks.show_clip(clip, slot) {
                     self.problem = Some(why);
                 }
-                self.racks = Some(racks);
+                self.plugins_opening = racks.still_opening();
+                self.racks.keep(racks);
                 self.hand_racks_over();
+            } else {
+                self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
             }
             return;
         }
@@ -2805,10 +2795,9 @@ impl App {
         hasher.finish()
     }
 
-    fn follow_chains(&mut self) {
-        let mut racks = match self.borrow_racks() {
-            Some(racks) => racks,
-            None => Box::new(racks::Racks::new(self.engine.rate(), 512, self.peeks.clone(), self.plugins_off.clone(), self.falls.clone())) as Box<dyn Chains>,
+    fn follow_chains(&mut self) -> bool {
+        let Some(mut racks) = self.take_or_make_racks() else {
+            return false;
         };
         let troubles = racks.follow(&self.project);
         self.note_plugins_for_crashes();
@@ -2819,6 +2808,7 @@ impl App {
         }
         self.lend_racks(racks);
         self.take_falls();
+        true
     }
 
     fn restored(&mut self) {
@@ -3672,13 +3662,13 @@ impl App {
             }
             return;
         }
-        if let Some(mut racks) = self.borrow_racks() {
+        if let Some(mut racks) = self.take_or_make_racks() {
             racks.follow(&self.project);
             if let Err(why) = racks.show_master(slot) {
                 self.problem = Some(why);
             }
             self.plugins_opening = racks.still_opening();
-            self.racks = Some(racks);
+            self.racks.keep(racks);
             self.hand_racks_over();
         } else {
             self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
@@ -3691,7 +3681,7 @@ impl App {
         let Some(mut racks) = self.borrow_racks() else { return };
         racks.nudge();
         self.plugins_opening = racks.still_opening();
-        self.racks = Some(racks);
+        self.racks.keep(racks);
         self.hand_racks_over();
         self.read_peeks();
     }
@@ -3725,7 +3715,7 @@ impl App {
     }
 
     pub(crate) fn load_held_back_plugin(&mut self, spot: stockwin::Spot, slot: usize) {
-        let Some(mut racks) = self.borrow_racks() else {
+        let Some(mut racks) = self.take_or_make_racks() else {
             self.problem = Some("Loupe could not reach its plugins just now. Try again.".into());
             return;
         };
@@ -3738,7 +3728,7 @@ impl App {
             self.problem = Some(why);
         }
         self.plugins_opening = racks.still_opening();
-        self.racks = Some(racks);
+        self.racks.keep(racks);
         self.hand_racks_over();
         self.read_peeks();
     }

@@ -168,14 +168,16 @@ impl App {
         let before = self.project.clone();
         let ran = scripting::run(&source, &name, &mut self.project, &view, racks.as_deref_mut());
         let after = std::mem::replace(&mut self.project, before);
-        self.racks = racks;
+        if let Some(racks) = racks {
+            self.racks.keep(racks);
+        }
         if matches!(&ran, Ok(done) if done.changed) {
             self.transact(None, |project| {
                 *project = after;
                 Ok(Outcome::Done)
             });
         }
-        if self.racks.is_some() {
+        if self.racks.holding() {
             self.follow_chains();
         }
         self.forget_gone_clips();
