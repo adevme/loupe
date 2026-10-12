@@ -6,7 +6,7 @@ use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use loupe_plugins::blend::Dry;
-use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Link, Region, Reply};
+use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Link, Region, Reply, Song};
 use loupe_plugins::{clap, lv2, vst3};
 
 #[cfg(windows)]
@@ -70,6 +70,12 @@ impl Open {
 
     fn is_ara(&self) -> bool {
         matches!(self, Open::Vst3(effect) if effect.is_ara())
+    }
+
+    fn told_the_time(&mut self, song: Song) {
+        if let Open::Vst3(effect) = self {
+            effect.told_the_time(song);
+        }
     }
 
     fn idle(&self) {
@@ -259,6 +265,12 @@ impl Seats {
         }
     }
 
+    fn tell_the_time(&mut self, song: Song) {
+        for seated in self.taken.iter_mut().flatten() {
+            seated.open.told_the_time(song);
+        }
+    }
+
     fn run(&mut self, links: &[Link], audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         for link in links {
             let Some(seated) = self.at(link.seat) else { continue };
@@ -318,6 +330,7 @@ fn main() {
     let mut editor: Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)> = None;
     let mut was_sized = (0, 0);
     let mut region: Option<Region> = None;
+    let mut song = Song::default();
     let mut idled = std::time::Instant::now();
     'living: loop {
         if let Some((made, pane, seat)) = editor.as_ref() {
@@ -431,6 +444,11 @@ fn main() {
                 }
                 continue;
             }
+            Ask::Timing(told) => {
+                song = told;
+                seats.tell_the_time(song);
+                continue;
+            }
             Ask::Seat(seat) => {
                 seats.move_to(seat);
                 Reply::Fine
@@ -504,9 +522,10 @@ fn main() {
                 let made = open_one(&PathBuf::from(&path), index, rate as f64, block, region.as_ref());
                 blame::finished();
                 match made {
-                    Ok(effect) => {
+                    Ok(mut effect) => {
                         let latency = effect.latency();
                         let ara = effect.is_ara();
+                        effect.told_the_time(song);
                         seats.put_here(Seated { open: effect, name, shown_as: String::new(), on_track: String::new(), seat_index: 0, latency, dry: Dry::empty() });
                         Reply::Loaded { inputs: 2, outputs: 2, latency, ara }
                     }

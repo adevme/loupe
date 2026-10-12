@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::ceiling::{Ceiling, Seat};
 use crate::sandbox::Sandbox;
-use crate::wire::{Ask, Region, Reply};
+use crate::wire::{Ask, Region, Reply, Song};
 
 const SETTLING_BLOCKS: usize = 24;
 const SETTLING_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
@@ -197,6 +197,9 @@ pub struct Rack {
     fallen: Vec<Fallen>,
     region: Option<Region>,
     ceiling: Arc<Ceiling>,
+    song: Song,
+    told: Option<Song>,
+    since: i64,
 }
 
 impl Rack {
@@ -209,7 +212,35 @@ impl Rack {
     }
 
     pub fn sharing(host: PathBuf, rate: u32, block: usize, ceiling: Arc<Ceiling>) -> Self {
-        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new(), region: None, ceiling }
+        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new(), region: None, ceiling, song: Song::default(), told: None, since: 0 }
+    }
+
+    pub fn told_the_time(&mut self, song: Song) {
+        self.song = song;
+    }
+
+    fn pass_the_time_on(&mut self, frames: usize) {
+        let moved_on = match self.told {
+            Some(told) => {
+                !told.same_shape(&self.song)
+                    || self.song.at != told.at + if self.song.playing { self.since } else { 0 }
+                    || self.since >= self.rate as i64
+            }
+            None => true,
+        };
+        if moved_on {
+            let song = self.song;
+            for slot in self.slots.iter_mut() {
+                if let Some(host) = slot.host.as_mut() {
+                    let _ = host.tell(Ask::Timing(song));
+                }
+            }
+            self.told = Some(song);
+            self.since = 0;
+        }
+        if self.song.playing {
+            self.since += frames as i64;
+        }
     }
 
     pub fn held_back(&self) -> usize {
@@ -598,6 +629,7 @@ impl Rack {
 
     fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool, at: Option<i64>) {
         self.take_arrivals();
+        self.pass_the_time_on(audio.len());
         let block = audio.len();
         let rate = self.rate;
         for (which, slot) in self.slots.iter_mut().enumerate() {
@@ -768,6 +800,7 @@ impl Rack {
                     let placed = slot.placed.take();
                     slot.settle_in(opened, placed.as_ref());
                     slot.coming = None;
+                    self.told = None;
                 }
                 Ok(Err((why, fell))) => {
                     slot.trouble = Some(why.clone());
@@ -1737,5 +1770,96 @@ mod closing_tests {
         let took = began.elapsed();
         assert!(took < Duration::from_millis(1_200), "dropping one rack of stubborn hosts took {took:?}");
         nobody_left(&hosts);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod timing_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    struct Fake(PathBuf);
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            if let Some(folder) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+
+    impl Fake {
+        fn told(&self) -> Vec<String> {
+            let folder = self.0.parent().expect("the fake has a folder");
+            std::fs::read_to_string(folder.join("timing")).unwrap_or_default().lines().map(str::to_string).collect()
+        }
+    }
+
+    fn a_host_that_writes_down_the_time(name: &str) -> Fake {
+        let folder = std::env::temp_dir().join(format!("loupe-timing-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("loupe-host");
+        let told = folder.join("timing").display().to_string();
+        let script = format!(
+            "#!/bin/sh\nT={told}\nwhile IFS= read -r ask ; do\n  case \"$ask\" in\n    load*) printf 'loaded\\t2\\t2\\t0\\t0\\n' ;;\n    timing*) printf '%s\\n' \"$ask\" >> $T ;;\n    process*) dd bs=1 count=13 of=/dev/null 2>/dev/null ; printf 'B\\001' ; dd if=/dev/zero bs=1 count=11 2>/dev/null ;;\n    quit) exit 0 ;;\n    *) printf 'fine\\n' ;;\n  esac\ndone\n"
+        );
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Fake(file)
+    }
+
+    fn one_plugin_running(host: &Path) -> Rack {
+        let mut rack = Rack::new(host.to_path_buf(), 48_000, 1);
+        let wanted =
+            Wanted { path: PathBuf::from("/nowhere/Sync.vst3"), index: 0, name: "Sync".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        assert!(rack.reconcile(&[wanted]).is_empty());
+        let gave_up = std::time::Instant::now();
+        while rack.slots()[0].on_its_way() {
+            assert!(gave_up.elapsed() < std::time::Duration::from_secs(60), "the fake host never started");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            rack.take_arrivals();
+        }
+        assert!(rack.slots()[0].trouble.is_none(), "{:?}", rack.slots()[0].trouble);
+        rack
+    }
+
+    #[test]
+    fn a_plugin_is_told_the_tempo_and_the_transport_on_the_first_block() {
+        let fake = a_host_that_writes_down_the_time("first");
+        let mut rack = one_plugin_running(&fake.0);
+        rack.told_the_time(Song { at: 96_000, tempo: 142.5, beats: 4, beat_unit: 4, playing: true, recording: true });
+        let mut audio = vec![[0.0f32; 2]; 1];
+        rack.process(&mut audio);
+        assert_eq!(fake.told(), vec!["timing\t96000\t142.5\t4\t4\t1\t1".to_string()]);
+    }
+
+    #[test]
+    fn a_plugin_hears_again_only_when_the_transport_or_the_tempo_changes() {
+        let fake = a_host_that_writes_down_the_time("changes");
+        let mut rack = one_plugin_running(&fake.0);
+        let mut audio = vec![[0.0f32; 2]; 1];
+        let mut song = Song { at: 0, tempo: 120.0, beats: 4, beat_unit: 4, playing: true, recording: false };
+        for block in 0..8 {
+            song.at = block;
+            rack.told_the_time(song);
+            rack.process(&mut audio);
+        }
+        assert_eq!(fake.told().len(), 1, "the time was sent again while nothing changed");
+        song.playing = false;
+        rack.told_the_time(song);
+        rack.process(&mut audio);
+        song.tempo = 90.0;
+        rack.told_the_time(song);
+        rack.process(&mut audio);
+        song.at = 480_000;
+        song.playing = true;
+        rack.told_the_time(song);
+        rack.process(&mut audio);
+        let told = fake.told();
+        assert_eq!(told.len(), 4, "stopping, a new tempo and a jump should each be told: {told:?}");
+        assert!(told[1].ends_with("\t0\t0"), "the stop was not passed on: {}", told[1]);
+        assert!(told[2].contains("\t90\t"), "the new tempo was not passed on: {}", told[2]);
+        assert!(told[3].starts_with("timing\t480000\t90\t"), "the jump was not passed on: {}", told[3]);
     }
 }

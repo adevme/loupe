@@ -131,6 +131,16 @@ impl Sandbox {
         })
     }
 
+    pub fn tell(&mut self, ask: Ask) -> Result<(), String> {
+        if self.lost {
+            return Err("the plugin host is gone".into());
+        }
+        if ask.write(&mut self.writing).is_err() {
+            return Err(self.give_up("the plugin host stopped listening"));
+        }
+        Ok(())
+    }
+
     pub fn ask(&mut self, ask: Ask) -> Result<Reply, String> {
         if self.lost {
             return Err("the plugin host is gone".into());

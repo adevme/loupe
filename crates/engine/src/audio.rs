@@ -62,6 +62,7 @@ enum Msg {
     NoteOff { track: TrackId, key: u8 },
     Silence,
     Tape(bool),
+    Recording(bool),
     KeysGoTo(Option<TrackId>),
     Metronome(bool),
     CountIn(Frames),
@@ -127,6 +128,7 @@ struct Rt {
     keys: Consumer<KeyEvent>,
     keys_go_to: Option<TrackId>,
     taping: bool,
+    recording: bool,
     tape: Producer<TapedKey>,
     metronome: bool,
     count_in: Frames,
@@ -274,6 +276,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         keys: keys_out,
         keys_go_to: None,
         taping: false,
+        recording: false,
         tape: tape_in,
         metronome: false,
         count_in: 0,
@@ -371,6 +374,7 @@ impl Rt {
                 }
                 Msg::Silence => self.live.clear(),
                 Msg::Tape(on) => self.taping = on,
+                Msg::Recording(on) => self.recording = on,
                 Msg::KeysGoTo(track) => {
                     if track != self.keys_go_to {
                         self.live.retain(|voice| Some(voice.track) != self.keys_go_to || voice.note.len != HELD);
@@ -397,6 +401,10 @@ impl Rt {
 
         let rate = self.project.rate;
         let beat = beat_frames(self.project.bpm, rate);
+        let where_we_are = crate::render::Song::where_it_is(&self.project, self.pos, self.playing, self.recording);
+        if let Some(racks) = self.chains.as_deref_mut() {
+            racks.song_goes(where_we_are);
+        }
         let out = &mut self.block[..frames];
         let mut done = 0;
         while done < frames {
@@ -865,6 +873,10 @@ impl Engine {
 
     pub fn tape_keys(&mut self, on: bool) {
         self.send(Msg::Tape(on));
+    }
+
+    pub fn now_recording(&mut self, on: bool) {
+        self.send(Msg::Recording(on));
     }
 
     pub fn taped_keys(&mut self) -> Vec<TapedKey> {
@@ -1437,6 +1449,59 @@ mod tests {
         assert!(!rt.playing, "hearing the input does not start the song");
         remote.outbox.push(Msg::HearOn([None; MOST_HEARD])).ok().unwrap();
         assert!(rt.process(256).iter().all(|f| *f == [0.0, 0.0]));
+    }
+
+    #[derive(Default)]
+    struct Clock {
+        songs: Arc<std::sync::Mutex<Vec<crate::render::Song>>>,
+    }
+
+    impl Chains for Clock {
+        fn song_goes(&mut self, song: crate::render::Song) {
+            if let Ok(mut kept) = self.songs.lock() {
+                kept.push(song);
+            }
+        }
+    }
+
+    fn last_song(songs: &Arc<std::sync::Mutex<Vec<crate::render::Song>>>) -> crate::render::Song {
+        *songs.lock().expect("the songs are there").last().expect("the engine told the plugins nothing")
+    }
+
+    #[test]
+    fn the_plugins_are_told_the_songs_tempo_and_whether_the_transport_is_rolling() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = steady(4_096);
+        project.apply(Command::SetBpm(142.5)).unwrap();
+        let songs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Clock { songs: songs.clone() })))).ok().unwrap();
+        rt.process(256);
+        let stopped = last_song(&songs);
+        assert_eq!(stopped.tempo, 142.5, "the plugins were told the wrong tempo");
+        assert!(!stopped.playing, "a stopped transport was passed on as rolling");
+        assert!(!stopped.recording);
+        assert_eq!((stopped.beats, stopped.beat_unit), (4, 4));
+
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rt.process(256);
+        let rolling = last_song(&songs);
+        assert!(rolling.playing, "the plugins were not told the transport is rolling");
+        rt.process(256);
+        let later = last_song(&songs);
+        assert!(later.at > rolling.at, "the place in the song never moved on");
+
+        remote.outbox.push(Msg::Recording(true)).ok().unwrap();
+        rt.process(256);
+        assert!(last_song(&songs).recording, "the plugins were not told the song is being recorded");
+
+        remote.outbox.push(Msg::Stop).ok().unwrap();
+        remote.outbox.push(Msg::Recording(false)).ok().unwrap();
+        for _ in 0..4 {
+            rt.process(256);
+        }
+        let after = last_song(&songs);
+        assert!(!after.playing && !after.recording, "stopping never reached the plugins");
     }
 
     struct Monitoring {

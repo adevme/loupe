@@ -22,7 +22,45 @@ pub enum Ask {
     Seat(usize),
     Unload(usize),
     Chain { side: bool, links: Vec<Link> },
+    Timing(Song),
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Song {
+    pub at: i64,
+    pub tempo: f64,
+    pub beats: u32,
+    pub beat_unit: u32,
+    pub playing: bool,
+    pub recording: bool,
+}
+
+impl Default for Song {
+    fn default() -> Self {
+        Self { at: 0, tempo: 120.0, beats: 4, beat_unit: 4, playing: false, recording: false }
+    }
+}
+
+impl Song {
+    fn line(&self) -> String {
+        format!("{}\t{}\t{}\t{}\t{}\t{}", self.at, self.tempo, self.beats, self.beat_unit, self.playing as u8, self.recording as u8)
+    }
+
+    fn from_parts<'a>(parts: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
+        Some(Self {
+            at: parts.next()?.parse().ok()?,
+            tempo: parts.next()?.parse().ok()?,
+            beats: parts.next()?.parse().ok()?,
+            beat_unit: parts.next()?.parse().ok()?,
+            playing: parts.next()? == "1",
+            recording: parts.next()? == "1",
+        })
+    }
+
+    pub fn same_shape(&self, other: &Self) -> bool {
+        self.tempo == other.tempo && self.beats == other.beats && self.beat_unit == other.beat_unit && self.playing == other.playing && self.recording == other.recording
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -140,6 +178,7 @@ impl Ask {
             Ask::Seat(seat) => format!("seat\t{seat}"),
             Ask::Unload(seat) => format!("unload\t{seat}"),
             Ask::Chain { side, links } => format!("chain\t{}\t{}", *side as u8, links_text(links)),
+            Ask::Timing(song) => format!("timing\t{}", song.line()),
             Ask::Quit => "quit".to_string(),
         };
         writeln!(out, "{line}")?;
@@ -177,6 +216,7 @@ impl Ask {
             "seat" => Some(Ask::Seat(parts.next()?.parse().ok()?)),
             "unload" => Some(Ask::Unload(parts.next()?.parse().ok()?)),
             "chain" => Some(Ask::Chain { side: parts.next()? == "1", links: links_from(parts.next().unwrap_or(""))? }),
+            "timing" => Some(Ask::Timing(Song::from_parts(&mut parts)?)),
             "quit" => Some(Ask::Quit),
             _ => None,
         }
@@ -377,6 +417,8 @@ mod tests {
             Ask::Unload(3),
             Ask::Chain { side: false, links: Vec::new() },
             Ask::Chain { side: true, links: vec![Link::wet(0), Link { seat: 4, mix: 0.35 }, Link::wet(2)] },
+            Ask::Timing(Song::default()),
+            Ask::Timing(Song { at: 96_000, tempo: 142.5, beats: 6, beat_unit: 8, playing: true, recording: true }),
             Ask::Quit,
         ];
         for ask in asks {

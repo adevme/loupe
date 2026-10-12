@@ -25,6 +25,26 @@ pub struct Saved {
     pub monitor: Vec<(usize, Vec<u8>)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Song {
+    pub at: Frames,
+    pub tempo: f64,
+    pub beats: u32,
+    pub beat_unit: u32,
+    pub playing: bool,
+    pub recording: bool,
+}
+
+impl Song {
+    pub fn rolling(project: &Project, at: Frames) -> Self {
+        Self { at, tempo: project.bpm, beats: 4, beat_unit: 4, playing: true, recording: false }
+    }
+
+    pub fn where_it_is(project: &Project, at: Frames, playing: bool, recording: bool) -> Self {
+        Self { at, tempo: project.bpm, beats: 4, beat_unit: 4, playing, recording }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Touched {
     Track(TrackId, usize),
@@ -63,6 +83,10 @@ pub trait Chains: Send {
 
     fn process_monitor(&mut self, audio: &mut [[f32; 2]]) {
         let _ = audio;
+    }
+
+    fn song_goes(&mut self, song: Song) {
+        let _ = song;
     }
 
     fn monitor_chain_latency(&self) -> usize {
@@ -244,6 +268,9 @@ pub fn render_through(
     chains: Option<&mut (dyn Chains + '_)>,
 ) {
     let mut after = chains;
+    if let Some(racks) = after.as_deref_mut() {
+        racks.song_goes(Song::rolling(project, pos));
+    }
     mix_tracks_metered(project, pos, out, None, None, scratch, after.as_deref_mut());
     if let Some(chains) = after.as_deref_mut() {
         chains.process_master(out);

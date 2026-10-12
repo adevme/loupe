@@ -836,6 +836,20 @@ impl Chains for Racks {
         audio[..shared].copy_from_slice(&scratch[..shared]);
     }
 
+    fn song_goes(&mut self, song: loupe_engine::Song) {
+        let told = loupe_plugins::wire::Song {
+            at: song.at as i64,
+            tempo: song.tempo,
+            beats: song.beats,
+            beat_unit: song.beat_unit,
+            playing: song.playing,
+            recording: song.recording,
+        };
+        for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()).chain(self.monitor.iter_mut()) {
+            rack.told_the_time(told);
+        }
+    }
+
     fn monitor_chain_latency(&self) -> usize {
         self.monitor.as_ref().map(|rack| rack.latency()).unwrap_or(0)
     }
@@ -1439,5 +1453,80 @@ mod lending_tests {
         assert!(held.is_out() && !held.holding());
         assert!(borrow_or_make(&mut engine, &mut held, &Peeks::default(), &PluginsOff::default(), &Falls::default()).is_none());
         assert!(held.is_out() && !held.holding());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod timing_tests {
+    use super::*;
+    use loupe_engine::{Command, Fx, Outcome, Source};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    struct Fake(PathBuf);
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            if let Some(folder) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+
+    impl Fake {
+        fn told(&self) -> Vec<String> {
+            let folder = self.0.parent().expect("the fake has a folder");
+            std::fs::read_to_string(folder.join("timing")).unwrap_or_default().lines().map(str::to_string).collect()
+        }
+    }
+
+    fn a_host_that_writes_down_the_time(name: &str) -> Fake {
+        let folder = std::env::temp_dir().join(format!("loupe-racks-timing-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("loupe-host");
+        let told = folder.join("timing").display().to_string();
+        let script = format!(
+            "#!/bin/sh\nT={told}\nwhile IFS= read -r ask ; do\n  case \"$ask\" in\n    load*) printf 'loaded\\t2\\t2\\t0\\t0\\n' ;;\n    timing*) printf '%s\\n' \"$ask\" >> $T ;;\n    process*) dd bs=1 count=13 of=/dev/null 2>/dev/null ; printf 'B\\001' ; dd if=/dev/zero bs=1 count=11 2>/dev/null ;;\n    quit) exit 0 ;;\n    *) printf 'fine\\n' ;;\n  esac\ndone\n"
+        );
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Fake(file)
+    }
+
+    fn a_song_at(bpm: f64) -> Project {
+        let mut project = Project::new(48_000);
+        project.apply(Command::SetBpm(bpm)).unwrap();
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Beat".into() }) else { panic!("no track") };
+        let source = Arc::new(Source::from_frames("beat", vec![[0.2, -0.2]; 4_800]));
+        project.apply(Command::AddClip { track, source, start: 0 }).unwrap();
+        let fx = Fx { path: PathBuf::from("/nowhere/AutoKey.vst3"), index: 0, name: "Auto-Key".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        project.apply(Command::AddFx { track, fx }).unwrap();
+        project
+    }
+
+    fn all_running(host: &Path, project: &Project) -> Racks {
+        let mut racks = Racks::new(48_000, 1, Peeks::default(), Arc::new(AtomicBool::new(false)), Falls::default());
+        racks.host = host.to_path_buf();
+        racks.follow(project);
+        let gave_up = Instant::now();
+        while racks.still_opening() {
+            assert!(gave_up.elapsed() < Duration::from_secs(60), "the fake host never started");
+            racks.follow(project);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        racks
+    }
+
+    #[test]
+    fn the_tempo_a_plugin_is_handed_is_the_tempo_of_the_song() {
+        let fake = a_host_that_writes_down_the_time("tempo");
+        let project = a_song_at(142.5);
+        let mut racks = all_running(&fake.0, &project);
+        let mut out = vec![[0.0f32; 2]; 1];
+        let mut scratch = loupe_engine::Mixdown::default();
+        loupe_engine::render_through(&project, 96_000, &mut out, &mut scratch, Some(&mut racks));
+        let told = fake.told();
+        assert_eq!(told.first().map(String::as_str), Some("timing\t96000\t142.5\t4\t4\t1\t0"), "the plugin was told {told:?}");
     }
 }

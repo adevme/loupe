@@ -171,6 +171,8 @@ pub struct Effect {
     controller: Option<ComPtr<vst3::Steinberg::Vst::IEditController>>,
     ara: Option<Document>,
     context: vst3::Steinberg::Vst::ProcessContext,
+    song: crate::wire::Song,
+    since: i64,
     rate: f64,
     _library: Library,
 }
@@ -234,6 +236,8 @@ impl Effect {
                 controller: None,
                 ara,
                 context: std::mem::zeroed(),
+                song: crate::wire::Song::default(),
+                since: 0,
                 rate,
                 _library: library,
             })
@@ -339,8 +343,19 @@ impl Effect {
         if let Some(document) = self.ara.as_mut() {
             document.start_reading();
             self.context = playing_at(at, self.rate, document.placed().tempo);
+            self.process_as_told(audio, side);
+            return;
         }
         self.process_with(audio, side);
+    }
+
+    pub fn told_the_time(&mut self, song: crate::wire::Song) {
+        self.song = song;
+        self.since = 0;
+    }
+
+    pub fn context(&self) -> &vst3::Steinberg::Vst::ProcessContext {
+        &self.context
     }
 
     pub fn latency(&self) -> usize {
@@ -524,6 +539,11 @@ impl Effect {
     }
 
     pub fn process_with(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+        self.context = where_the_song_is(&self.song, self.rate, self.since);
+        self.process_as_told(audio, side);
+    }
+
+    fn process_as_told(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
         let frames = audio.len().min(self.left.len());
         for (i, frame) in audio.iter().take(frames).enumerate() {
             self.left[i] = frame[0];
@@ -563,7 +583,7 @@ impl Effect {
                 outputParameterChanges: std::ptr::null_mut(),
                 inputEvents: std::ptr::null_mut(),
                 outputEvents: std::ptr::null_mut(),
-                processContext: if self.ara.is_some() { &mut self.context } else { std::ptr::null_mut() },
+                processContext: &mut self.context,
             };
             self.processor.process(&mut data);
         }
@@ -572,6 +592,7 @@ impl Effect {
             frame[1] = self.right[i];
         }
         self.turns.clear();
+        self.since += frames as i64;
     }
 }
 
@@ -623,22 +644,75 @@ unsafe fn join_ara(component: &ComPtr<IComponent>, region: &Region) -> Result<Op
 }
 
 fn playing_at(at: i64, rate: f64, tempo: f64) -> vst3::Steinberg::Vst::ProcessContext {
-    use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{kPlaying, kProjectTimeMusicValid, kTempoValid, kTimeSigValid};
+    where_the_song_is(&crate::wire::Song { at, tempo, beats: 4, beat_unit: 4, playing: true, recording: false }, rate, 0)
+}
+
+pub fn where_the_song_is(song: &crate::wire::Song, rate: f64, since: i64) -> vst3::Steinberg::Vst::ProcessContext {
+    use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{kPlaying, kProjectTimeMusicValid, kRecording, kTempoValid, kTimeSigValid};
     let mut context: vst3::Steinberg::Vst::ProcessContext = unsafe { std::mem::zeroed() };
-    context.state = (kPlaying | kTempoValid | kTimeSigValid | kProjectTimeMusicValid) as u32;
+    let mut state = (kTempoValid | kTimeSigValid | kProjectTimeMusicValid) as u32;
+    if song.playing {
+        state |= kPlaying as u32;
+    }
+    if song.recording {
+        state |= kRecording as u32;
+    }
+    let at = if song.playing { song.at + since } else { song.at };
+    context.state = state;
     context.sampleRate = rate;
     context.projectTimeSamples = at;
-    context.continousTimeSamples = at;
-    context.tempo = tempo;
-    context.projectTimeMusic = if rate > 0.0 { at as f64 / rate * tempo / 60.0 } else { 0.0 };
-    context.timeSigNumerator = 4;
-    context.timeSigDenominator = 4;
+    context.continousTimeSamples = song.at + since;
+    context.tempo = song.tempo;
+    context.projectTimeMusic = if rate > 0.0 { at as f64 / rate * song.tempo / 60.0 } else { 0.0 };
+    context.timeSigNumerator = song.beats as i32;
+    context.timeSigDenominator = song.beat_unit as i32;
     context
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use vst3::Steinberg::Vst::ProcessContext_::StatesAndFlags_::{kPlaying, kRecording, kTempoValid, kTimeSigValid};
+
+    #[test]
+    fn a_rolling_transport_is_handed_to_every_plugin_with_the_songs_tempo_and_place() {
+        let song = crate::wire::Song { at: 96_000, tempo: 142.5, beats: 6, beat_unit: 8, playing: true, recording: false };
+        let context = where_the_song_is(&song, 48_000.0, 0);
+        assert_eq!(context.state & kPlaying as u32, kPlaying as u32, "the plugin was not told the transport is rolling");
+        assert_eq!(context.state & kRecording as u32, 0);
+        assert_eq!(context.state & kTempoValid as u32, kTempoValid as u32);
+        assert_eq!(context.state & kTimeSigValid as u32, kTimeSigValid as u32);
+        assert_eq!(context.tempo, 142.5);
+        assert_eq!((context.timeSigNumerator, context.timeSigDenominator), (6, 8));
+        assert_eq!(context.sampleRate, 48_000.0);
+        assert_eq!(context.projectTimeSamples, 96_000);
+        assert_eq!(context.continousTimeSamples, 96_000);
+        assert!((context.projectTimeMusic - 4.75).abs() < 1e-9, "got {}", context.projectTimeMusic);
+    }
+
+    #[test]
+    fn a_stopped_transport_is_handed_over_as_stopped_and_stays_where_it_is() {
+        let song = crate::wire::Song { at: 96_000, tempo: 120.0, beats: 4, beat_unit: 4, playing: false, recording: false };
+        let context = where_the_song_is(&song, 48_000.0, 4_096);
+        assert_eq!(context.state & kPlaying as u32, 0, "a stopped transport was handed over as rolling");
+        assert_eq!(context.state & kTempoValid as u32, kTempoValid as u32);
+        assert_eq!(context.tempo, 120.0);
+        assert_eq!(context.projectTimeSamples, 96_000, "the song moved on while it was stopped");
+        assert_eq!(context.continousTimeSamples, 100_096, "the clock stopped ticking");
+    }
+
+    #[test]
+    fn the_place_moves_on_with_the_blocks_while_the_song_rolls() {
+        let song = crate::wire::Song { at: 48_000, tempo: 90.0, beats: 4, beat_unit: 4, playing: true, recording: true };
+        let first = where_the_song_is(&song, 48_000.0, 0);
+        let later = where_the_song_is(&song, 48_000.0, 512);
+        assert_eq!(first.projectTimeSamples, 48_000);
+        assert_eq!(later.projectTimeSamples, 48_512);
+        assert_eq!(later.state & kRecording as u32, kRecording as u32, "the plugin was not told it is being recorded");
+        assert_eq!(later.state & kPlaying as u32, kPlaying as u32);
+        assert!(later.projectTimeMusic > first.projectTimeMusic);
+    }
 
     #[test]
     fn an_ara_plugin_is_told_where_the_song_is() {
