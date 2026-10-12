@@ -24,6 +24,13 @@ pub struct Saved {
     pub master: Vec<(usize, Vec<u8>)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Touched {
+    Track(TrackId, usize),
+    Clip(ClipId, usize),
+    Master(usize),
+}
+
 pub trait Chains: Send {
     fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
         self.process_with(track, audio, &[]);
@@ -103,8 +110,13 @@ pub trait Chains: Send {
         Ok(())
     }
 
-    fn any_plugin_touched(&mut self) -> bool {
-        false
+    fn plugins_touched(&mut self) -> Vec<Touched> {
+        Vec::new()
+    }
+
+    fn state_of(&mut self, which: Touched) -> Option<Vec<u8>> {
+        let _ = which;
+        None
     }
 
     fn load(&mut self, track: TrackId, slot: usize) -> Result<(), String> {

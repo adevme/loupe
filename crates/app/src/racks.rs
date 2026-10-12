@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use loupe_engine::{Chains, Clip, ClipId, Engine, PluginSpending, Project, Saved, TrackId};
+use loupe_engine::{Chains, Clip, ClipId, Engine, PluginSpending, Project, Saved, Touched, TrackId};
 use loupe_plugins::rack::{let_them_go, Fallen, Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_plugins::wire::Region;
@@ -148,7 +148,7 @@ enum Which {
 }
 
 pub struct Racks {
-    host: PathBuf,
+    pub(crate) host: PathBuf,
     rate: u32,
     block: usize,
     chains: HashMap<TrackId, Rack>,
@@ -491,19 +491,44 @@ impl Chains for Racks {
         }
     }
 
-    fn any_plugin_touched(&mut self) -> bool {
+    fn plugins_touched(&mut self) -> Vec<Touched> {
+        let mut found = Vec::new();
         let tracks: Vec<TrackId> = self.chains.keys().copied().collect();
-        let mut touched = false;
         for track in tracks {
             if let Some(rack) = self.chains.get_mut(&track) {
                 for slot in 0..rack.len() {
                     if rack.was_touched(slot) {
-                        touched = true;
+                        found.push(Touched::Track(track, slot));
                     }
                 }
             }
         }
-        touched
+        let clips: Vec<ClipId> = self.clips.keys().copied().collect();
+        for clip in clips {
+            if let Some(rack) = self.clips.get_mut(&clip) {
+                for slot in 0..rack.len() {
+                    if rack.was_touched(slot) {
+                        found.push(Touched::Clip(clip, slot));
+                    }
+                }
+            }
+        }
+        if let Some(rack) = self.master.as_mut() {
+            for slot in 0..rack.len() {
+                if rack.was_touched(slot) {
+                    found.push(Touched::Master(slot));
+                }
+            }
+        }
+        found
+    }
+
+    fn state_of(&mut self, which: Touched) -> Option<Vec<u8>> {
+        match which {
+            Touched::Track(track, slot) => self.chains.get_mut(&track)?.save(slot),
+            Touched::Clip(clip, slot) => self.clips.get_mut(&clip)?.save(slot),
+            Touched::Master(slot) => self.master.as_mut()?.save(slot),
+        }
     }
 
     fn on_track(&mut self, track: TrackId, slot: usize, name: &str, index: i64) -> Result<(), String> {
@@ -1126,6 +1151,89 @@ mod closing_tests {
         assert!(racks.chains.is_empty() && racks.clips.is_empty() && racks.master.is_none());
         nobody_left(&hosts);
         drop(racks);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod touch_tests {
+    use super::*;
+    use loupe_engine::{Command, Fx, Outcome, Source};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    struct Fake(PathBuf);
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            if let Some(folder) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(folder);
+            }
+        }
+    }
+
+    fn a_host_that_reports_moved_knobs(name: &str) -> Fake {
+        let folder = std::env::temp_dir().join(format!("loupe-touched-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("loupe-host");
+        let mark = folder.join("mark").display().to_string();
+        let script = format!(
+            "#!/bin/sh\nM={mark}\nwhile IFS= read -r ask ; do\n  case \"$ask\" in\n    load*) case \"$ask\" in *Moved*) : > \"$M.$$\" ; printf '11' > \"$M.$$.state\" ;; *) printf '22' > \"$M.$$.state\" ;; esac ; printf 'loaded\\t2\\t2\\t0\\t0\\n' ;;\n    touched) if [ -f \"$M.$$\" ] ; then rm -f \"$M.$$\" ; printf 'edited\\t1\\n' ; else printf 'edited\\t0\\n' ; fi ;;\n    save) printf 'state\\t%s\\n' \"$(cat $M.$$.state)\" ;;\n    knobs) printf 'knobs\\tGain\\n' ;;\n    quit) exit 0 ;;\n    *) printf 'fine\\n' ;;\n  esac\ndone\n"
+        );
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Fake(file)
+    }
+
+    fn plugin(path: &str) -> Fx {
+        Fx { path: PathBuf::from(path), index: 0, name: path.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }
+    }
+
+    fn a_song_with_knobs_everywhere() -> (Project, TrackId, ClipId) {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 480]));
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!("no clip") };
+        project.apply(Command::AddFx { track, fx: plugin("/nowhere/Moved.vst3") }).unwrap();
+        project.apply(Command::AddFx { track, fx: plugin("/nowhere/Still.vst3") }).unwrap();
+        project.apply(Command::AddClipFx { clip, fx: plugin("/nowhere/MovedClip.clap") }).unwrap();
+        project.apply(Command::AddMasterFx(plugin("/nowhere/MovedGlue.vst3"))).unwrap();
+        (project, track, clip)
+    }
+
+    fn all_running(host: &std::path::Path, project: &Project) -> Racks {
+        let mut racks = Racks::new(48_000, 1, Peeks::default(), Arc::new(AtomicBool::new(false)), Falls::default());
+        racks.host = host.to_path_buf();
+        racks.follow(project);
+        let gave_up = Instant::now();
+        while racks.still_opening() {
+            assert!(gave_up.elapsed() < Duration::from_secs(60), "the fake hosts never started");
+            racks.follow(project);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        racks
+    }
+
+    #[test]
+    fn every_slot_that_moved_is_named_and_only_once() {
+        let fake = a_host_that_reports_moved_knobs("named");
+        let (project, track, clip) = a_song_with_knobs_everywhere();
+        let mut racks = all_running(&fake.0, &project);
+        let found = racks.plugins_touched();
+        assert_eq!(found, vec![Touched::Track(track, 0), Touched::Clip(clip, 0), Touched::Master(0)]);
+        assert!(racks.plugins_touched().is_empty(), "the racks kept reporting a knob that had already been read");
+    }
+
+    #[test]
+    fn a_slot_gives_back_its_own_settings_and_nobody_elses() {
+        let fake = a_host_that_reports_moved_knobs("settings");
+        let (project, track, clip) = a_song_with_knobs_everywhere();
+        let mut racks = all_running(&fake.0, &project);
+        assert_eq!(racks.state_of(Touched::Track(track, 0)), Some(vec![0x11]));
+        assert_eq!(racks.state_of(Touched::Track(track, 1)), Some(vec![0x22]));
+        assert_eq!(racks.state_of(Touched::Clip(clip, 0)), Some(vec![0x11]));
+        assert_eq!(racks.state_of(Touched::Master(0)), Some(vec![0x11]));
+        assert_eq!(racks.state_of(Touched::Track(track, 9)), None);
+        assert_eq!(racks.state_of(Touched::Clip(ClipId(9_999), 0)), None);
     }
 }
 

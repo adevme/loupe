@@ -42,6 +42,7 @@ mod starting;
 mod theme;
 mod theming;
 mod timeline;
+mod touches;
 mod usage;
 mod versions;
 
@@ -676,6 +677,7 @@ struct App {
     silent: bool,
     plugins_off: racks::PluginsOff,
     open_next_safely: bool,
+    touches: touches::Touches,
 }
 
 impl App {
@@ -846,6 +848,7 @@ impl App {
             crash_note: String::new(),
             crash_sending: false,
             crash_sheet_due: false,
+            touches: touches::Touches::default(),
         };
         app.crash_sheet_due = !app.crash_reports.is_empty();
         app.note_audio_for_crashes();
@@ -883,6 +886,168 @@ impl App {
             Task::none()
         };
         (app, Task::batch([task, measure, mixer, hunt, look]))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bare() -> Self {
+        let mut engine = Engine::start(Output::Silent);
+        let project = Project::new(engine.rate());
+        engine.set_project(&project);
+        Self {
+            palette: theme::NEUTRAL,
+            heights: HashMap::new(),
+            loop_range: None,
+            tool: Tool::default(),
+            level_press: None,
+            editing_level: None,
+            send_press: None,
+            editing_send: None,
+            preview: None,
+            copied: None,
+            armed: HashSet::new(),
+            recording: None,
+            input: None,
+            input_levels: Vec::new(),
+            taking_shape: Vec::new(),
+            chosen_tracks: std::collections::HashSet::new(),
+            track_levels: [0.0; loupe_engine::METERS],
+            master_level: 0.0,
+            input_name: None,
+            theme_name: None,
+            theme_names: Vec::new(),
+            theme_problem: None,
+            input_names: Vec::new(),
+            practice_input: true,
+            problem: None,
+            notice: None,
+            export: settings::ExportChoices::from_settings(|_| None),
+            export_range_only: false,
+            export_elsewhere: None,
+            exporting: false,
+            stop_export: Arc::new(AtomicBool::new(false)),
+            export_began: None,
+            export_progress: Arc::new(AtomicU32::new(0)),
+            startup_problem: None,
+            audio_trouble: None,
+            bpm: format_bpm(project.bpm),
+            engine,
+            project,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            run: None,
+            selected: None,
+            selection: HashSet::new(),
+            playing: false,
+            settle: 0,
+            playhead: 0,
+            view: View { zoom: EMPTY_SONG_ZOOM, scroll: 0.0, scroll_y: 0.0 },
+            window: START_SIZE,
+            loading: 0,
+            scale: 1.0,
+            pending_scale: 1.0,
+            scale_text: format_scale(1.0),
+            overlay: Overlay::None,
+            overlay_since: None,
+            settings_tab: SettingsTab::default(),
+            entry: String::new(),
+            clip_name: String::new(),
+            chain_drag: None,
+            name_clicked: None,
+            pointer: Point::ORIGIN,
+            chain_from_mixer: false,
+            chain_over: None,
+            entry_problem: None,
+            main_window: window::Id::unique(),
+            mixer_window: None,
+            mixer_open: false,
+            mixer_wants_alone: false,
+            mixer_drag: None,
+            mixer_over: None,
+            mixer_height: mixer::MIXER_HEIGHT,
+            resizing_mixer: false,
+            folder: None,
+            pool_open: false,
+            path: None,
+            dirty: false,
+            going: false,
+            after_saving: None,
+            screen: Screen::Song,
+            opening: None,
+            templates: Vec::new(),
+            recent: Vec::new(),
+            cache: Cache::new(),
+            autosave_minutes: 0,
+            backups_kept: 0,
+            autosave_text: String::new(),
+            kept_text: String::new(),
+            autosave_problem: None,
+            revision: 0,
+            backed_up: 0,
+            remembered: 0,
+            lost: Vec::new(),
+            recovering: None,
+            marked: None,
+            roll_view: piano_roll::RollView::default(),
+            roll_beats: 1.0,
+            roll_chosen: Vec::new(),
+            typing_keys: false,
+            roll_copied: Vec::new(),
+            typing: HashSet::new(),
+            midi_keys: None,
+            keys_aimed_at: None,
+            update_state: versions::UpdateState::default(),
+            quiet_check: false,
+            check_updates: false,
+            update_dismissed: false,
+            usage: usage::Usage::default(),
+            metronome: false,
+            count_in_bars: 0,
+            resources: resources::Resources::new(),
+            preroll_bars: 0,
+            punch: false,
+            hear_input: settings::Hearing::default(),
+            hear_through_chain: false,
+            rec_shown: HashSet::new(),
+            copied_clips: None,
+            scripts: Vec::new(),
+            snap: false,
+            midi_chosen: Vec::new(),
+            midi_around: Vec::new(),
+            stretches: stretching::Stretches::default(),
+            modifiers: keyboard::Modifiers::default(),
+            audio: loupe_engine::Device::default(),
+            audio_lists: audio_settings::Lists::default(),
+            silent: true,
+            racks: racks::Lending::default(),
+            fx_was: 0,
+            peeks: racks::Peeks::default(),
+            stock: None,
+            fx_drag: None,
+            writing: None,
+            held_back: std::collections::HashSet::new(),
+            knob_names: HashMap::new(),
+            found: Vec::new(),
+            scanning: false,
+            hint: None,
+            plugins_opening: false,
+            since_looked_in: 0,
+            reading: None,
+            plugin_filter: String::new(),
+            chains: Vec::new(),
+            chain_name: String::new(),
+            plugin_highlight: 0,
+            plugin_uses: plugins::Uses::default(),
+            plugins_off: racks::PluginsOff::default(),
+            open_next_safely: false,
+            falls: racks::Falls::default(),
+            fell: Vec::new(),
+            fell_named: HashSet::new(),
+            crash_reports: Vec::new(),
+            crash_note: String::new(),
+            crash_sending: false,
+            crash_sheet_due: false,
+            touches: touches::Touches::default(),
+        }
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -984,13 +1149,7 @@ impl App {
             Message::LookAround => {
                 let hosts = self.plugin_hosts();
                 self.resources.look(&hosts);
-                if let Some(mut racks) = self.borrow_racks() {
-                    let touched = racks.any_plugin_touched();
-                    self.racks.keep(racks);
-                    if touched {
-                        self.dirty = true;
-                    }
-                }
+                self.look_for_touches();
             }
             Message::Tick => {
                 let punched_out = self.recording.as_ref().and_then(|recording| recording.punch).is_some_and(|(_, to)| self.engine.position() >= to);
@@ -1009,6 +1168,9 @@ impl App {
                     if recording.began.is_none() {
                         recording.began = self.input.as_ref().and_then(Input::take_began).map(|at| self.engine.position_at(at));
                     }
+                }
+                if self.touches.due() {
+                    self.keep_plugin_edits();
                 }
                 self.keep_writing();
                 self.take_falls();
@@ -2408,6 +2570,7 @@ impl App {
             || self.stock.is_some()
             || self.plugins_opening
             || self.crash_sheet_due
+            || self.touches.waiting()
             || self.master_level > 0.0005;
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
@@ -2806,6 +2969,7 @@ impl App {
             return false;
         };
         let troubles = racks.follow(&self.project);
+        let _ = racks.plugins_touched();
         self.note_plugins_for_crashes();
         self.plugins_opening = racks.still_opening();
         self.read_peeks();
@@ -2814,6 +2978,7 @@ impl App {
         }
         self.lend_racks(racks);
         self.take_falls();
+        self.touches.forget();
         true
     }
 
@@ -2823,7 +2988,11 @@ impl App {
         self.revision += 1;
         self.forget_gone_clips();
         self.bpm = format_bpm(self.project.bpm);
-        self.changed();
+        self.engine.set_project(&self.project);
+        self.cache.clear();
+        if self.follow_chains() {
+            self.fx_was = self.fx_shape();
+        }
     }
 
     fn input_choice(&self) -> InputChoice {

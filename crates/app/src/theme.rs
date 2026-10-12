@@ -128,7 +128,7 @@ pub struct Palette {
     pub top_bar: [BarItem; BAR_SLOTS],
 }
 
-const NEUTRAL: Palette = Palette {
+pub const NEUTRAL: Palette = Palette {
     background: Color::from_rgb(0.2, 0.2, 0.208),
     panel: Color::from_rgb(0.157, 0.157, 0.165),
     raised: Color::from_rgb(0.25, 0.25, 0.26),

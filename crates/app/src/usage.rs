@@ -90,6 +90,12 @@ pub struct Usage {
     started: Instant,
 }
 
+impl Default for Usage {
+    fn default() -> Self {
+        Self { on: false, install: None, started: Instant::now() }
+    }
+}
+
 impl Usage {
     pub fn begin(stored: &settings::Settings) -> (Self, bool) {
         let first_run = stored.usage.is_none();
