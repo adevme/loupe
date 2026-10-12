@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/engine", "crates/app", "crates/plugins", "crates/host", "crates/stock", "crates/stock-ui", "crates/launcher", "crates/stretch", "crates/lame"]
 
 [workspace.package]
-version = "0.13.0"
+version = "0.13.2"
 
 [profile.release]
 lto = true
@@ -19,3 +19,4 @@ opt-level = 3
 [patch.crates-io]
 iced_graphics = { path = "vendor/iced_graphics" }
 asio-sys = { path = "vendor/asio-sys" }
+iced_widget = { path = "vendor/iced_widget" }

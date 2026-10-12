@@ -377,7 +377,7 @@ impl App {
                 .center_y(self.mixer_tall())
                 .into()
         } else {
-            container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new().width(4).scroller_width(4))))
+            container(scrollable(row).direction(Direction::Horizontal(Scrollbar::new().width(7).scroller_width(7))))
                 .padding([6, 10])
                 .width(Length::Fill)
                 .height(self.mixer_tall())
