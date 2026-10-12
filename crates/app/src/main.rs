@@ -2572,7 +2572,6 @@ impl App {
             || self.stock.is_some()
             || self.plugins_opening
             || self.crash_sheet_due
-            || self.touches.waiting()
             || self.master_level > 0.0005;
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
