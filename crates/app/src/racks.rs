@@ -326,6 +326,7 @@ impl Racks {
             let fresh = self.a_new_rack();
             let rack = self.master.get_or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
+            rack.bypass_chain(!project.master_fx_on);
         }
         for track in &project.tracks {
             if track.fx.is_empty() {
@@ -350,6 +351,7 @@ impl Racks {
                 .entry(track.id)
                 .or_insert(fresh);
             troubles.extend(rack.reconcile(&want));
+            rack.bypass_chain(!track.fx_on);
         }
         for track in &project.tracks {
             for clip in &track.clips {
@@ -894,6 +896,68 @@ mod tests {
 
     fn clip_in(project: &Project, id: ClipId) -> &Clip {
         project.tracks.iter().flat_map(|track| track.clips.iter()).find(|clip| clip.id == id).expect("the clip is there")
+    }
+
+    const LIMITER: usize = 2;
+
+    fn a_click_track(project: &mut Project, name: &str, start: u64) -> TrackId {
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: name.into() }) else { panic!("no track") };
+        let mut frames = vec![[0.0f32; 2]; 4_800];
+        frames[0] = [0.4, 0.4];
+        let source = Arc::new(Source::from_frames("click", frames));
+        project.apply(Command::AddClip { track, source, start }).unwrap();
+        track
+    }
+
+    fn whole_mix(project: &Project, racks: &mut Racks, frames: usize) -> Vec<[f32; 2]> {
+        racks.follow(project);
+        let mut out = vec![[0.0f32; 2]; frames];
+        let mut scratch = loupe_engine::Mixdown::default();
+        loupe_engine::render_through(project, 0, &mut out, &mut scratch, Some(racks));
+        out
+    }
+
+    fn loud_frames(audio: &[[f32; 2]]) -> Vec<usize> {
+        audio.iter().enumerate().filter(|(_, frame)| frame[0].abs() > 0.01).map(|(at, _)| at).collect()
+    }
+
+    #[test]
+    fn a_track_whose_chain_is_off_still_lands_with_the_rest_of_the_mix() {
+        const CLICK: usize = 1_000;
+        let mut project = Project::new(48_000);
+        let latent = a_click_track(&mut project, "Vox", CLICK as u64);
+        a_click_track(&mut project, "Gtr", CLICK as u64);
+        project.apply(Command::AddFx { track: latent, fx: fx(loupe_plugins::BUILT_IN, LIMITER, &[]) }).unwrap();
+        let mut on = racks(false);
+        let heard = whole_mix(&project, &mut on, 4_096);
+        let lag = on.latency(latent);
+        assert!(lag > 0, "the limiter reported no latency, so this proves nothing");
+        assert_eq!(loud_frames(&heard), vec![CLICK], "the two tracks did not land together with the chain on");
+        project.apply(Command::BypassChain { track: latent, bypassed: true }).unwrap();
+        let mut off = racks(false);
+        let held = whole_mix(&project, &mut off, 4_096);
+        assert_eq!(off.latency(latent), lag, "the chain stopped reporting its latency once it was off");
+        assert!(off.chains[&latent].chain_bypassed(), "the rack never heard that the chain was off");
+        assert_eq!(loud_frames(&held), vec![CLICK], "the track with the chain off moved in the mix");
+        assert_eq!(held[CLICK], [0.8, 0.8], "the two clicks did not add up dry on the same frame");
+    }
+
+    #[test]
+    fn a_master_chain_that_is_off_leaves_the_mix_dry_and_in_time() {
+        let mut project = Project::new(48_000);
+        a_click_track(&mut project, "Vox", 0);
+        project.apply(Command::AddMasterFx(fx(loupe_plugins::BUILT_IN, LIMITER, &[]))).unwrap();
+        let mut on = racks(false);
+        let heard = whole_mix(&project, &mut on, 4_096);
+        let lag = on.master.as_ref().map(Rack::latency).unwrap_or(0);
+        assert!(lag > 0, "the master limiter reported no latency");
+        assert_eq!(loud_frames(&heard), vec![lag]);
+        project.apply(Command::BypassMasterChain { bypassed: true }).unwrap();
+        let mut off = racks(false);
+        let held = whole_mix(&project, &mut off, 4_096);
+        assert!(off.master.as_ref().is_some_and(Rack::chain_bypassed), "the master rack never heard that it was off");
+        assert_eq!(loud_frames(&held), vec![lag], "the master chain going off moved the whole mix");
+        assert_eq!(held[lag], [0.4, 0.4], "the click did not come through the master dry");
     }
 
     #[test]

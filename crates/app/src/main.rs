@@ -247,6 +247,7 @@ pub enum Message {
     AddPlugin(TrackId, usize),
     RemovePlugin(TrackId, usize),
     BypassPlugin(TrackId, usize),
+    BypassChain(stockwin::Spot),
     WheelOverFader(mixer::Level, iced::mouse::ScrollDelta),
     ShowPlugin(TrackId, usize),
     OpenClipPlugins(ClipId),
@@ -2218,6 +2219,18 @@ impl App {
                     .unwrap_or(false);
                 self.edit(None, Command::BypassFx { track, slot, bypassed });
             }
+            Message::BypassChain(spot) => {
+                let turn = match spot {
+                    stockwin::Spot::Track(track) => {
+                        self.project.tracks.iter().find(|t| t.id == track).map(|t| Command::BypassChain { track, bypassed: t.fx_on })
+                    }
+                    stockwin::Spot::Master => Some(Command::BypassMasterChain { bypassed: self.project.master_fx_on }),
+                    stockwin::Spot::Clip(_) => None,
+                };
+                if let Some(command) = turn {
+                    self.edit(None, command);
+                }
+            }
             Message::OpenMatrix => self.overlay = Overlay::Matrix,
             Message::AddSend { from, to } => {
                 self.edit(None, Command::AddSend { from, to });
@@ -2928,11 +2941,21 @@ impl App {
     fn fx_shape(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.project.master_fx_on.hash(&mut hasher);
+        for fx in &self.project.master_fx {
+            fx.path.hash(&mut hasher);
+            fx.index.hash(&mut hasher);
+            fx.bypassed.hash(&mut hasher);
+            if !loupe_plugins::rack::is_built_in(&fx.path) {
+                fx.state.hash(&mut hasher);
+            }
+        }
         for track in &self.project.tracks {
             if track.fx.is_empty() {
                 continue;
             }
             track.id.hash(&mut hasher);
+            track.fx_on.hash(&mut hasher);
             for fx in &track.fx {
                 fx.path.hash(&mut hasher);
                 fx.index.hash(&mut hasher);

@@ -22,6 +22,34 @@ impl App {
         }
     }
 
+    pub(crate) fn chain_is_on(&self, spot: Spot) -> bool {
+        match spot {
+            Spot::Track(track) => self.project.tracks.iter().find(|found| found.id == track).is_none_or(|found| found.fx_on),
+            Spot::Clip(_) => true,
+            Spot::Master => self.project.master_fx_on,
+        }
+    }
+
+    fn chain_switch(&self, spot: Spot) -> Element<'_, Message> {
+        let palette = self.palette;
+        let on = self.chain_is_on(spot);
+        let lit = if on { palette.meter_low } else { palette.danger };
+        let dot = container(Space::new(DOT, DOT)).style(move |_| iced::widget::container::Style {
+            background: Some(iced::Background::Color(lit)),
+            border: iced::Border::default().rounded(DOT / 2.0),
+            ..Default::default()
+        });
+        button(
+            row![dot, text(if on { "Chain on" } else { "Chain off" }).size(12.5).font(palette.medium)]
+                .spacing(7)
+                .align_y(Alignment::Center),
+        )
+        .padding([6, 12])
+        .style(move |_, status| palette.outlined(status))
+        .on_press(Message::BypassChain(spot))
+        .into()
+    }
+
     pub(crate) fn chain_name(&self, spot: Spot) -> String {
         match spot {
             Spot::Track(track) => self
@@ -67,8 +95,14 @@ impl App {
             .style(move |_, status| palette.solid(status))
             .on_press(self.add_to(spot));
         let mut body = column![].spacing(12);
-        if let Spot::Track(track) = spot {
-            body = body.push(self.chain_tabs(track, recording));
+        match spot {
+            Spot::Track(track) => {
+                body = body.push(row![self.chain_tabs(track, recording), self.chain_switch(spot)].spacing(6).align_y(Alignment::Center));
+            }
+            Spot::Master => {
+                body = body.push(row![Space::with_width(Length::Fill), self.chain_switch(spot)].align_y(Alignment::Center));
+            }
+            Spot::Clip(_) => {}
         }
         body = body.push(listed).push(row![add, Space::with_width(Length::Fill)].align_y(Alignment::Center));
         if let Some(chains) = self.chain_block() {
@@ -222,12 +256,74 @@ impl App {
     pub(crate) fn fx_button(&self, spot: Spot) -> Element<'_, Message> {
         let palette = self.palette;
         let count = self.chain_of(spot).map_or(0, <[Fx]>::len);
+        let on = self.chain_is_on(spot);
         let label = if count > 0 { format!("FX {count}") } else { "FX".to_string() };
-        button(text(label).size(11).font(palette.medium).width(Length::Fill).center())
+        let wording = text(label).size(11).font(palette.medium).width(Length::Fill).center();
+        let pressed = button(if on { wording } else { wording.color(palette.danger) })
             .padding([3, 0])
             .width(Length::Fill)
             .style(move |_, status| palette.outlined(status))
-            .on_press(Message::OpenChainInMixer(spot))
-            .into()
+            .on_press(Message::OpenChainInMixer(spot));
+        mouse_area(pressed).on_right_press(Message::BypassChain(spot)).into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use loupe_engine::{Command, Outcome, TrackId};
+
+    use super::*;
+
+    fn plugin(name: &str) -> Fx {
+        Fx { path: PathBuf::from(loupe_plugins::BUILT_IN), index: 1, name: name.into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 }
+    }
+
+    fn song_with_a_chain() -> (App, TrackId) {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        app.project.apply(Command::AddFx { track, fx: plugin("One") }).unwrap();
+        app.project.apply(Command::AddFx { track, fx: plugin("Two") }).unwrap();
+        app.project.apply(Command::AddMasterFx(plugin("Glue"))).unwrap();
+        (app, track)
+    }
+
+    fn bypassed_slots(app: &App, track: TrackId) -> Vec<bool> {
+        app.project.tracks.iter().find(|found| found.id == track).expect("the track").fx.iter().map(|fx| fx.bypassed).collect()
+    }
+
+    #[test]
+    fn turning_a_chain_off_leaves_the_slots_underneath_alone() {
+        let (mut app, track) = song_with_a_chain();
+        let _ = app.update(Message::BypassPlugin(track, 1));
+        assert_eq!(bypassed_slots(&app, track), vec![false, true]);
+        let _ = app.update(Message::BypassChain(Spot::Track(track)));
+        assert!(!app.chain_is_on(Spot::Track(track)), "the chain is still on");
+        assert_eq!(bypassed_slots(&app, track), vec![false, true], "turning the chain off changed the slots");
+        let _ = app.update(Message::BypassChain(Spot::Track(track)));
+        assert!(app.chain_is_on(Spot::Track(track)), "the chain did not come back on");
+        assert_eq!(bypassed_slots(&app, track), vec![false, true], "the slots did not come back as they were");
+    }
+
+    #[test]
+    fn a_chain_turned_off_is_undone_and_redone() {
+        let (mut app, track) = song_with_a_chain();
+        let _ = app.update(Message::BypassChain(Spot::Track(track)));
+        assert!(!app.chain_is_on(Spot::Track(track)));
+        let _ = app.update(Message::Undo);
+        assert!(app.chain_is_on(Spot::Track(track)), "undo did not put the chain back on");
+        let _ = app.update(Message::Redo);
+        assert!(!app.chain_is_on(Spot::Track(track)), "redo did not turn the chain off again");
+    }
+
+    #[test]
+    fn the_master_chain_goes_off_on_its_own_and_undoes() {
+        let (mut app, track) = song_with_a_chain();
+        let _ = app.update(Message::BypassChain(Spot::Master));
+        assert!(!app.chain_is_on(Spot::Master), "the master chain is still on");
+        assert!(app.chain_is_on(Spot::Track(track)), "the track chain went off with the master");
+        let _ = app.update(Message::Undo);
+        assert!(app.chain_is_on(Spot::Master), "undo did not put the master chain back on");
     }
 }
