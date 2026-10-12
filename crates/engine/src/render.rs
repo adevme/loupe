@@ -131,6 +131,11 @@ pub trait Chains: Send {
         0
     }
 
+    fn takes_latency(&self, track: TrackId) -> usize {
+        let _ = track;
+        0
+    }
+
     fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
         let _ = (clip, audio);
     }
@@ -229,15 +234,48 @@ pub fn scale(out: &mut [[f32; 2]], from: f32, to: f32) {
 pub(crate) type Shape = (TrackId, Option<TrackId>, u64);
 
 #[derive(Default)]
+struct Line {
+    delay: usize,
+    held: Vec<[f32; 2]>,
+    at: usize,
+}
+
+impl Line {
+    fn settle(&mut self) {
+        self.held.clear();
+        self.held.resize(self.delay, [0.0; 2]);
+        self.at = 0;
+    }
+
+    fn step(&mut self, frame: [f32; 2]) -> [f32; 2] {
+        if self.held.is_empty() {
+            return frame;
+        }
+        let out = self.held[self.at];
+        self.held[self.at] = frame;
+        self.at += 1;
+        if self.at == self.held.len() {
+            self.at = 0;
+        }
+        out
+    }
+}
+
+#[derive(Default)]
 pub struct Mixdown {
     buffers: Vec<Vec<[f32; 2]>>,
     sides: Vec<Vec<[f32; 2]>>,
     apart: Vec<[f32; 2]>,
     pre: Vec<[f32; 2]>,
+    sink: Vec<[f32; 2]>,
+    next: Option<Frames>,
     order: Vec<TrackId>,
     index: Vec<usize>,
     shape: Vec<Shape>,
-    ahead: Vec<Frames>,
+    lags: Vec<usize>,
+    ahead: Vec<usize>,
+    lines: Vec<Line>,
+    feed: Vec<usize>,
     waves: Vec<(usize, usize)>,
     depth: Vec<usize>,
     wanted: Vec<usize>,
@@ -249,16 +287,29 @@ pub(crate) fn shape_of(track: &Track) -> Shape {
     (track.id, track.parent, sends)
 }
 
+fn own_lag(track: &Track, racks: Option<&dyn Chains>) -> usize {
+    match racks {
+        Some(racks) if !track.fx.is_empty() => racks.latency(track.id),
+        _ => 0,
+    }
+}
+
 impl Mixdown {
-    fn same_shape(&self, project: &Project) -> bool {
-        self.shape.len() == project.tracks.len() && project.tracks.iter().zip(&self.shape).all(|(track, known)| shape_of(track) == *known)
+    fn same_shape(&self, project: &Project, racks: Option<&dyn Chains>) -> bool {
+        self.shape.len() == project.tracks.len()
+            && self.lags.len() == project.tracks.len()
+            && project.tracks.iter().zip(&self.shape).all(|(track, known)| shape_of(track) == *known)
+            && project.tracks.iter().zip(&self.lags).all(|(track, known)| own_lag(track, racks) == *known)
     }
 
-    fn work_out_order(&mut self, project: &Project) {
+    fn work_out_order(&mut self, project: &Project, racks: Option<&dyn Chains>) {
         self.shape.clear();
         self.shape.extend(project.tracks.iter().map(shape_of));
+        self.lags.clear();
+        self.lags.extend(project.tracks.iter().map(|track| own_lag(track, racks)));
         self.order.clear();
         self.index.clear();
+        self.next = None;
         self.ordered = match project.render_order() {
             Some(order) => {
                 self.order.extend(order);
@@ -266,10 +317,53 @@ impl Mixdown {
                     self.index.push(project.tracks.iter().position(|t| t.id == *id).unwrap_or(usize::MAX));
                 }
                 self.work_out_waves(project);
+                self.work_out_delays(project);
                 true
             }
             None => false,
         };
+    }
+
+    fn work_out_delays(&mut self, project: &Project) {
+        let count = project.tracks.len();
+        self.ahead.clear();
+        self.ahead.resize(count, 0);
+        self.feed.clear();
+        self.feed.resize(count, 0);
+        let mut next = 0;
+        for (index, track) in project.tracks.iter().enumerate() {
+            self.feed[index] = next;
+            next += 1 + track.sends.len();
+        }
+        self.lines.clear();
+        self.lines.resize_with(next, Line::default);
+        for step in (0..self.order.len()).rev() {
+            let index = self.index[step];
+            if index == usize::MAX {
+                continue;
+            }
+            let track = &project.tracks[index];
+            let down = |id: TrackId| project.tracks.iter().position(|t| t.id == id);
+            let up = track.parent.and_then(down).map(|parent| self.ahead[parent]).unwrap_or(0);
+            let mut wants = up;
+            for send in &track.sends {
+                if let Some(target) = down(send.to) {
+                    wants = wants.max(self.ahead[target]);
+                }
+            }
+            self.ahead[index] = wants + self.lags[index];
+            let first = self.feed[index];
+            self.lines[first].delay = wants - up;
+            for (which, send) in track.sends.iter().enumerate() {
+                self.lines[first + 1 + which].delay = match down(send.to) {
+                    Some(target) => wants - self.ahead[target],
+                    None => 0,
+                };
+            }
+        }
+        for line in self.lines.iter_mut() {
+            line.settle();
+        }
     }
 
     fn work_out_waves(&mut self, project: &Project) {
@@ -311,6 +405,9 @@ impl Mixdown {
         if self.pre.len() < frames {
             self.pre.resize(frames, [0.0; 2]);
         }
+        if self.sink.len() < frames {
+            self.sink.resize(frames, [0.0; 2]);
+        }
     }
 
     pub fn tap(&self, track: usize, frames: usize) -> Option<&[[f32; 2]]> {
@@ -331,11 +428,10 @@ pub fn mix_tracks_metered(
     pos: Frames,
     out: &mut [[f32; 2]],
     only: Option<ClipId>,
-    mut peaks: Option<&mut [f32]>,
+    peaks: Option<&mut [f32]>,
     scratch: &mut Mixdown,
     mut chains: Option<&mut (dyn Chains + '_)>,
 ) {
-    out.fill([0.0; 2]);
     let len = out.len();
     let count = project.tracks.len();
     if let Some(racks) = chains.as_deref_mut() {
@@ -344,17 +440,51 @@ pub fn mix_tracks_metered(
         }
     }
     scratch.room_for(count, len);
-    if !scratch.same_shape(project) {
-        scratch.work_out_order(project);
+    if !scratch.same_shape(project, chains.as_deref()) {
+        scratch.work_out_order(project, chains.as_deref());
     }
     if !scratch.ordered {
+        out.fill([0.0; 2]);
         return;
     }
-    scratch.ahead.clear();
-    scratch.ahead.extend(project.tracks.iter().map(|track| match chains.as_deref() {
-        Some(racks) => head_start(project, track.id, racks) as Frames,
-        None => 0,
-    }));
+    if len > 0 && scratch.next != Some(pos) {
+        prime(project, pos, len, only, scratch, chains.as_deref_mut());
+    }
+    run(project, pos as i64, out, only, peaks, scratch, chains);
+    scratch.next = Some(pos + len as Frames);
+}
+
+fn prime(
+    project: &Project,
+    pos: Frames,
+    len: usize,
+    only: Option<ClipId>,
+    scratch: &mut Mixdown,
+    mut chains: Option<&mut (dyn Chains + '_)>,
+) {
+    let mut left = scratch.ahead.iter().copied().max().unwrap_or(0);
+    while left > 0 {
+        let part = len.min(left);
+        let at = pos as i64 - left as i64;
+        let mut sink = std::mem::take(&mut scratch.sink);
+        run(project, at, &mut sink[..part], only, None, scratch, chains.as_deref_mut());
+        scratch.sink = sink;
+        left -= part;
+    }
+}
+
+fn run(
+    project: &Project,
+    at: i64,
+    out: &mut [[f32; 2]],
+    only: Option<ClipId>,
+    mut peaks: Option<&mut [f32]>,
+    scratch: &mut Mixdown,
+    mut chains: Option<&mut (dyn Chains + '_)>,
+) {
+    out.fill([0.0; 2]);
+    let len = out.len();
+    let pos = at.max(0) as Frames;
     let soloing = only.is_none() && project.any_solo();
     for (index, track) in project.tracks.iter().enumerate() {
         scratch.sides[index][..len].fill([0.0; 2]);
@@ -363,7 +493,15 @@ pub fn mix_tracks_metered(
         if soloing && !project.heard_in_solo(track.id) {
             continue;
         }
-        lay_clips(project, track, pos + scratch.ahead[index], buffer, only, chains.as_deref_mut(), &mut scratch.apart);
+        let read = at + scratch.ahead[index] as i64;
+        if read + len as i64 <= 0 {
+            continue;
+        }
+        let (from, into) = match read < 0 {
+            true => (0, (-read) as usize),
+            false => (read as Frames, 0),
+        };
+        lay_clips(project, track, from, &mut buffer[into..], only, chains.as_deref_mut(), &mut scratch.apart);
     }
     let in_waves = chains.as_deref().is_some_and(|racks| racks.whole_waves_at_once());
     for wave in 0..scratch.waves.len() {
@@ -411,7 +549,8 @@ pub fn mix_tracks_metered(
                 }
                 *slot = top;
             }
-            for send in &track.sends {
+            let first = scratch.feed[index];
+            for (which, send) in track.sends.iter().enumerate() {
                 let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
                     continue;
                 };
@@ -421,26 +560,34 @@ pub fn mix_tracks_metered(
                     pos,
                     send.gain,
                 );
+                let Mixdown { buffers, sides, pre, lines, .. } = &mut *scratch;
+                let line = &mut lines[first + 1 + which];
                 for i in 0..len {
-                    let from = if send.pre_fader { scratch.pre[i] } else { scratch.buffers[index][i] };
-                    let dest = if send.sidechain { &mut scratch.sides[target][i] } else { &mut scratch.buffers[target][i] };
-                    dest[0] += from[0] * gain;
-                    dest[1] += from[1] * gain;
+                    let from = if send.pre_fader { pre[i] } else { buffers[index][i] };
+                    let carried = line.step(from);
+                    let dest = if send.sidechain { &mut sides[target][i] } else { &mut buffers[target][i] };
+                    dest[0] += carried[0] * gain;
+                    dest[1] += carried[1] * gain;
                 }
             }
             match track.parent.and_then(|parent| project.tracks.iter().position(|t| t.id == parent)) {
                 Some(target) => {
+                    let Mixdown { buffers, lines, .. } = &mut *scratch;
+                    let line = &mut lines[first];
                     for i in 0..len {
-                        let from = scratch.buffers[index][i];
-                        let dest = &mut scratch.buffers[target][i];
-                        dest[0] += from[0];
-                        dest[1] += from[1];
+                        let carried = line.step(buffers[index][i]);
+                        let dest = &mut buffers[target][i];
+                        dest[0] += carried[0];
+                        dest[1] += carried[1];
                     }
                 }
                 None => {
-                    for (dest, from) in out.iter_mut().zip(&scratch.buffers[index][..len]) {
-                        dest[0] += from[0];
-                        dest[1] += from[1];
+                    let Mixdown { buffers, lines, .. } = &mut *scratch;
+                    let line = &mut lines[first];
+                    for (i, dest) in out.iter_mut().enumerate().take(len) {
+                        let carried = line.step(buffers[index][i]);
+                        dest[0] += carried[0];
+                        dest[1] += carried[1];
                     }
                 }
             }
@@ -1043,7 +1190,7 @@ mod tests {
     fn a_wave_never_holds_a_track_that_feeds_another_in_it() {
         let p = a_song_of_groups_and_sends();
         let mut scratch = Mixdown::default();
-        scratch.work_out_order(&p);
+        scratch.work_out_order(&p, None);
         for (from, to) in scratch.waves.clone() {
             for step in from..to {
                 let one = p.tracks.iter().find(|t| t.id == scratch.order[step]).expect("the track is there");
@@ -1094,7 +1241,7 @@ mod tests {
     fn a_hundred_plain_tracks_are_handed_over_as_one_wave_of_a_hundred() {
         let p = a_song_of_many_plain_tracks(100);
         let mut scratch = Mixdown::default();
-        scratch.work_out_order(&p);
+        scratch.work_out_order(&p, None);
         assert_eq!(scratch.waves, vec![(0, 100)], "tracks that feed nothing belong in one wave");
         let mut racks = CountingWaves { handed: Vec::new() };
         let mut out = vec![[0.0; 2]; 32];
@@ -1111,7 +1258,7 @@ mod tests {
             p.apply(Command::SetTrackParent { track: one, parent: Some(bus) }).unwrap();
         }
         let mut scratch = Mixdown::default();
-        scratch.work_out_order(&p);
+        scratch.work_out_order(&p, None);
         let sizes: Vec<usize> = scratch.waves.iter().map(|(from, to)| to - from).collect();
         assert_eq!(sizes, vec![100, 1], "the hundred children go over together, then the bus");
         let mut racks = CountingWaves { handed: Vec::new() };
@@ -1349,6 +1496,265 @@ mod tests {
         assert!(whole(&p, 200).iter().all(|f| *f == [0.0, 0.0]));
     }
 
+    struct Lookahead {
+        lags: Vec<(TrackId, usize)>,
+        held: Vec<(TrackId, Vec<[f32; 2]>)>,
+        peek: Option<TrackId>,
+        audio_at: Vec<usize>,
+        side_at: Vec<usize>,
+        seen: usize,
+    }
+
+    impl Lookahead {
+        fn with(lags: &[(TrackId, usize)]) -> Self {
+            Self { lags: lags.to_vec(), held: Vec::new(), peek: None, audio_at: Vec::new(), side_at: Vec::new(), seen: 0 }
+        }
+
+        fn line(&mut self, track: TrackId, by: usize) -> &mut Vec<[f32; 2]> {
+            if !self.held.iter().any(|(id, _)| *id == track) {
+                self.held.push((track, vec![[0.0; 2]; by]));
+            }
+            &mut self.held.iter_mut().find(|(id, _)| *id == track).expect("the line is there").1
+        }
+    }
+
+    impl Chains for Lookahead {
+        fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+            if self.peek == Some(track) {
+                for (at, frame) in audio.iter().enumerate() {
+                    if frame[0].abs() > 0.5 {
+                        self.audio_at.push(self.seen + at);
+                    }
+                }
+                for (at, frame) in side.iter().enumerate() {
+                    if frame[0].abs() > 0.5 {
+                        self.side_at.push(self.seen + at);
+                    }
+                }
+                self.seen += audio.len();
+            }
+            let by = self.latency(track);
+            if by == 0 {
+                return;
+            }
+            let held = self.line(track, by);
+            for frame in audio.iter_mut() {
+                held.push(*frame);
+                *frame = held.remove(0);
+            }
+        }
+
+        fn latency(&self, track: TrackId) -> usize {
+            self.lags.iter().find(|(id, _)| *id == track).map(|(_, by)| *by).unwrap_or(0)
+        }
+    }
+
+    fn fx(p: &mut Project, track: TrackId) {
+        let fx = crate::model::Fx {
+            mix: 1.0,
+            path: std::path::PathBuf::from("look.vst3"),
+            index: 0,
+            name: "look".into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: false,
+        };
+        p.apply(Command::AddFx { track, fx }).unwrap();
+    }
+
+    fn blip(at: usize, len: usize) -> Arc<Source> {
+        let mut frames = vec![[0.0f32; 2]; len];
+        frames[at] = [1.0, 1.0];
+        Arc::new(Source::from_frames("blip", frames))
+    }
+
+    fn mixed(p: &Project, lags: &[(TrackId, usize)], frames: usize, block: usize) -> Vec<[f32; 2]> {
+        let mut racks = Lookahead::with(lags);
+        let mut scratch = Mixdown::default();
+        let mut all = vec![[0.0; 2]; frames];
+        let mut pos = 0;
+        while pos < frames {
+            let count = block.min(frames - pos);
+            mix_tracks_metered(p, pos as Frames, &mut all[pos..pos + count], None, None, &mut scratch, Some(&mut racks));
+            pos += count;
+        }
+        all
+    }
+
+    fn loud(audio: &[[f32; 2]]) -> f32 {
+        audio.iter().fold(0.0f32, |most, frame| most.max(frame[0].abs()))
+    }
+
+    #[test]
+    fn a_latent_track_lands_on_the_same_frame_as_a_plain_one() {
+        let mut p = Project::new(48_000);
+        let late = track(&mut p);
+        let plain = track(&mut p);
+        clip(&mut p, late, counting(600), 100);
+        clip(&mut p, plain, counting(600), 100);
+        fx(&mut p, late);
+        let with = mixed(&p, &[(late, 547)], 1200, 64);
+        let without = mixed(&p, &[], 1200, 64);
+        assert_eq!(with, without, "the latent track did not null against the plain one");
+        assert!(loud(&with) > 1.0, "the mix is silent");
+    }
+
+    #[test]
+    fn a_parallel_path_rejoins_in_step_with_the_direct_one() {
+        let mut p = Project::new(48_000);
+        let busb = track(&mut p);
+        let parallel = track(&mut p);
+        let bus = track(&mut p);
+        clip(&mut p, bus, counting(600), 100);
+        p.apply(Command::SetTrackParent { track: parallel, parent: Some(busb) }).unwrap();
+        p.apply(Command::SetTrackParent { track: bus, parent: Some(busb) }).unwrap();
+        p.apply(Command::AddSend { from: bus, to: parallel }).unwrap();
+        p.apply(Command::SetSendGain { from: bus, to: parallel, gain: 1.0 }).unwrap();
+        for one in [busb, parallel, bus] {
+            fx(&mut p, one);
+        }
+        let lags = [(busb, 64), (parallel, 547), (bus, 31)];
+        let with = mixed(&p, &lags, 1500, 64);
+        let without = mixed(&p, &[], 1500, 64);
+        assert_eq!(with, without, "the parallel return smeared against the direct path");
+        assert!(loud(&with) > 1.0, "the mix is silent");
+    }
+
+    #[test]
+    fn a_send_arrives_in_step_with_the_bus_it_lands_in() {
+        let mut p = Project::new(48_000);
+        let verb = track(&mut p);
+        let vox = track(&mut p);
+        clip(&mut p, verb, counting(600), 100);
+        clip(&mut p, vox, counting(600), 100);
+        p.apply(Command::AddSend { from: vox, to: verb }).unwrap();
+        p.apply(Command::SetSendGain { from: vox, to: verb, gain: 1.0 }).unwrap();
+        for one in [verb, vox] {
+            fx(&mut p, one);
+        }
+        let with = mixed(&p, &[(verb, 128), (vox, 547)], 1500, 64);
+        let without = mixed(&p, &[], 1500, 64);
+        assert_eq!(with, without, "the send did not land with the bus's own signal");
+        assert!(loud(&with) > 1.0, "the mix is silent");
+    }
+
+    #[test]
+    fn a_pre_fader_send_is_pulled_back_as_well() {
+        let mut p = Project::new(48_000);
+        let verb = track(&mut p);
+        let vox = track(&mut p);
+        clip(&mut p, verb, counting(600), 100);
+        clip(&mut p, vox, counting(600), 100);
+        p.apply(Command::AddSend { from: vox, to: verb }).unwrap();
+        p.apply(Command::SetSendGain { from: vox, to: verb, gain: 1.0 }).unwrap();
+        p.apply(Command::SetSendPreFader { from: vox, to: verb, pre_fader: true }).unwrap();
+        p.apply(Command::SetTrackGain { track: vox, gain: 0.5 }).unwrap();
+        for one in [verb, vox] {
+            fx(&mut p, one);
+        }
+        let with = mixed(&p, &[(verb, 97), (vox, 400)], 1500, 64);
+        let without = mixed(&p, &[], 1500, 64);
+        assert_eq!(with, without, "the pre-fader send did not line up");
+        assert!(loud(&with) > 1.0, "the mix is silent");
+    }
+
+    #[test]
+    fn nested_folders_add_their_latency_up() {
+        let mut p = Project::new(48_000);
+        let outer = track(&mut p);
+        let middle = track(&mut p);
+        let inner = track(&mut p);
+        let plain = track(&mut p);
+        clip(&mut p, inner, counting(600), 100);
+        clip(&mut p, plain, counting(600), 100);
+        p.apply(Command::SetTrackParent { track: middle, parent: Some(outer) }).unwrap();
+        p.apply(Command::SetTrackParent { track: inner, parent: Some(middle) }).unwrap();
+        for one in [outer, middle, inner] {
+            fx(&mut p, one);
+        }
+        let with = mixed(&p, &[(outer, 120), (middle, 240), (inner, 60)], 1500, 64);
+        let without = mixed(&p, &[], 1500, 64);
+        assert_eq!(with, without, "the nested folders did not stay in step");
+        assert!(loud(&with) > 1.0, "the mix is silent");
+    }
+
+    #[test]
+    fn a_sidechain_send_reaches_the_plugin_on_the_frame_it_is_ducking() {
+        let mut p = Project::new(48_000);
+        let beat = track(&mut p);
+        let vox = track(&mut p);
+        clip(&mut p, beat, blip(200, 600), 0);
+        clip(&mut p, vox, blip(200, 600), 0);
+        p.apply(Command::AddSend { from: vox, to: beat }).unwrap();
+        p.apply(Command::SetSendGain { from: vox, to: beat, gain: 1.0 }).unwrap();
+        p.apply(Command::SetSendSidechain { from: vox, to: beat, sidechain: true }).unwrap();
+        p.apply(Command::SetSendPreFader { from: vox, to: beat, pre_fader: true }).unwrap();
+        fx(&mut p, beat);
+        fx(&mut p, vox);
+        let mut racks = Lookahead::with(&[(beat, 547), (vox, 96)]);
+        racks.peek = Some(beat);
+        let mut scratch = Mixdown::default();
+        let mut out = vec![[0.0; 2]; 64];
+        for pos in 0..20 {
+            mix_tracks_metered(&p, pos * 64, &mut out, None, None, &mut scratch, Some(&mut racks));
+        }
+        assert_eq!(racks.audio_at.len(), 1, "the beat blip was heard at {:?}", racks.audio_at);
+        assert_eq!(racks.side_at, racks.audio_at, "the sidechain arrived on a different frame");
+    }
+
+    #[test]
+    fn a_project_with_no_latency_mixes_exactly_as_it_did_before() {
+        let p = a_song_of_groups_and_sends();
+        let mut racks = Lookahead::with(&[]);
+        let mut scratch = Mixdown::default();
+        let mut through = vec![[0.0; 2]; 64];
+        mix_tracks_metered(&p, 1, &mut through, None, None, &mut scratch, Some(&mut racks));
+        let mut bare = vec![[0.0; 2]; 64];
+        let mut spare = Mixdown::default();
+        mix_tracks_metered(&p, 1, &mut bare, None, None, &mut spare, None);
+        assert_eq!(through, bare, "a zero latency project moved");
+        assert_eq!(scratch.ahead, vec![0; p.tracks.len()], "nothing should be read ahead");
+        assert!(scratch.lines.iter().all(|line| line.delay == 0), "a delay line was handed a delay");
+    }
+
+    #[test]
+    fn compensation_comes_out_the_same_in_any_block_size() {
+        let mut p = Project::new(48_000);
+        let busb = track(&mut p);
+        let parallel = track(&mut p);
+        let bus = track(&mut p);
+        let verb = track(&mut p);
+        clip(&mut p, bus, counting(600), 100);
+        clip(&mut p, verb, counting(600), 100);
+        p.apply(Command::SetTrackParent { track: parallel, parent: Some(busb) }).unwrap();
+        p.apply(Command::SetTrackParent { track: bus, parent: Some(busb) }).unwrap();
+        p.apply(Command::AddSend { from: bus, to: parallel }).unwrap();
+        p.apply(Command::AddSend { from: bus, to: verb }).unwrap();
+        for one in [busb, parallel, bus, verb] {
+            fx(&mut p, one);
+        }
+        let lags = [(busb, 48), (parallel, 547), (bus, 31), (verb, 200)];
+        let reference = mixed(&p, &lags, 2000, 2000);
+        for block in [1, 7, 64, 480] {
+            assert_eq!(mixed(&p, &lags, 2000, block), reference, "block size {block}");
+        }
+        assert_eq!(reference, mixed(&p, &[], 2000, 2000), "the compensated mix did not null");
+    }
+
+    #[test]
+    fn the_monitoring_path_reports_what_the_mix_pulls_back() {
+        let mut p = Project::new(48_000);
+        let bus = track(&mut p);
+        let vox = track(&mut p);
+        p.apply(Command::SetTrackParent { track: vox, parent: Some(bus) }).unwrap();
+        for one in [bus, vox] {
+            fx(&mut p, one);
+        }
+        let racks = Lookahead::with(&[(bus, 300), (vox, 547)]);
+        assert_eq!(monitor_latency(&p, vox, &racks), 300, "a performer hears everything below their own chain");
+        assert_eq!(monitor_latency(&p, bus, &racks), 0, "a top level track hears itself straight away");
+    }
+
     fn tapped(p: &Project, frames: usize) -> Vec<Vec<[f32; 2]>> {
         let mut out = vec![[0.0; 2]; frames];
         let mut scratch = Mixdown::default();
@@ -1572,23 +1978,28 @@ mod routing {
     }
 }
 
-fn head_start(project: &Project, track: TrackId, racks: &dyn Chains) -> usize {
-    let running = |id: TrackId| match project.tracks.iter().find(|t| t.id == id) {
-        Some(found) if !found.fx.is_empty() => racks.latency(id),
-        _ => 0,
-    };
-    let mut total = running(track);
-    let mut at = track;
-    let mut guard = 0;
-    while let Some(parent) = project.tracks.iter().find(|t| t.id == at).and_then(|t| t.parent) {
-        total += running(parent);
-        at = parent;
-        guard += 1;
-        if guard > project.tracks.len() {
-            break;
-        }
+fn lag_to_master(project: &Project, track: TrackId, racks: &dyn Chains, depth: usize) -> usize {
+    if depth > project.tracks.len() {
+        return 0;
     }
-    total
+    let Some(found) = project.tracks.iter().find(|t| t.id == track) else { return 0 };
+    own_lag(found, Some(racks)) + below(project, found, racks, depth)
+}
+
+fn below(project: &Project, track: &Track, racks: &dyn Chains, depth: usize) -> usize {
+    let mut most = match track.parent {
+        Some(parent) => lag_to_master(project, parent, racks, depth + 1),
+        None => 0,
+    };
+    for send in &track.sends {
+        most = most.max(lag_to_master(project, send.to, racks, depth + 1));
+    }
+    most
+}
+
+pub fn monitor_latency(project: &Project, track: TrackId, racks: &dyn Chains) -> usize {
+    let Some(found) = project.tracks.iter().find(|t| t.id == track) else { return 0 };
+    racks.takes_latency(track) + below(project, found, racks, 0)
 }
 
 fn automated(project: &Project, target: crate::envelope::Target, at: Frames, fallback: f32) -> f32 {

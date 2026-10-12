@@ -83,6 +83,7 @@ impl Default for Shared {
             load: AtomicU32::new(0),
             load_peak: AtomicU32::new(0),
             overloads: AtomicU64::new(0),
+            monitor_lag: AtomicU64::new(0),
         }
     }
 }
@@ -98,6 +99,7 @@ struct Shared {
     load: AtomicU32,
     load_peak: AtomicU32,
     overloads: AtomicU64,
+    monitor_lag: AtomicU64,
 }
 
 struct Rt {
@@ -473,7 +475,18 @@ impl Rt {
         &self.block[..frames]
     }
 
+    fn note_monitor_lag(&mut self) {
+        let mut most = 0;
+        if let Some(racks) = self.chains.as_deref() {
+            for id in self.ear.on.iter().flatten() {
+                most = most.max(crate::render::monitor_latency(&self.project, *id, racks));
+            }
+        }
+        self.shared.monitor_lag.store(most as u64, Ordering::Relaxed);
+    }
+
     fn hear_input(&mut self, frames: usize) {
+        self.note_monitor_lag();
         let ear = &mut self.ear;
         let Some(feed) = ear.feed.as_mut() else { return };
         let width = ear.width;
@@ -797,6 +810,10 @@ impl Engine {
 
     pub fn position(&self) -> Frames {
         self.remote.shared.pos.load(Ordering::Relaxed)
+    }
+
+    pub fn monitor_lag(&self) -> Frames {
+        self.remote.shared.monitor_lag.load(Ordering::Relaxed)
     }
 
     pub fn load(&self) -> Load {

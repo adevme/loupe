@@ -479,6 +479,10 @@ impl Chains for Racks {
         self.chains.get(&track).map(|rack| rack.latency()).unwrap_or(0)
     }
 
+    fn takes_latency(&self, track: TrackId) -> usize {
+        self.chains.get(&track).map(|rack| rack.takes_latency()).unwrap_or(0)
+    }
+
     fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
         let Self { clips, scratch, falls, spent_in_plugins, .. } = self;
         let Some(rack) = clips.get_mut(&clip) else { return };
