@@ -57,6 +57,10 @@ impl Chain {
         self.host.fell_at()
     }
 
+    pub fn latency_moved(&self) -> Option<(usize, usize)> {
+        self.host.latency_moved()
+    }
+
     pub fn name_at(&self, seat: usize) -> Option<&str> {
         self.seated.get(seat)?.as_deref()
     }

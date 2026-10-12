@@ -53,6 +53,16 @@ const MIN_CLIP_PX_FOR_HANDLES: f32 = 36.0;
 const MIN_FADE_PX_FOR_SHAPE_HANDLE: f32 = 24.0;
 const CURVE_PER_PX: f32 = 1.0 / 50.0;
 const GAIN_DB_PER_PX: f32 = 0.1;
+const GAIN_LINE_SPAN_DB: f32 = 12.0;
+const GAIN_UNITY_SLACK_DB: f32 = 0.05;
+const MIN_WAVE_PX_FOR_GAIN_LINE: f32 = 9.0;
+const MIN_WAVE_PX_FOR_GAIN_FIGURE: f32 = 28.0;
+const MIN_SEEN_PX_FOR_GAIN_LINE: f32 = 3.0;
+const GAIN_FIGURE_SIZE: f32 = 9.5;
+const GAIN_FIGURE_PAD: f32 = 4.0;
+const GAIN_FIGURE_INSET: f32 = 6.0;
+const GAIN_FIGURE_LIFT: f32 = 7.0;
+const GAIN_PLATE_HEIGHT: f32 = 14.0;
 pub const MIN_GAIN_DB: f32 = -24.0;
 const MIN_TAKE_LANE: f32 = 10.0;
 pub const MAX_GAIN_DB: f32 = 12.0;
@@ -128,6 +138,7 @@ pub struct Timeline<'a> {
     pub width: f32,
     pub knobs: &'a HashMap<(u64, usize, usize, bool), String>,
     pub cache: &'a Cache,
+    pub at: &'a std::cell::Cell<Rectangle>,
 }
 
 #[derive(Default)]
@@ -988,6 +999,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     },
                     (_, Hit::Mute(track)) => Some(Message::ToggleMute(track.id)),
                     (_, Hit::Solo(track)) => Some(Message::ToggleSolo(track.id)),
+                    (_, Hit::Fx(track)) if state.modifiers.command() => Some(Message::BypassChain(crate::stockwin::Spot::Track(track.id))),
                     (_, Hit::Fx(track)) => Some(Message::OpenChain(crate::stockwin::Spot::Track(track.id))),
                     (_, Hit::Pan(track)) => {
                         let again = state.last_pan_press.is_some_and(|(id, at)| id == track.id && at.elapsed() < DOUBLE_CLICK);
@@ -1291,6 +1303,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let p = self.palette;
+        self.at.set(bounds);
         let content = self.cache.draw(renderer, bounds.size(), |frame| {
             let lanes = Rectangle::new(
                 Point::new(self.lanes_left(), self.lanes_top()),
@@ -1796,6 +1809,10 @@ impl Timeline<'_> {
             }
         }
 
+        if clip.notes.is_none() {
+            self.draw_gain(frame, clip, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour);
+        }
+
         let outline = if selected {
             Stroke::default().with_color(p.accent).with_width(1.5)
         } else {
@@ -1829,6 +1846,50 @@ impl Timeline<'_> {
                 });
             });
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_gain(
+        &self,
+        frame: &mut Frame,
+        clip: &Clip,
+        from_x: f32,
+        to_x: f32,
+        wave_top: f32,
+        wave_height: f32,
+        colour: Color,
+    ) {
+        let seen = to_x - from_x;
+        if !room_for_gain_line(seen, wave_height) {
+            return;
+        }
+        let p = self.palette;
+        let db = 20.0 * clip.gain.max(1e-6).log10();
+        let pushed = off_unity(db);
+        let y = gain_y(db, wave_top, wave_height);
+        let ink = theme::mix(colour, p.text, if pushed { 0.8 } else { 0.3 });
+        frame.fill_rectangle(Point::new(from_x, y.round()), Size::new(seen, 1.0), ink);
+        if !pushed || !room_for_gain_figure(seen, wave_height, db) {
+            return;
+        }
+        let width = gain_figure_width(db);
+        let right = to_x - GAIN_FIGURE_INSET;
+        let middle = gain_figure_y(y, wave_top, wave_height);
+        frame.fill_rectangle(
+            Point::new(right - width, middle - GAIN_PLATE_HEIGHT / 2.0),
+            Size::new(width, GAIN_PLATE_HEIGHT),
+            theme::alpha(p.background, 0.72),
+        );
+        frame.fill_text(Text {
+            content: format!("{db:+.1} dB"),
+            position: Point::new(right - GAIN_FIGURE_PAD, middle),
+            color: p.text,
+            size: GAIN_FIGURE_SIZE.into(),
+            font: p.mono,
+            horizontal_alignment: alignment::Horizontal::Right,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2255,7 +2316,13 @@ impl Timeline<'_> {
             frame.fill_text(Text {
                 content: "FX".into(),
                 position: Point::new(fx_at.center_x(), fx_at.center_y() - self.lanes_top()),
-                color: if loaded > 0 { p.accent } else { p.text_dim },
+                color: if (!track.fx_on || !self.project.all_fx_on) && !track.fx.is_empty() {
+                    p.danger
+                } else if loaded > 0 {
+                    p.accent
+                } else {
+                    p.text_dim
+                },
                 size: 11.0.into(),
                 font: p.medium,
                 horizontal_alignment: alignment::Horizontal::Center,
@@ -2294,6 +2361,38 @@ fn take_lane_height(clip: &Clip, wave_height: f32) -> Option<f32> {
     }
     let lane = wave_height / clip.takes.len() as f32;
     (lane >= MIN_TAKE_LANE).then_some(lane)
+}
+
+fn off_unity(db: f32) -> bool {
+    db.abs() > GAIN_UNITY_SLACK_DB
+}
+
+fn gain_y(db: f32, top: f32, height: f32) -> f32 {
+    let along = (db / GAIN_LINE_SPAN_DB).clamp(-1.0, 1.0);
+    (top + height * (1.0 - along) / 2.0).clamp(top + 0.5, top + height - 1.5)
+}
+
+fn gain_figure_width(db: f32) -> f32 {
+    let letters = if db.abs() >= 10.0 { 8.0 } else { 7.0 };
+    letters * GAIN_FIGURE_SIZE * 0.62 + GAIN_FIGURE_PAD * 2.0
+}
+
+fn gain_figure_y(line: f32, top: f32, height: f32) -> f32 {
+    let half = GAIN_PLATE_HEIGHT / 2.0;
+    let above = line - GAIN_FIGURE_LIFT;
+    if above - half >= top {
+        above
+    } else {
+        (line + GAIN_FIGURE_LIFT).min(top + height - half)
+    }
+}
+
+fn room_for_gain_line(seen_width: f32, wave_height: f32) -> bool {
+    seen_width >= MIN_SEEN_PX_FOR_GAIN_LINE && wave_height >= MIN_WAVE_PX_FOR_GAIN_LINE
+}
+
+fn room_for_gain_figure(seen_width: f32, wave_height: f32, db: f32) -> bool {
+    wave_height >= MIN_WAVE_PX_FOR_GAIN_FIGURE && seen_width >= gain_figure_width(db) + GAIN_FIGURE_INSET * 2.0
 }
 
 fn raised_fill(p: &Palette, base: Color, top: f32, height: f32) -> canvas::Fill {
@@ -2377,14 +2476,119 @@ mod hints {
     }
 }
 
+#[cfg(test)]
+mod gain {
+    use super::*;
+
+    const WAVE_TOP: f32 = 100.0;
+    const WAVE_HEIGHT: f32 = 60.0;
+
+    fn y(db: f32) -> f32 {
+        gain_y(db, WAVE_TOP, WAVE_HEIGHT)
+    }
+
+    #[test]
+    fn unity_sits_on_the_centre_of_the_waveform() {
+        assert_eq!(y(0.0), WAVE_TOP + WAVE_HEIGHT / 2.0);
+    }
+
+    #[test]
+    fn louder_reads_higher_and_quieter_reads_lower() {
+        assert!(y(6.0) < y(0.0), "a boosted clip draws above the middle");
+        assert!(y(-6.0) > y(0.0), "a pulled clip draws below the middle");
+        assert_eq!(y(6.0) - y(0.0), y(0.0) - y(-6.0), "the mapping is even either side of unity");
+    }
+
+    #[test]
+    fn the_span_clamps_at_twelve_decibels_either_way() {
+        assert_eq!(y(MAX_GAIN_DB), y(GAIN_LINE_SPAN_DB));
+        assert_eq!(y(MIN_GAIN_DB), y(-GAIN_LINE_SPAN_DB));
+        assert_eq!(y(-18.0), y(-GAIN_LINE_SPAN_DB), "anything under the span rests on the floor");
+    }
+
+    #[test]
+    fn the_line_stays_inside_the_waveform_band() {
+        for step in 0..=72 {
+            let db = MIN_GAIN_DB + step as f32 * 0.5;
+            let at = y(db);
+            assert!(at >= WAVE_TOP, "{db} dB drew above the band");
+            assert!(at + 1.0 <= WAVE_TOP + WAVE_HEIGHT, "{db} dB drew below the band");
+        }
+    }
+
+    #[test]
+    fn a_thin_band_still_holds_the_line() {
+        let thin = MIN_WAVE_PX_FOR_GAIN_LINE;
+        for db in [MIN_GAIN_DB, -6.0, 0.0, MAX_GAIN_DB] {
+            let at = gain_y(db, WAVE_TOP, thin);
+            assert!(at >= WAVE_TOP && at + 1.0 <= WAVE_TOP + thin, "{db} dB left the thin band");
+        }
+    }
+
+    #[test]
+    fn only_a_clip_away_from_unity_counts_as_pushed() {
+        assert!(!off_unity(0.0), "untouched gain is unity");
+        assert!(!off_unity(20.0 * 1.0_f32.log10()), "unity gain works out as unity");
+        assert!(!off_unity(0.02), "float drift is not a push");
+        assert!(off_unity(GAIN_DB_PER_PX), "the smallest drag step is a push");
+        assert!(off_unity(-GAIN_DB_PER_PX));
+    }
+
+    #[test]
+    fn a_clip_scrolled_almost_off_screen_drops_the_line() {
+        assert!(!room_for_gain_line(1.0, WAVE_HEIGHT), "a sliver of a clip draws nothing");
+        assert!(room_for_gain_line(MIN_SEEN_PX_FOR_GAIN_LINE, WAVE_HEIGHT));
+    }
+
+    #[test]
+    fn a_short_track_drops_the_line() {
+        assert!(!room_for_gain_line(400.0, 6.0));
+        assert!(room_for_gain_line(400.0, MIN_WAVE_PX_FOR_GAIN_LINE));
+    }
+
+    #[test]
+    fn the_figure_goes_before_the_line_does() {
+        let narrow = 40.0;
+        let squat = 14.0;
+        assert!(room_for_gain_line(narrow, WAVE_HEIGHT) && !room_for_gain_figure(narrow, WAVE_HEIGHT, 3.0), "a narrow clip keeps the line only");
+        assert!(room_for_gain_line(400.0, squat) && !room_for_gain_figure(400.0, squat, 3.0), "a squat clip keeps the line only");
+    }
+
+    #[test]
+    fn a_wide_enough_clip_takes_the_figure() {
+        assert!(room_for_gain_figure(gain_figure_width(3.0) + GAIN_FIGURE_INSET * 2.0, MIN_WAVE_PX_FOR_GAIN_FIGURE, 3.0));
+        assert!(gain_figure_width(11.4) > gain_figure_width(3.0), "two digits ask for more room than one");
+        assert!(!room_for_gain_figure(gain_figure_width(3.0) + GAIN_FIGURE_INSET * 2.0, MIN_WAVE_PX_FOR_GAIN_FIGURE, 11.4), "and a clip that only fits one digit turns the wider figure away");
+    }
+
+    #[test]
+    fn the_figure_keeps_clear_of_the_line_without_leaving_the_band() {
+        for height in [MIN_WAVE_PX_FOR_GAIN_FIGURE, 40.0, WAVE_HEIGHT, 300.0] {
+            for step in 0..=72 {
+                let db = MIN_GAIN_DB + step as f32 * 0.5;
+                let line = gain_y(db, WAVE_TOP, height);
+                let middle = gain_figure_y(line, WAVE_TOP, height);
+                assert!((middle - line).abs() >= GAIN_FIGURE_LIFT - 0.001, "{db} dB in {height} px wrote the figure over its own line");
+                assert!(middle - GAIN_PLATE_HEIGHT / 2.0 >= WAVE_TOP, "{db} dB in {height} px wrote above the band");
+                assert!(middle + GAIN_PLATE_HEIGHT / 2.0 <= WAVE_TOP + height, "{db} dB in {height} px wrote below the band");
+            }
+        }
+    }
+}
+
 impl crate::App {
-    pub(crate) fn dropped_onto(&self, at: iced::Point) -> Option<(TrackId, Frames)> {
+    pub(crate) fn dropped_onto(&self, in_window: iced::Point) -> Option<(TrackId, Frames)> {
+        let canvas = self.canvas_at.get();
+        if canvas.width <= 0.0 || canvas.height <= 0.0 {
+            return None;
+        }
+        let at = iced::Point::new(in_window.x - canvas.x, in_window.y - canvas.y);
         let top = self.palette.scrollbar_height + self.palette.ruler_height;
-        let left = match self.palette.headers {
-            Side::Left => self.palette.header_width,
-            Side::Right => 0.0,
+        let (left, right) = match self.palette.headers {
+            Side::Left => (self.palette.header_width, canvas.width),
+            Side::Right => (0.0, (canvas.width - self.palette.header_width).max(0.0)),
         };
-        if at.y < top || at.x < left {
+        if at.y < top || at.y >= canvas.height || at.x < left || at.x >= right {
             return None;
         }
         let mut y = top - self.view.scroll_y;
@@ -2407,5 +2611,158 @@ impl crate::App {
             y += tall;
         }
         None
+    }
+
+    pub(crate) fn below(&self, track: TrackId, down: usize) -> Option<TrackId> {
+        self.project
+            .tracks
+            .iter()
+            .filter(|found| !out_of_sight(&self.project, found))
+            .skip_while(|found| found.id != track)
+            .nth(down)
+            .map(|found| found.id)
+    }
+}
+
+#[cfg(test)]
+mod dropping {
+    use super::*;
+    use crate::App;
+    use loupe_engine::{Command, Outcome};
+
+    const CANVAS: Rectangle = Rectangle { x: 0.0, y: 100.0, width: 1200.0, height: 700.0 };
+    const TOP: f32 = theme::NEUTRAL.scrollbar_height + theme::NEUTRAL.ruler_height;
+    const TALL: f32 = theme::NEUTRAL.track_height;
+    const LEFT: f32 = theme::NEUTRAL.header_width;
+
+    fn a_song_with(names: &[&str]) -> (App, Vec<TrackId>) {
+        let mut app = App::bare();
+        app.canvas_at.set(CANVAS);
+        app.view = View { zoom: 100.0, scroll: 0.0, scroll_y: 0.0 };
+        let made = names
+            .iter()
+            .map(|name| match app.project.apply(Command::AddTrack { name: (*name).into() }) {
+                Ok(Outcome::Track(track)) => track,
+                _ => panic!("no track"),
+            })
+            .collect();
+        (app, made)
+    }
+
+    fn in_window(x: f32, y: f32) -> Point {
+        Point::new(CANVAS.x + x, CANVAS.y + y)
+    }
+
+    fn row(index: usize) -> f32 {
+        TOP + TALL * index as f32 + TALL / 2.0
+    }
+
+    #[test]
+    fn a_drop_on_the_second_track_lands_on_that_track() {
+        let (app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        let (track, _) = app.dropped_onto(in_window(LEFT + 10.0, row(1))).expect("a track");
+        assert_eq!(track, tracks[1]);
+    }
+
+    #[test]
+    fn a_drop_takes_the_frame_under_the_pointer() {
+        let (app, _) = a_song_with(&["Drums"]);
+        let rate = app.project.rate as Frames;
+        let (_, start) = app.dropped_onto(in_window(LEFT + 200.0, row(0))).expect("a track");
+        assert_eq!(start, rate * 2);
+    }
+
+    #[test]
+    fn the_window_offset_comes_off_before_the_hit_test() {
+        let (app, tracks) = a_song_with(&["Drums", "Bass"]);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(0))).map(|(track, _)| track), Some(tracks[0]));
+        assert_eq!(
+            app.dropped_onto(Point::new(CANVAS.x + LEFT + 10.0, row(0))),
+            None,
+            "a point read as if the canvas sat at the window origin lands on the ruler"
+        );
+    }
+
+    #[test]
+    fn a_drop_below_the_last_track_asks_for_a_new_one() {
+        let (app, _) = a_song_with(&["Drums", "Bass"]);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(2))), None);
+    }
+
+    #[test]
+    fn a_drop_on_the_ruler_or_the_headers_asks_for_a_new_track() {
+        let (app, _) = a_song_with(&["Drums"]);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, TOP - 1.0)), None, "the ruler");
+        assert_eq!(app.dropped_onto(in_window(LEFT - 1.0, row(0))), None, "the headers");
+        assert_eq!(app.dropped_onto(in_window(CANVAS.width + 10.0, row(0))), None, "past the right edge");
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, CANVAS.height + 10.0)), None, "below the canvas");
+    }
+
+    #[test]
+    fn headers_on_the_right_leave_the_tracks_at_the_left_edge() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass"]);
+        app.palette.headers = Side::Right;
+        let rate = app.project.rate as Frames;
+        let (track, start) = app.dropped_onto(in_window(300.0, row(1))).expect("a track");
+        assert_eq!(track, tracks[1]);
+        assert_eq!(start, rate * 3);
+        assert_eq!(app.dropped_onto(in_window(CANVAS.width - LEFT + 10.0, row(1))), None, "the headers on the right");
+    }
+
+    #[test]
+    fn a_scrolled_arrangement_still_finds_the_track_under_the_pointer() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        app.view = View { zoom: 100.0, scroll: 4.0, scroll_y: TALL };
+        let rate = app.project.rate as Frames;
+        let (track, start) = app.dropped_onto(in_window(LEFT + 100.0, row(0))).expect("a track");
+        assert_eq!(track, tracks[1], "scrolling down a track brings the second one to the top row");
+        assert_eq!(start, rate * 5, "the horizontal scroll counts too");
+    }
+
+    #[test]
+    fn a_taller_track_claims_its_extra_room() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass"]);
+        app.heights.insert(tracks[0], 200.0);
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, TOP + 150.0)).map(|(track, _)| track), Some(tracks[0]));
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, TOP + 240.0)).map(|(track, _)| track), Some(tracks[1]));
+    }
+
+    #[test]
+    fn a_collapsed_folder_hands_the_row_below_to_the_next_track_in_sight() {
+        let (mut app, tracks) = a_song_with(&["Vox Chain", "Vox 1", "Drums"]);
+        app.project.apply(Command::SetTrackParent { track: tracks[1], parent: Some(tracks[0]) }).unwrap();
+        app.project.apply(Command::ToggleCollapsed(tracks[0])).unwrap();
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(1))).map(|(track, _)| track), Some(tracks[2]));
+    }
+
+    #[test]
+    fn a_hidden_track_takes_up_no_room() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        app.project.apply(Command::SetTrackHidden { track: tracks[1], hidden: true }).unwrap();
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(1))).map(|(track, _)| track), Some(tracks[2]));
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(2))), None);
+    }
+
+    #[test]
+    fn an_unmeasured_canvas_takes_no_drops() {
+        let (mut app, _) = a_song_with(&["Drums"]);
+        app.canvas_at.set(Rectangle { x: 0.0, y: 0.0, width: 0.0, height: 0.0 });
+        assert_eq!(app.dropped_onto(in_window(LEFT + 10.0, row(0))), None);
+    }
+
+    #[test]
+    fn the_next_file_in_a_drop_goes_on_the_track_below() {
+        let (app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        assert_eq!(app.below(tracks[0], 0), Some(tracks[0]));
+        assert_eq!(app.below(tracks[0], 1), Some(tracks[1]));
+        assert_eq!(app.below(tracks[0], 2), Some(tracks[2]));
+        assert_eq!(app.below(tracks[0], 3), None, "once the tracks run out the drop makes a new one");
+    }
+
+    #[test]
+    fn going_down_skips_the_tracks_out_of_sight() {
+        let (mut app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
+        app.project.apply(Command::SetTrackHidden { track: tracks[1], hidden: true }).unwrap();
+        assert_eq!(app.below(tracks[0], 1), Some(tracks[2]));
     }
 }

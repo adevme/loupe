@@ -69,6 +69,7 @@ pub struct Sandbox {
     writing: ChildStdin,
     wants: Option<Sender<Want>>,
     gets: Receiver<Got>,
+    moved: Receiver<(usize, usize)>,
     reader: Option<JoinHandle<()>>,
     lost: bool,
     ran: bool,
@@ -114,12 +115,14 @@ impl Sandbox {
         let out = child.stdout.take().ok_or("the plugin host has no way out")?;
         let (wants, asked) = channel::<Want>();
         let (sends, gets) = channel::<Got>();
-        let reader = std::thread::spawn(move || read_for(out, asked, sends));
+        let (tells, moved) = channel::<(usize, usize)>();
+        let reader = std::thread::spawn(move || read_for(out, asked, sends, tells));
         Ok(Self {
             child,
             writing,
             wants: Some(wants),
             gets,
+            moved,
             reader: Some(reader),
             lost: false,
             ran: false,
@@ -258,6 +261,10 @@ impl Sandbox {
         self.fell_at
     }
 
+    pub fn latency_moved(&self) -> Option<(usize, usize)> {
+        self.moved.try_recv().ok()
+    }
+
     pub fn gone(&self) -> bool {
         self.lost
     }
@@ -288,7 +295,7 @@ impl Sandbox {
     }
 }
 
-fn read_for(out: impl Read, asked: Receiver<Want>, sends: Sender<Got>) {
+fn read_for(out: impl Read, asked: Receiver<Want>, sends: Sender<Got>, tells: Sender<(usize, usize)>) {
     let mut reading = BufReader::new(out);
     let mut audio = Vec::new();
     while let Ok(want) = asked.recv() {
@@ -305,8 +312,13 @@ fn read_for(out: impl Read, asked: Receiver<Want>, sends: Sender<Got>) {
                 },
             };
             if let Got::Line(line) = &came {
-                if Reply::read(line).as_ref().is_some_and(remember_the_chord) {
-                    continue;
+                match Reply::read(line) {
+                    Some(Reply::LatencyMoved { seat, frames }) => {
+                        let _ = tells.send((seat, frames));
+                        continue;
+                    }
+                    Some(said) if remember_the_chord(&said) => continue,
+                    _ => {}
                 }
             }
             break came;
@@ -686,7 +698,8 @@ mod chord_tests {
         let said = b"savesong\nundoedit\nsavesong\nedited\t1\n".to_vec();
         let (wants, asked) = channel::<Want>();
         let (sends, gets) = channel::<Got>();
-        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends));
+        let (tells, _moved) = channel::<(usize, usize)>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends, tells));
         wants.send(Want::Line).expect("the reader is listening");
         let Ok(Got::Line(line)) = gets.recv_timeout(PATIENCE) else { panic!("the answer never came back") };
         assert_eq!(Reply::read(&line), Some(Reply::Edited(true)));
@@ -703,11 +716,51 @@ mod chord_tests {
         write_block(&mut said, &[[0.25f32, -0.25]; 4]).expect("the block is written");
         let (wants, asked) = channel::<Want>();
         let (sends, gets) = channel::<Got>();
-        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends));
+        let (tells, _moved) = channel::<(usize, usize)>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends, tells));
         wants.send(Want::Block).expect("the reader is listening");
         let Ok(Got::Block(came)) = gets.recv_timeout(PATIENCE) else { panic!("the block never came back") };
         assert_eq!(came, vec![[0.25f32, -0.25]; 4]);
         assert_eq!(waiting_now(), (false, true, false));
+        drop(wants);
+        reader.join().expect("the reader finished");
+    }
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::*;
+
+    #[test]
+    fn a_plugin_that_moved_its_latency_does_not_stand_in_for_a_block() {
+        let mut said = Vec::new();
+        Reply::LatencyMoved { seat: 0, frames: 1_024 }.write(&mut said).expect("the word is written");
+        write_block(&mut said, &[[0.5f32, -0.5]; 4]).expect("the block is written");
+        let (wants, asked) = channel::<Want>();
+        let (sends, gets) = channel::<Got>();
+        let (tells, moved) = channel::<(usize, usize)>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends, tells));
+        wants.send(Want::Block).expect("the reader is listening");
+        let Ok(Got::Block(came)) = gets.recv_timeout(PATIENCE) else { panic!("the block never came back") };
+        assert_eq!(came, vec![[0.5f32, -0.5]; 4]);
+        assert_eq!(moved.try_recv(), Ok((0, 1_024)));
+        drop(wants);
+        reader.join().expect("the reader finished");
+    }
+
+    #[test]
+    fn a_plugin_that_moved_its_latency_does_not_stand_in_for_the_answer() {
+        let said = b"latencymoved\t2\t64\nlatencymoved\t2\t512\nfine\n".to_vec();
+        let (wants, asked) = channel::<Want>();
+        let (sends, gets) = channel::<Got>();
+        let (tells, moved) = channel::<(usize, usize)>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends, tells));
+        wants.send(Want::Line).expect("the reader is listening");
+        let Ok(Got::Line(line)) = gets.recv_timeout(PATIENCE) else { panic!("the answer never came back") };
+        assert_eq!(Reply::read(&line), Some(Reply::Fine));
+        assert_eq!(moved.try_recv(), Ok((2, 64)));
+        assert_eq!(moved.try_recv(), Ok((2, 512)));
+        assert!(moved.try_recv().is_err(), "nothing else was said");
         drop(wants);
         reader.join().expect("the reader finished");
     }

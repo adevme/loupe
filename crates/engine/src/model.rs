@@ -236,6 +236,7 @@ pub struct Track {
     pub hidden: bool,
     pub sends: Vec<Send>,
     pub fx: Vec<Fx>,
+    pub fx_on: bool,
     pub instrument: Instrument,
     pub sample: Option<Arc<Source>>,
     pub print_takes: bool,
@@ -249,7 +250,10 @@ pub struct Project {
     pub master: f32,
     pub master_muted: bool,
     pub master_fx: Vec<Fx>,
+    pub master_fx_on: bool,
     pub monitor_fx: Vec<Fx>,
+    pub monitor_fx_on: bool,
+    pub all_fx_on: bool,
     pub tracks: Vec<Track>,
     pub sources: Vec<Arc<Source>>,
     pub envelopes: Vec<crate::envelope::Envelope>,
@@ -315,6 +319,7 @@ pub enum Command {
     RemoveFx { track: TrackId, slot: usize },
     MoveFx { track: TrackId, slot: usize, to: usize },
     BypassFx { track: TrackId, slot: usize, bypassed: bool },
+    BypassChain { track: TrackId, bypassed: bool },
     SetFxMix { track: TrackId, slot: usize, mix: f32 },
     SetFxState { track: TrackId, slot: usize, state: Vec<u8> },
     RenameFx { track: TrackId, slot: usize, name: String },
@@ -324,6 +329,8 @@ pub enum Command {
     RemoveMasterFx(usize),
     MoveMasterFx { slot: usize, to: usize },
     BypassMasterFx { slot: usize, bypassed: bool },
+    BypassMasterChain { bypassed: bool },
+    BypassAllFx { bypassed: bool },
     SetMasterFxMix { slot: usize, mix: f32 },
     SetMasterFxState { slot: usize, state: Vec<u8> },
     RenameMonitorFx { slot: usize, name: String },
@@ -331,6 +338,7 @@ pub enum Command {
     RemoveMonitorFx(usize),
     MoveMonitorFx { slot: usize, to: usize },
     BypassMonitorFx { slot: usize, bypassed: bool },
+    BypassMonitorChain { bypassed: bool },
     SetMonitorFxMix { slot: usize, mix: f32 },
     SetMonitorFxState { slot: usize, state: Vec<u8> },
     AddNotesClip { track: TrackId, name: String, start: Frames, len: Frames, notes: Vec<Note> },
@@ -365,7 +373,10 @@ impl Project {
             master: 1.0,
             master_muted: false,
             master_fx: Vec::new(),
+            master_fx_on: true,
             monitor_fx: Vec::new(),
+            monitor_fx_on: true,
+            all_fx_on: true,
             tracks: Vec::new(),
             sources: Vec::new(),
             envelopes: Vec::new(),
@@ -444,7 +455,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, hidden: false, sends: Vec::new(), fx: Vec::new(), instrument: Instrument::default(), sample: None, print_takes: false, input: InputChannels::default() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, hidden: false, sends: Vec::new(), fx: Vec::new(), fx_on: true, instrument: Instrument::default(), sample: None, print_takes: false, input: InputChannels::default() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -968,6 +979,11 @@ impl Project {
                 fx.bypassed = bypassed;
                 Ok(Outcome::Done)
             }
+            Command::BypassChain { track, bypassed } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].fx_on = !bypassed;
+                Ok(Outcome::Done)
+            }
             Command::SetFxMix { track, slot, mix } => {
                 let t = self.track_index(track)?;
                 let fx = self.tracks[t].fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
@@ -1021,6 +1037,14 @@ impl Project {
                 fx.bypassed = bypassed;
                 Ok(Outcome::Done)
             }
+            Command::BypassMasterChain { bypassed } => {
+                self.master_fx_on = !bypassed;
+                Ok(Outcome::Done)
+            }
+            Command::BypassAllFx { bypassed } => {
+                self.all_fx_on = !bypassed;
+                Ok(Outcome::Done)
+            }
             Command::SetMasterFxMix { slot, mix } => {
                 let fx = self.master_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
                 fx.mix = valid_mix(mix)?;
@@ -1058,6 +1082,10 @@ impl Project {
             Command::BypassMonitorFx { slot, bypassed } => {
                 let fx = self.monitor_fx.get_mut(slot).ok_or(CommandError::InvalidValue)?;
                 fx.bypassed = bypassed;
+                Ok(Outcome::Done)
+            }
+            Command::BypassMonitorChain { bypassed } => {
+                self.monitor_fx_on = !bypassed;
                 Ok(Outcome::Done)
             }
             Command::SetMonitorFxMix { slot, mix } => {

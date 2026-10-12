@@ -1,3 +1,5 @@
+pub const ROOM_TO_GROW: usize = 16;
+
 pub struct Dry {
     kept: Vec<[f32; 2]>,
     at: usize,
@@ -11,10 +13,13 @@ impl Dry {
     }
 
     pub fn room_for(&mut self, latency: usize, block: usize) {
-        let want = latency + block.max(1);
+        let want = (latency + block.max(1)).max(1);
         if self.held != latency || self.kept.len() < want {
             self.kept.clear();
-            self.kept.resize(want.max(1), [0.0; 2]);
+            if self.kept.capacity() < want {
+                self.kept.reserve(want * ROOM_TO_GROW);
+            }
+            self.kept.resize(want, [0.0; 2]);
             self.spare.clear();
             self.spare.resize(block.max(1), [0.0; 2]);
             self.at = 0;

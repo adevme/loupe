@@ -17,7 +17,9 @@ pub struct SavedProject {
     pub master: f32,
     pub master_muted: bool,
     pub master_fx: Vec<SavedFx>,
+    pub master_fx_on: bool,
     pub monitor_fx: Vec<SavedFx>,
+    pub monitor_fx_on: bool,
     pub sources: Vec<PathBuf>,
     pub tracks: Vec<SavedTrack>,
     pub envelopes: Vec<SavedEnvelope>,
@@ -49,6 +51,7 @@ pub struct SavedTrack {
     pub hidden: bool,
     pub sends: Vec<(usize, f32, bool, bool)>,
     pub fx: Vec<SavedFx>,
+    pub fx_on: bool,
     pub instrument: Instrument,
     pub sample: Option<usize>,
     pub print_takes: bool,
@@ -120,8 +123,10 @@ impl SavedProject {
             bpm: project.bpm,
             master: project.master,
             master_muted: project.master_muted,
+            master_fx_on: project.master_fx_on,
             master_fx: project.master_fx.iter().map(kept_fx).collect(),
             monitor_fx: project.monitor_fx.iter().map(kept_fx).collect(),
+            monitor_fx_on: project.monitor_fx_on,
             sources: project.sources.iter().map(|source| source.path.clone()).collect(),
             envelopes: {
                 let place = |want: TrackId| project.tracks.iter().position(|t| t.id == want).unwrap_or(usize::MAX);
@@ -166,6 +171,7 @@ impl SavedProject {
                     instrument: track.instrument,
                     sample: track.sample.as_ref().and_then(|sample| project.sources.iter().position(|kept| Arc::ptr_eq(kept, sample))),
                     print_takes: track.print_takes,
+                    fx_on: track.fx_on,
                     input: track.input,
                     sends: track
                         .sends
@@ -225,7 +231,7 @@ impl SavedProject {
     }
 
     pub fn to_text(&self) -> String {
-        let mut out = format!("{HEADER}\nsaved_by {}\nrate {}\nbpm {}\nmaster {}\nmaster_muted {}\n", env!("CARGO_PKG_VERSION"), self.rate, self.bpm, self.master, self.master_muted as u8);
+        let mut out = format!("{HEADER}\nsaved_by {}\nrate {}\nbpm {}\nmaster {}\nmaster_muted {}\nmaster_fxon {}\nmonitor_fxon {}\n", env!("CARGO_PKG_VERSION"), self.rate, self.bpm, self.master, self.master_muted as u8, self.master_fx_on as u8, self.monitor_fx_on as u8);
         for path in &self.sources {
             out.push_str(&format!("source {}\n", path.display()));
         }
@@ -245,8 +251,8 @@ impl SavedProject {
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             let sample = track.sample.map_or("-".to_string(), |s| s.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} hidden={} instrument={} sample={sample} print={} input={} name={}\n",
-                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, track.hidden as u8, instrument_text(&track.instrument), track.print_takes as u8, track.input.text(), track.name
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} hidden={} instrument={} sample={sample} print={} input={} fxon={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, track.hidden as u8, instrument_text(&track.instrument), track.print_takes as u8, track.input.text(), track.fx_on as u8, track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -319,7 +325,7 @@ impl SavedProject {
             _ => return Err("this is not a Loupe project file".into()),
         }
         let mut saved =
-            Self { saved_by: None, skipped: Vec::new(), rate: 0, bpm: 120.0, master: 1.0, master_muted: false, master_fx: Vec::new(), monitor_fx: Vec::new(), sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
+            Self { saved_by: None, skipped: Vec::new(), rate: 0, bpm: 120.0, master: 1.0, master_muted: false, master_fx: Vec::new(), master_fx_on: true, monitor_fx: Vec::new(), monitor_fx_on: true, sources: Vec::new(), tracks: Vec::new(), envelopes: Vec::new() };
         let mut held: Option<PathBuf> = None;
         for (number, line) in lines.filter(|(_, line)| !line.is_empty()) {
             let (kind, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -329,6 +335,8 @@ impl SavedProject {
                 "bpm" => saved.bpm = rest.parse().map_err(|_| bad("the tempo is not a number"))?,
                 "master" => saved.master = rest.parse().map_err(|_| bad("the master level is not a number"))?,
                 "master_muted" => saved.master_muted = rest.trim() != "0",
+                "master_fxon" => saved.master_fx_on = rest.trim() != "0",
+                "monitor_fxon" => saved.monitor_fx_on = rest.trim() != "0",
                 "saved_by" => saved.saved_by = Some(rest.trim().to_string()),
                 "source" => saved.sources.push(PathBuf::from(rest)),
                 "track" => {
@@ -352,6 +360,7 @@ impl SavedProject {
                         instrument: fields.get("instrument").and_then(|text| instrument_from(text)).unwrap_or_default(),
                         sample: fields.get("sample").and_then(|text| text.parse::<usize>().ok()),
                         print_takes: fields.get("print") == Some(&"1"),
+                        fx_on: fields.get("fxon") != Some(&"0"),
                         input: fields.get("input").and_then(|text| InputChannels::from_text(text)).unwrap_or_default(),
                     });
                 }
@@ -495,6 +504,9 @@ impl SavedProject {
         if self.master_muted {
             let _ = project.apply(Command::ToggleMasterMute);
         }
+        if !self.master_fx_on {
+            let _ = project.apply(Command::BypassMasterChain { bypassed: true });
+        }
         for source in sources {
             let _ = project.apply(Command::AddSource(source.clone()));
         }
@@ -503,6 +515,9 @@ impl SavedProject {
         }
         for fx in &self.monitor_fx {
             let _ = project.apply(Command::AddMonitorFx(live_fx(fx)));
+        }
+        if !self.monitor_fx_on {
+            let _ = project.apply(Command::BypassMonitorChain { bypassed: true });
         }
         for saved in &self.tracks {
             let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: saved.name.clone() }) else {
@@ -587,6 +602,9 @@ impl SavedProject {
             }
             if saved.hidden {
                 let _ = project.apply(Command::SetTrackHidden { track: *track, hidden: true });
+            }
+            if !saved.fx_on {
+                let _ = project.apply(Command::BypassChain { track: *track, bypassed: true });
             }
             for (to, gain, pre, side) in &saved.sends {
                 let Some(to) = ids.get(*to) else { continue };
@@ -907,6 +925,57 @@ mod routing_round_trip {
     }
 
     #[test]
+    fn a_chain_that_is_off_is_still_off_when_the_song_comes_back() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(one)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let Ok(Outcome::Track(two)) = p.apply(Command::AddTrack { name: "Drums".into() }) else { panic!() };
+        let glue = crate::model::Fx { path: PathBuf::from("glue.vst3"), index: 0, name: "Glue".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        p.apply(Command::AddFx { track: one, fx: glue.clone() }).unwrap();
+        p.apply(Command::AddFx { track: two, fx: glue.clone() }).unwrap();
+        p.apply(Command::AddMasterFx(glue)).unwrap();
+        p.apply(Command::BypassChain { track: one, bypassed: true }).unwrap();
+        p.apply(Command::BypassMasterChain { bypassed: true }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        assert!(text.contains(" fxon=0 "), "the track flag was not written: {text}");
+        assert!(text.contains("master_fxon 0"), "the master flag was not written: {text}");
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert!(!back.tracks[0].fx_on, "the track chain came back on");
+        assert!(back.tracks[1].fx_on, "the other track's chain was turned off with it");
+        assert!(!back.master_fx_on, "the master chain came back on");
+    }
+
+    #[test]
+    fn listening_dry_is_never_saved_with_the_song() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let glue = crate::model::Fx { path: PathBuf::from("glue.vst3"), index: 0, name: "Glue".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        p.apply(Command::AddFx { track, fx: glue }).unwrap();
+        p.apply(Command::BypassChain { track, bypassed: true }).unwrap();
+        p.apply(Command::BypassAllFx { bypassed: true }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert!(back.all_fx_on, "a song opened with every plugin out of circuit");
+        assert!(!back.tracks[0].fx_on, "the one chain he turned off should still be off");
+    }
+
+    #[test]
+    fn an_older_song_with_no_chain_flag_opens_with_its_chains_on() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let glue = crate::model::Fx { path: PathBuf::from("glue.vst3"), index: 0, name: "Glue".into(), bypassed: false, state: Vec::new(), record: false, mix: 1.0 };
+        p.apply(Command::AddFx { track, fx: glue }).unwrap();
+        p.apply(Command::BypassChain { track, bypassed: true }).unwrap();
+        p.apply(Command::BypassMasterChain { bypassed: true }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let older = text.replace(" fxon=0 ", " ").replace("master_fxon 0\n", "").replace("monitor_fxon 1\n", "");
+        assert!(!older.contains("fxon"), "the flags are still in there: {older}");
+        let (old, _) = SavedProject::parse(&older).unwrap().build(&[], 48_000);
+        assert!(old.tracks[0].fx_on, "a song from before must open with its chains on");
+        assert!(old.master_fx_on, "a song from before must open with its master chain on");
+        assert!(old.monitor_fx_on, "a song from before must open with its monitoring chain on");
+    }
+
+    #[test]
     fn master_plugins_survive_a_save_and_open_and_stay_off_the_tracks() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
@@ -1016,6 +1085,14 @@ mod routing_round_trip {
         assert!(back.tracks[0].fx[0].record);
         assert!(back.monitor_fx.iter().all(|fx| fx.name != "Over the whole mix"));
         assert!(back.master_fx.iter().all(|fx| fx.name != "Denoiser"));
+        assert!(back.monitor_fx_on, "the monitoring chain came back switched off");
+
+        p.apply(Command::BypassMonitorChain { bypassed: true }).unwrap();
+        let off = SavedProject::capture(&p, |_| None).to_text();
+        assert!(off.contains("monitor_fxon 0"));
+        let (back, _) = SavedProject::parse(&off).unwrap().build(&[], 48_000);
+        assert!(!back.monitor_fx_on, "the monitoring chain came back on");
+        assert!(back.master_fx_on, "the master chain went off with the monitoring chain");
     }
 
     #[test]

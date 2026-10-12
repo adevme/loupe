@@ -34,10 +34,13 @@ impl Dry {
     }
 
     fn room_for(&mut self, latency: usize, block: usize) {
-        let want = latency + block.max(1);
+        let want = (latency + block.max(1)).max(1);
         if self.held != latency || self.kept.len() < want {
             self.kept.clear();
-            self.kept.resize(want.max(1), [0.0; 2]);
+            if self.kept.capacity() < want {
+                self.kept.reserve(want * crate::blend::ROOM_TO_GROW);
+            }
+            self.kept.resize(want, [0.0; 2]);
             self.spare.clear();
             self.spare.resize(block.max(1), [0.0; 2]);
             self.at = 0;
@@ -197,6 +200,9 @@ pub struct Rack {
     fallen: Vec<Fallen>,
     region: Option<Region>,
     ceiling: Arc<Ceiling>,
+    off: bool,
+    waiting: Dry,
+    waiting_takes: Dry,
     song: Song,
     told: Option<Song>,
     since: i64,
@@ -212,7 +218,21 @@ impl Rack {
     }
 
     pub fn sharing(host: PathBuf, rate: u32, block: usize, ceiling: Arc<Ceiling>) -> Self {
-        Self { host, rate, block, slots: Vec::new(), fallen: Vec::new(), region: None, ceiling, song: Song::default(), told: None, since: 0 }
+        Self {
+            host,
+            rate,
+            block,
+            slots: Vec::new(),
+            fallen: Vec::new(),
+            region: None,
+            ceiling,
+            off: false,
+            waiting: Dry::empty(),
+            waiting_takes: Dry::empty(),
+            song: Song::default(),
+            told: None,
+            since: 0,
+        }
     }
 
     pub fn told_the_time(&mut self, song: Song) {
@@ -435,6 +455,20 @@ impl Rack {
         }
     }
 
+    pub fn bypass_chain(&mut self, bypassed: bool) {
+        if self.off == bypassed {
+            return;
+        }
+        self.off = bypassed;
+        for slot in self.slots.iter_mut() {
+            slot.quiet_for = 0;
+        }
+    }
+
+    pub fn chain_bypassed(&self) -> bool {
+        self.off
+    }
+
     pub fn dozing(&self) -> usize {
         self.slots.iter().filter(|slot| slot.dozing(self.rate)).count()
     }
@@ -627,10 +661,22 @@ impl Rack {
         troubles
     }
 
+    fn hold_the_line(&mut self, audio: &mut [[f32; 2]], takes: bool) {
+        let keeping = if takes { self.takes_latency() } else { self.latency() };
+        let held = if takes { &mut self.waiting_takes } else { &mut self.waiting };
+        held.room_for(keeping, audio.len());
+        held.remember(audio);
+        held.blend(audio, 0.0);
+    }
+
     fn run(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], takes: bool, at: Option<i64>) {
         self.take_arrivals();
         self.pass_the_time_on(audio.len());
         let block = audio.len();
+        if self.off {
+            self.hold_the_line(audio, takes);
+            return;
+        }
         let rate = self.rate;
         for (which, slot) in self.slots.iter_mut().enumerate() {
             if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
@@ -792,7 +838,25 @@ impl Rack {
         }
     }
 
+    fn take_what_moved(&mut self) {
+        let block = self.block;
+        for slot in self.slots.iter_mut() {
+            let mut now = None;
+            if let Some(host) = slot.host.as_ref() {
+                while let Some((_, frames)) = host.latency_moved() {
+                    now = Some(frames);
+                }
+            }
+            let Some(frames) = now.filter(|frames| *frames != slot.latency) else { continue };
+            slot.latency = frames;
+            if slot.mix < 1.0 {
+                slot.dry.room_for(frames, block);
+            }
+        }
+    }
+
     fn take_arrivals(&mut self) {
+        self.take_what_moved();
         for (at, slot) in self.slots.iter_mut().enumerate() {
             let Some(waiting) = slot.coming.as_ref() else { continue };
             match waiting.try_recv() {
@@ -1158,6 +1222,100 @@ mod dozing_tests {
         assert!(came_in >= latency, "the limiter's own delay went missing: {came_in} < {latency}");
     }
 
+    fn a_click(frames: usize, at: usize) -> Vec<[f32; 2]> {
+        let mut song = vec![[0.0f32; 2]; frames];
+        song[at] = [1.0, 1.0];
+        song
+    }
+
+    #[test]
+    fn a_chain_that_is_off_hands_the_sound_straight_back() {
+        let song = tone(BLOCK * 4, 0);
+        let mut off = rack_of(&[COMPRESSOR, SATURATION]);
+        off.bypass_chain(true);
+        let through = render(&mut off, &song);
+        assert_eq!(through, song, "a chain that is off changed the sound");
+        let mut on = rack_of(&[COMPRESSOR, SATURATION]);
+        let worked = render(&mut on, &song);
+        assert_ne!(worked, song, "the chain does nothing even when it is on, so this proves nothing");
+    }
+
+    #[test]
+    fn a_chain_that_is_off_still_delays_by_what_it_did() {
+        let mut working = rack_of(&[LIMITER]);
+        let latency = working.latency();
+        assert!(latency > 0, "the limiter reported no latency");
+        let song = a_click(BLOCK * 8, BLOCK);
+        let heard = render(&mut working, &song);
+        let on_time = first_loud_frame(&heard).expect("the click came through");
+        let mut off = rack_of(&[LIMITER]);
+        off.bypass_chain(true);
+        assert_eq!(off.latency(), latency, "a chain that is off stopped reporting its latency");
+        let held = render(&mut off, &song);
+        let late = first_loud_frame(&held).expect("the click came through the chain that is off");
+        assert_eq!(late, on_time, "turning the chain off moved the click by {} frames", late as i64 - on_time as i64);
+        assert_eq!(late, BLOCK + latency, "the click did not arrive where the chain's latency puts it");
+        assert_eq!(held[late], [1.0, 1.0], "the click came out of a chain that is off changed");
+    }
+
+    #[test]
+    fn a_chain_that_is_off_holds_the_delay_of_its_recording_plugins() {
+        let want = vec![Wanted {
+            mix: 1.0,
+            path: PathBuf::from(crate::BUILT_IN),
+            index: LIMITER,
+            name: loupe_stock::NAMES[LIMITER].into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: true,
+        }];
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), RATE, BLOCK);
+        assert!(rack.reconcile(&want).is_empty());
+        let latency = rack.takes_latency();
+        assert!(latency > 0, "the limiter reported no latency on the Rec chain");
+        rack.bypass_chain(true);
+        assert_eq!(rack.takes_latency(), latency);
+        let song = a_click(BLOCK * 8, BLOCK);
+        let mut out = Vec::with_capacity(song.len());
+        for mut block in blocks_of(&song) {
+            rack.process_takes(&mut block);
+            out.extend_from_slice(&block);
+        }
+        assert_eq!(first_loud_frame(&out), Some(BLOCK + latency), "the take moved when the chain went off");
+    }
+
+    #[test]
+    fn turning_a_chain_off_and_on_leaves_every_slot_as_it_was() {
+        let mut rack = rack_of(&[COMPRESSOR, LIMITER, SATURATION]);
+        rack.bypass(1, true);
+        let before: Vec<bool> = rack.slots().iter().map(|slot| slot.bypassed).collect();
+        let settings: Vec<Option<Vec<u8>>> = (0..rack.len()).map(|slot| rack.save(slot)).collect();
+        rack.bypass_chain(true);
+        assert!(rack.chain_bypassed());
+        let while_off: Vec<bool> = rack.slots().iter().map(|slot| slot.bypassed).collect();
+        assert_eq!(while_off, before, "turning the chain off changed the slots underneath");
+        rack.bypass_chain(false);
+        assert!(!rack.chain_bypassed());
+        let after: Vec<bool> = rack.slots().iter().map(|slot| slot.bypassed).collect();
+        assert_eq!(after, before, "the slots did not come back as they were");
+        assert_eq!(before, vec![false, true, false]);
+        let back: Vec<Option<Vec<u8>>> = (0..rack.len()).map(|slot| rack.save(slot)).collect();
+        assert_eq!(back, settings, "a plugin lost its settings while the chain was off");
+    }
+
+    #[test]
+    fn a_chain_that_is_off_leaves_out_a_slot_that_failed_to_open() {
+        let mut rack = rack_of(&[LIMITER]);
+        let latency = rack.latency();
+        rack.add(Path::new("/nowhere/Missing.vst3"), 0, "Missing").expect_err("it cannot open");
+        assert_eq!(rack.latency(), latency, "a plugin that would not open counted towards the latency");
+        rack.bypass_chain(true);
+        assert_eq!(rack.latency(), latency, "the chain reported a different latency once it was off");
+        let song = a_click(BLOCK * 8, BLOCK);
+        let held = render(&mut rack, &song);
+        assert_eq!(first_loud_frame(&held), Some(BLOCK + latency));
+    }
+
     #[test]
     fn a_plugin_that_shows_the_signal_is_left_awake() {
         let watching = rack_of(&[METER]);
@@ -1416,6 +1574,69 @@ mod fallen_tests {
         assert_eq!(rack.slots().iter().filter(|slot| slot.working()).count(), 16, "all of them get there in the end");
     }
 
+    fn moving_to(frames: usize) -> String {
+        format!(
+            "read ask\nprintf 'loaded\\t2\\t2\\t64\\t0\\n'\nwhile read ask; do\n  head -c 517 > /dev/null\n  printf 'latencymoved\\t0\\t{frames}\\n'\n  printf 'B\\000\\000\\000\\000'\ndone\n"
+        )
+    }
+
+    fn settled(script: &Path, block: usize) -> Rack {
+        let mut rack = Rack::new(script.to_path_buf(), 48_000, block);
+        assert!(rack.reconcile(&[wanted("Oversampler")]).is_empty());
+        let gave_up = std::time::Instant::now();
+        while rack.slots().iter().any(|slot| slot.on_its_way()) {
+            assert!(gave_up.elapsed() < std::time::Duration::from_secs(10), "the plugin never loaded");
+            rack.ready();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        rack
+    }
+
+    #[test]
+    fn a_plugin_that_moves_its_latency_is_followed() {
+        let script = host("moving", &moving_to(1_024));
+        let mut rack = settled(&script.0, 64);
+        assert_eq!(rack.latency(), 64, "it loaded saying 64");
+        let mut audio = vec![[0.25; 2]; 64];
+        rack.process(&mut audio);
+        assert_eq!(rack.latency(), 64, "the word only arrives with the block");
+        let mut audio = vec![[0.25; 2]; 64];
+        rack.process(&mut audio);
+        assert_eq!(rack.latency(), 1_024, "the chain now waits as long as the plugin does");
+        assert_eq!(rack.slots()[0].latency, 1_024);
+        assert!(rack.slots()[0].trouble.is_none());
+    }
+
+    #[test]
+    fn a_plugin_that_says_the_same_latency_again_changes_nothing() {
+        let script = host("standing", &moving_to(64));
+        let mut rack = settled(&script.0, 64);
+        rack.slots[0].mix = 0.5;
+        let mut audio = vec![[0.25; 2]; 64];
+        rack.process(&mut audio);
+        let room = rack.slots[0].dry.kept.capacity();
+        for _ in 0..4 {
+            let mut audio = vec![[0.25; 2]; 64];
+            rack.process(&mut audio);
+            assert_eq!(rack.latency(), 64);
+            assert_eq!(rack.slots[0].dry.kept.capacity(), room, "the same figure rebuilt the dry line");
+        }
+    }
+
+    #[test]
+    fn a_plugin_that_moves_its_latency_moves_the_blend_with_it() {
+        let script = host("blending", &moving_to(1_024));
+        let mut rack = settled(&script.0, 64);
+        rack.slots[0].mix = 0.5;
+        let mut audio = vec![[0.25; 2]; 64];
+        rack.process(&mut audio);
+        let room = rack.slots[0].dry.kept.capacity();
+        let mut audio = vec![[0.25; 2]; 64];
+        rack.process(&mut audio);
+        assert_eq!(rack.slots[0].dry.held, 1_024, "the dry line waits the new amount");
+        assert_eq!(rack.slots[0].dry.kept.capacity(), room, "following the plugin went looking for memory");
+    }
+
     #[test]
     fn a_plugin_that_is_late_with_one_block_keeps_playing() {
         let script = host(
@@ -1485,6 +1706,73 @@ mod blending {
         dry.remember(&second);
         dry.blend(&mut wet, 0.0);
         assert_eq!(wet, first, "the dry arrives as late as the plugin does");
+    }
+
+    fn impulse_through(waited: &[usize], told: &[usize], mix: f32, block: usize, at: usize, frames: usize) -> Vec<(usize, f32)> {
+        let mut dry = Dry::empty();
+        let song: Vec<[f32; 2]> = (0..frames).map(|frame| if frame == at { [1.0, 1.0] } else { [0.0, 0.0] }).collect();
+        let mut out = Vec::new();
+        for (which, lot) in song.chunks(block).enumerate() {
+            let latency = waited[which.min(waited.len() - 1)];
+            dry.room_for(told[which.min(told.len() - 1)], block);
+            dry.remember(lot);
+            let mut wet: Vec<[f32; 2]> = (0..lot.len())
+                .map(|frame| {
+                    let came_in = which * block + frame;
+                    match came_in >= latency && came_in - latency == at {
+                        true => [1.0, 1.0],
+                        false => [0.0, 0.0],
+                    }
+                })
+                .collect();
+            dry.blend(&mut wet, mix);
+            for (frame, heard) in wet.iter().enumerate() {
+                if heard[0].abs() > 0.001 {
+                    out.push((which * block + frame, heard[0]));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_dry_that_hears_the_new_latency_meets_the_wet_as_one() {
+        let heard = impulse_through(&[4, 4, 8], &[4, 4, 8], 0.5, 4, 20, 48);
+        assert_eq!(heard, vec![(28, 1.0)], "the impulse came through more than once: {heard:?}");
+    }
+
+    #[test]
+    fn a_dry_left_on_the_old_latency_doubles_the_impulse() {
+        let heard = impulse_through(&[4, 4, 8], &[4], 0.5, 4, 20, 48);
+        assert_eq!(heard.len(), 2, "the old figure should have split the impulse: {heard:?}");
+        assert_eq!(heard.iter().map(|(at, _)| *at).collect::<Vec<_>>(), vec![24, 28]);
+    }
+
+    #[test]
+    fn a_dry_that_moves_its_latency_does_not_go_looking_for_memory() {
+        let block = 512;
+        let mut dry = Dry::empty();
+        dry.room_for(64, block);
+        let room = dry.kept.capacity();
+        let spare = dry.spare.capacity();
+        for latency in [128, 1_024, 2_048, 4_096, 8_192, 64] {
+            dry.room_for(latency, block);
+            assert_eq!(dry.kept.capacity(), room, "moving to {latency} went looking for memory");
+            assert_eq!(dry.spare.capacity(), spare, "moving to {latency} moved the block buffer");
+            assert_eq!(dry.held, latency);
+        }
+    }
+
+    #[test]
+    fn the_same_latency_again_leaves_the_dry_untouched() {
+        let block = 64;
+        let mut dry = line(96, block);
+        dry.remember(&[[0.5, 0.5]; 64]);
+        let mut wet = vec![[0.0, 0.0]; block];
+        dry.blend(&mut wet, 0.5);
+        let was = (dry.at, dry.held, dry.kept.len(), dry.kept.capacity());
+        dry.room_for(96, block);
+        assert_eq!((dry.at, dry.held, dry.kept.len(), dry.kept.capacity()), was, "asking for the same latency rebuilt the line");
     }
 }
 

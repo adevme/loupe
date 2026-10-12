@@ -40,6 +40,7 @@ impl Drop for Anchor {
 #[cfg(windows)]
 mod windows {
     #[repr(C)]
+    #[derive(Clone, Copy)]
     pub struct Point {
         x: i32,
         y: i32,
@@ -62,22 +63,47 @@ mod windows {
         unsafe { SetCursorPos(point.x, point.y) != 0 }
     }
 
+    const WHOLE_WINDOW: u32 = 2;
+    const DPI_AT_NO_SCALING: f64 = 96.0;
+
     #[link(name = "user32")]
     extern "system" {
-        fn GetForegroundWindow() -> *mut core::ffi::c_void;
         fn ScreenToClient(window: *mut core::ffi::c_void, point: *mut Point) -> i32;
+        fn WindowFromPoint(point: Point) -> *mut core::ffi::c_void;
+        fn GetAncestor(window: *mut core::ffi::c_void, what: u32) -> *mut core::ffi::c_void;
+        fn GetWindowThreadProcessId(window: *mut core::ffi::c_void, process: *mut u32) -> u32;
+        fn GetDpiForWindow(window: *mut core::ffi::c_void) -> u32;
     }
 
-    pub fn in_window() -> Option<(f32, f32)> {
-        let mut point = Point { x: 0, y: 0 };
-        if unsafe { GetCursorPos(&mut point) } == 0 {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcessId() -> u32;
+    }
+
+    fn ours_under(point: Point) -> Option<*mut core::ffi::c_void> {
+        let found = unsafe { WindowFromPoint(point) };
+        if found.is_null() {
             return None;
         }
-        let window = unsafe { GetForegroundWindow() };
-        if window.is_null() || unsafe { ScreenToClient(window, &mut point) } == 0 {
+        let root = unsafe { GetAncestor(found, WHOLE_WINDOW) };
+        let window = if root.is_null() { found } else { root };
+        let mut process = 0u32;
+        unsafe { GetWindowThreadProcessId(window, &mut process) };
+        (process != 0 && process == unsafe { GetCurrentProcessId() }).then_some(window)
+    }
+
+    pub fn in_window(interface_scale: f64) -> Option<super::Point> {
+        let mut point = position()?;
+        let window = ours_under(point)?;
+        if unsafe { ScreenToClient(window, &mut point) } == 0 {
             return None;
         }
-        Some((point.x as f32, point.y as f32))
+        let dpi = unsafe { GetDpiForWindow(window) };
+        let display_scale = match dpi {
+            0 => 1.0,
+            found => found as f64 / DPI_AT_NO_SCALING,
+        };
+        super::in_points(point.x as f32, point.y as f32, display_scale, interface_scale)
     }
 
     pub fn show(visible: bool) {
@@ -120,12 +146,48 @@ impl EndlessDrag {
     }
 }
 
+#[cfg(any(windows, test))]
+pub fn in_points(x: f32, y: f32, display_scale: f64, interface_scale: f64) -> Option<Point> {
+    let pixels_per_point = display_scale * interface_scale;
+    if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+        return None;
+    }
+    Some(Point::new((x as f64 / pixels_per_point) as f32, (y as f64 / pixels_per_point) as f32))
+}
+
 #[cfg(windows)]
-pub fn where_it_is_now() -> Option<Point> {
-    windows::in_window().map(|(x, y)| Point::new(x, y))
+pub fn where_it_is_now(interface_scale: f64) -> Option<Point> {
+    windows::in_window(interface_scale)
 }
 
 #[cfg(not(windows))]
-pub fn where_it_is_now() -> Option<Point> {
+pub fn where_it_is_now(_interface_scale: f64) -> Option<Point> {
     None
+}
+
+#[cfg(test)]
+mod points {
+    use super::*;
+
+    #[test]
+    fn a_point_on_a_plain_display_comes_back_unchanged() {
+        assert_eq!(in_points(240.0, 180.0, 1.0, 1.0), Some(Point::new(240.0, 180.0)));
+    }
+
+    #[test]
+    fn a_point_on_a_doubled_display_halves() {
+        assert_eq!(in_points(240.0, 180.0, 2.0, 1.0), Some(Point::new(120.0, 90.0)));
+    }
+
+    #[test]
+    fn the_interface_scale_counts_on_top_of_the_display() {
+        assert_eq!(in_points(500.0, 250.0, 2.5, 2.0), Some(Point::new(100.0, 50.0)));
+    }
+
+    #[test]
+    fn a_scale_of_nothing_gives_no_point_rather_than_infinity() {
+        assert_eq!(in_points(240.0, 180.0, 0.0, 1.0), None);
+        assert_eq!(in_points(240.0, 180.0, 2.0, 0.0), None);
+        assert_eq!(in_points(240.0, 180.0, f64::NAN, 1.0), None);
+    }
 }

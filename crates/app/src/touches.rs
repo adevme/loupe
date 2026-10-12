@@ -81,6 +81,9 @@ pub fn edits(racks: &mut dyn Chains, project: &Project, spots: &[Touched]) -> Ve
 
 impl App {
     pub(crate) fn look_for_touches(&mut self) {
+        if self.engine.is_playing() {
+            return;
+        }
         let Some(mut racks) = self.borrow_racks() else { return };
         let found = racks.plugins_touched();
         self.racks.keep(racks);
@@ -95,6 +98,9 @@ impl App {
     }
 
     pub(crate) fn keep_plugin_edits(&mut self) {
+        if self.engine.is_playing() {
+            return;
+        }
         let spots = self.touches.take();
         if spots.is_empty() {
             return;
@@ -367,6 +373,21 @@ mod running_tests {
         assert_eq!(state_on(&app, track), vec![0xaa]);
         go_quiet(&mut app);
         assert_eq!(app.undo.len(), 1, "a second quiet look left another step");
+    }
+
+    #[test]
+    fn a_playing_song_keeps_its_plugins_on_the_audio_thread() {
+        let fake = a_plugin_with_a_knob("while-playing", &[0x44]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        app.engine.play();
+        fake.turned_to(&[0x55]);
+        go_quiet(&mut app);
+        assert!(app.undo.is_empty(), "the plugins were taken off the audio thread while the song played");
+        assert!(state_on(&app, track).is_empty(), "the plugins were asked to save while the song played");
+        app.engine.stop();
+        go_quiet(&mut app);
+        assert_eq!(app.undo.len(), 1, "the edit was never kept once the song stopped");
+        assert_eq!(state_on(&app, track), vec![0x55]);
     }
 
     #[test]
