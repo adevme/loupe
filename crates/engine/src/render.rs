@@ -1691,6 +1691,27 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_that_moves_its_latency_has_the_graph_worked_out_again() {
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        let plain = track(&mut p);
+        clip(&mut p, one, counting(600), 100);
+        clip(&mut p, plain, counting(600), 100);
+        fx(&mut p, one);
+        let mut racks = Lookahead::with(&[(one, 64)]);
+        let mut scratch = Mixdown::default();
+        let mut out = vec![[0.0; 2]; 64];
+        mix_tracks_metered(&p, 0, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(scratch.lags, vec![64, 0]);
+        assert!(scratch.same_shape(&p, Some(&racks)), "nothing moved, so nothing should be worked out again");
+        racks.lags = vec![(one, 1_024)];
+        assert!(!scratch.same_shape(&p, Some(&racks)), "the graph did not notice the plugin moved");
+        mix_tracks_metered(&p, 64, &mut out, None, None, &mut scratch, Some(&mut racks));
+        assert_eq!(scratch.lags, vec![1_024, 0], "the graph kept the old figure");
+        assert_eq!(scratch.ahead, vec![1_024, 0], "the track with the plugin is not read ahead by its new figure");
+    }
+
+    #[test]
     fn a_sidechain_send_reaches_the_plugin_on_the_frame_it_is_ducking() {
         let mut p = Project::new(48_000);
         let beat = track(&mut p);

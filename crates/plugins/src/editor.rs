@@ -36,15 +36,24 @@ impl vst3::Steinberg::IPlugFrameTrait for Frame {
 pub struct Quiet {
     turns: std::cell::RefCell<Option<vst3::ComWrapper<crate::changes::Turns>>>,
     touched: std::cell::Cell<bool>,
+    latency_moved: std::cell::Cell<bool>,
 }
 
 impl Quiet {
     pub fn new() -> Self {
-        Self { turns: std::cell::RefCell::new(None), touched: std::cell::Cell::new(false) }
+        Self {
+            turns: std::cell::RefCell::new(None),
+            touched: std::cell::Cell::new(false),
+            latency_moved: std::cell::Cell::new(false),
+        }
     }
 
     pub fn was_touched(&self) -> bool {
         self.touched.replace(false)
+    }
+
+    pub fn latency_moved(&self) -> bool {
+        self.latency_moved.replace(false)
     }
 
     pub fn passes_edits_to(&self, turns: vst3::ComWrapper<crate::changes::Turns>) {
@@ -79,7 +88,10 @@ impl IComponentHandlerTrait for Quiet {
         kResultOk
     }
 
-    unsafe fn restartComponent(&self, _flags: i32) -> i32 {
+    unsafe fn restartComponent(&self, flags: i32) -> i32 {
+        if flags & vst3::Steinberg::Vst::RestartFlags_::kLatencyChanged != 0 {
+            self.latency_moved.set(true);
+        }
         kResultOk
     }
 }
@@ -164,6 +176,10 @@ impl Editor {
 
     pub fn was_touched(&self) -> bool {
         self._handler.was_touched()
+    }
+
+    pub fn latency_moved(&self) -> bool {
+        self._handler.latency_moved()
     }
 
     pub fn told_its_track(&self, name: &str, index: i64) -> bool {
