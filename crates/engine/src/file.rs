@@ -1438,25 +1438,22 @@ mod opening_a_big_song {
         (project, sources)
     }
 
-    fn quickest_read_back(tracks: usize, clips_per_track: usize) -> std::time::Duration {
+    fn looks_to_read_back(tracks: usize, clips_per_track: usize) -> usize {
         let (project, sources) = a_song_of(tracks, clips_per_track);
         let text = SavedProject::capture(&project, |_| None).to_text();
-        let mut quickest = std::time::Duration::MAX;
-        for _ in 0..3 {
-            let started = std::time::Instant::now();
-            let saved = SavedProject::parse(&text).expect("it reads back");
-            let (back, _) = saved.build(&sources, 48_000);
-            quickest = quickest.min(started.elapsed());
-            assert_eq!(back.tracks.len(), tracks);
-        }
-        quickest
+        let saved = SavedProject::parse(&text).expect("it reads back");
+        crate::model::scans::from_now();
+        let (back, _) = saved.build(&sources, 48_000);
+        let looked_at = crate::model::scans::looked_at_so_far();
+        assert_eq!(back.tracks.len(), tracks);
+        looked_at
     }
 
     #[test]
     fn three_times_the_song_does_not_take_nine_times_as_long_to_open() {
-        let small = quickest_read_back(200, 3);
-        let large = quickest_read_back(600, 3);
-        let grew = large.as_secs_f64() / small.as_secs_f64().max(f64::EPSILON);
-        assert!(grew < 4.5, "three times the song took {grew:.1} times as long to open ({small:?} then {large:?})");
+        let small = looks_to_read_back(200, 3);
+        let large = looks_to_read_back(600, 3);
+        let grew = large as f64 / small.max(1) as f64;
+        assert!(grew < 4.5, "three times the song looked through {grew:.1} times as many tracks and clips to open ({small} then {large})");
     }
 }

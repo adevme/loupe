@@ -440,15 +440,24 @@ impl Project {
     }
 
     pub fn clip(&self, id: ClipId) -> Option<&Clip> {
-        self.clips().find(|c| c.id == id)
+        let mut looked = 0;
+        let found = self.clips().inspect(|_| looked += 1).find(|c| c.id == id);
+        looked_at(looked);
+        found
     }
 
     pub fn track(&self, id: TrackId) -> Option<&Track> {
-        self.tracks.iter().find(|t| t.id == id)
+        let mut looked = 0;
+        let found = self.tracks.iter().inspect(|_| looked += 1).find(|t| t.id == id);
+        looked_at(looked);
+        found
     }
 
     pub fn track_of(&self, clip: ClipId) -> Option<&Track> {
-        self.tracks.iter().find(|t| t.clips.iter().any(|c| c.id == clip))
+        let mut looked = 0;
+        let found = self.tracks.iter().find(|t| t.clips.iter().inspect(|_| looked += 1).any(|c| c.id == clip));
+        looked_at(looked);
+        found
     }
 
     pub fn apply(&mut self, command: Command) -> Result<Outcome, CommandError> {
@@ -1213,15 +1222,29 @@ impl Project {
     }
 
     fn track_index(&self, id: TrackId) -> Result<usize, CommandError> {
-        self.tracks.iter().rposition(|t| t.id == id).ok_or(CommandError::NoSuchTrack)
+        let mut looked = 0;
+        let found = self.tracks.iter().rposition(|t| {
+            looked += 1;
+            t.id == id
+        });
+        looked_at(looked);
+        found.ok_or(CommandError::NoSuchTrack)
     }
 
     fn locate(&self, id: ClipId) -> Result<(usize, usize), CommandError> {
+        let mut looked = 0;
         for (t, track) in self.tracks.iter().enumerate().rev() {
-            if let Some(i) = track.clips.iter().rposition(|c| c.id == id) {
+            looked += 1;
+            let hit = track.clips.iter().rposition(|c| {
+                looked += 1;
+                c.id == id
+            });
+            if let Some(i) = hit {
+                looked_at(looked);
                 return Ok((t, i));
             }
         }
+        looked_at(looked);
         Err(CommandError::NoSuchClip)
     }
 }
@@ -1406,6 +1429,35 @@ fn valid_mix(mix: f32) -> Result<f32, CommandError> {
     }
     Ok(mix)
 }
+
+#[cfg(test)]
+pub(crate) mod scans {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LOOKED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn from_now() {
+        LOOKED.set(0);
+    }
+
+    pub(crate) fn looked_at_so_far() -> usize {
+        LOOKED.get()
+    }
+
+    pub(super) fn add(many: usize) {
+        LOOKED.set(LOOKED.get() + many);
+    }
+}
+
+#[cfg(test)]
+fn looked_at(many: usize) {
+    scans::add(many);
+}
+
+#[cfg(not(test))]
+fn looked_at(_many: usize) {}
 
 #[cfg(test)]
 mod moving_tracks {
