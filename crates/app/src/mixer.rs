@@ -8,7 +8,7 @@ use crate::{upright_rule, App, Message};
 
 pub const MIXER_HEIGHT: f32 = 236.0;
 pub const SHORTEST_MIXER: f32 = 150.0;
-const MIXER_WINDOW: iced::Size = iced::Size::new(1000.0, 360.0);
+pub const MIXER_WINDOW: iced::Size = iced::Size::new(1000.0, 360.0);
 const SHORTEST_MIXER_WINDOW: f32 = 420.0;
 const GRAB_BAR: f32 = 6.0;
 const MENU_INSET: f32 = 12.0;

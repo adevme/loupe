@@ -207,7 +207,6 @@ pub enum Message {
     StartRenameFx(stockwin::Spot, usize),
     MixerNameClicked(TrackId),
     PointerAt(window::Id, Point),
-    OpenChainInMixer(stockwin::Spot),
     RenameTrackAt { track: TrackId, at: Point },
     StartColour(TrackId),
     EntryTyped(String),
@@ -223,6 +222,7 @@ pub enum Message {
     DroppedOn(window::Id, PathBuf),
     ResizedTo(window::Id, Size),
     WindowClosed(window::Id),
+    WindowFocused(window::Id),
     MixerGrabbed,
     MixerDragged(f32),
     MixerReleased,
@@ -489,7 +489,6 @@ pub enum Overlay {
     ClipPlugins(ClipId),
     Knobs(stockwin::Spot, usize),
     RenameFx(stockwin::Spot, usize),
-    RenameInMixer(TrackId),
     Automation(loupe_engine::Target),
     MasterPlugins,
     MonitorPlugins,
@@ -617,6 +616,7 @@ struct App {
     pending_scale: f64,
     scale_text: String,
     overlay: Overlay,
+    overlay_window: window::Id,
     overlay_since: Option<Instant>,
     settings_tab: SettingsTab,
     entry: String,
@@ -625,13 +625,14 @@ struct App {
     pixels_per_point: f32,
     canvas_at: std::cell::Cell<Rectangle>,
     aim: Option<Aim>,
-    chain_from_mixer: bool,
     chain_drag: Option<(stockwin::Spot, usize)>,
     name_clicked: Option<(TrackId, std::time::Instant)>,
     chain_over: Option<(stockwin::Spot, usize)>,
     entry_problem: Option<String>,
     main_window: window::Id,
+    focused: window::Id,
     mixer_window: Option<window::Id>,
+    mixer_size: Size,
     mixer_open: bool,
     mixer_wants_alone: bool,
     mixer_drag: Option<usize>,
@@ -765,6 +766,7 @@ impl App {
             pending_scale: scale,
             scale_text: format_scale(scale),
             overlay: Overlay::None,
+            overlay_window: main,
             overlay_since: None,
             settings_tab: SettingsTab::default(),
             entry: String::new(),
@@ -775,11 +777,12 @@ impl App {
             pixels_per_point: 1.0,
             canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
             aim: None,
-            chain_from_mixer: false,
             chain_over: None,
             entry_problem: None,
             main_window: main,
+            focused: main,
             mixer_window: None,
+            mixer_size: mixer::MIXER_WINDOW,
             mixer_open: settings.mixer_open,
             mixer_wants_alone: settings.mixer_alone,
             mixer_drag: None,
@@ -912,6 +915,7 @@ impl App {
         let mut engine = Engine::start(Output::Silent);
         let project = Project::new(engine.rate());
         engine.set_project(&project);
+        let main = window::Id::unique();
         Self {
             palette: theme::NEUTRAL,
             heights: HashMap::new(),
@@ -966,6 +970,7 @@ impl App {
             pending_scale: 1.0,
             scale_text: format_scale(1.0),
             overlay: Overlay::None,
+            overlay_window: main,
             overlay_since: None,
             settings_tab: SettingsTab::default(),
             entry: String::new(),
@@ -976,11 +981,12 @@ impl App {
             pixels_per_point: 1.0,
             canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
             aim: None,
-            chain_from_mixer: false,
             chain_over: None,
             entry_problem: None,
-            main_window: window::Id::unique(),
+            main_window: main,
+            focused: main,
             mixer_window: None,
+            mixer_size: mixer::MIXER_WINDOW,
             mixer_open: false,
             mixer_wants_alone: false,
             mixer_drag: None,
@@ -1073,12 +1079,47 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        let was = std::mem::discriminant(&self.overlay);
+        let before = self.overlay.clone();
         let task = self.with_overlay_time(message);
-        if std::mem::discriminant(&self.overlay) != was {
+        if std::mem::discriminant(&self.overlay) != std::mem::discriminant(&before) {
             self.overlay_since = matches!(self.overlay, Overlay::None).then_some(None).unwrap_or(Some(Instant::now()));
         }
+        if self.overlay != before {
+            self.overlay_window = match self.overlay {
+                Overlay::None => self.main_window,
+                _ => self.opens_in_front(),
+            };
+        }
+        if !self.a_window_of_ours(self.overlay_window) {
+            self.overlay_window = self.main_window;
+            if self.overlay.is_a_menu() {
+                self.overlay = Overlay::None;
+                self.overlay_since = None;
+            }
+        }
         task
+    }
+
+    fn opens_in_front(&self) -> window::Id {
+        match self.a_window_of_ours(self.focused) {
+            true => self.focused,
+            false => self.main_window,
+        }
+    }
+
+    fn a_window_of_ours(&self, window: window::Id) -> bool {
+        window == self.main_window || self.mixer_window == Some(window)
+    }
+
+    pub(crate) fn overlay_is_in(&self, window: window::Id) -> bool {
+        self.overlay_window == window
+    }
+
+    pub(crate) fn room_for_the_overlay(&self) -> Size {
+        match self.mixer_window == Some(self.overlay_window) {
+            true => self.mixer_size,
+            false => self.window,
+        }
     }
 
     fn with_overlay_time(&mut self, message: Message) -> Task<Message> {
@@ -1250,6 +1291,7 @@ impl App {
             Message::KeyFileHeard(name, result) => self.key_file_heard(name, result),
             Message::DroppedOn(window, path) if window == self.main_window => return self.update(Message::Dropped(path)),
             Message::ResizedTo(window, size) if window == self.main_window => return self.update(Message::Resized(size)),
+            Message::ResizedTo(window, size) if self.mixer_window == Some(window) => self.mixer_size = size,
             Message::DroppedOn(..) | Message::ResizedTo(..) => {}
             Message::Dropped(path) => {
                 if self.key_wants_file() {
@@ -1607,14 +1649,7 @@ impl App {
                     return self.update(Message::CloseOverlay);
                 }
             }
-            Message::OpenChain(spot) => {
-                self.chain_from_mixer = false;
-                self.overlay = Overlay::Chain(spot);
-            }
-            Message::OpenChainInMixer(spot) => {
-                self.chain_from_mixer = self.mixer_window.is_some();
-                self.overlay = Overlay::Chain(spot);
-            }
+            Message::OpenChain(spot) => self.overlay = Overlay::Chain(spot),
             Message::SetFxMix(spot, slot, mix) => self.set_fx_mix(spot, slot, mix),
             Message::ChainGrab(spot, slot) => {
                 self.chain_drag = Some((spot, slot));
@@ -1662,7 +1697,7 @@ impl App {
                 if again {
                     if let Some(found) = self.project.track(track) {
                         self.entry = found.name.clone();
-                        self.overlay = Overlay::RenameInMixer(track);
+                        self.overlay = Overlay::Rename { track, at: Point::ORIGIN };
                         return Task::batch([text_input::focus(menus::ENTRY_ID), text_input::select_all(menus::ENTRY_ID)]);
                     }
                 }
@@ -1702,11 +1737,6 @@ impl App {
             }
             Message::EntryEntered => match self.overlay.clone() {
                 Overlay::Rename { track, .. } => {
-                    let name = self.entry.clone();
-                    self.edit(None, Command::RenameTrack { track, name });
-                    self.overlay = Overlay::None;
-                }
-                Overlay::RenameInMixer(track) => {
                     let name = self.entry.clone();
                     self.edit(None, Command::RenameTrack { track, name });
                     self.overlay = Overlay::None;
@@ -1779,7 +1809,14 @@ impl App {
             }
             Message::MixerWindowOpened(window) => {
                 self.mixer_window = Some(window);
+                self.mixer_size = mixer::MIXER_WINDOW;
+                self.focused = window;
                 let _ = settings::save("mixer_alone", "yes");
+            }
+            Message::WindowFocused(window) => {
+                if self.a_window_of_ours(window) {
+                    self.focused = window;
+                }
             }
             Message::WindowClosed(window) => {
                 match closing::window_closed(window, self.main_window, self.mixer_window, self.going) {
@@ -2644,6 +2681,7 @@ impl App {
             iced::Event::Window(window::Event::FileDropped(path)) => Some(Message::DroppedOn(from, path)),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::ResizedTo(from, size)),
             iced::Event::Window(window::Event::CloseRequested | window::Event::Closed) => Some(Message::WindowClosed(from)),
+            iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocused(from)),
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(Message::ModifiersChanged(modifiers)),
             _ => None,
         });
@@ -3296,10 +3334,9 @@ impl App {
         if self.mixer_window != Some(window) {
             return self.view();
         }
-        match &self.overlay {
-            Overlay::RenameInMixer(_) => stack![self.mixer_alone(), self.centred(self.rename_sheet())].into(),
-            Overlay::Chain(spot) if self.chain_from_mixer => stack![self.mixer_alone(), self.centred(self.chain_sheet(*spot))].into(),
-            _ => self.mixer_alone(),
+        match self.overlay_is_in(window) {
+            true => stack![self.mixer_alone(), self.overlay()].into(),
+            false => self.mixer_alone(),
         }
     }
 
@@ -3378,8 +3415,12 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let overlay = match self.overlay_is_in(self.main_window) {
+            true => self.overlay(),
+            false => Space::new(0, 0).into(),
+        };
         if self.screen == Screen::Home {
-            return stack![self.home(), self.overlay(), self.opening_layer()].into();
+            return stack![self.home(), overlay, self.opening_layer()].into();
         }
         let timeline = canvas(Timeline {
             knobs: &self.knob_names,
@@ -4106,5 +4147,196 @@ mod bar_tests {
         assert!(milliseconds_of(480, 0).is_finite(), "a sample rate of nothing must not divide by zero");
         let app = App::bare();
         assert_eq!(app.monitor_lag(), None, "a lag was shown with nothing armed");
+    }
+}
+
+#[cfg(test)]
+mod overlay_window_tests {
+    use super::*;
+
+    fn torn_off() -> (App, window::Id, window::Id) {
+        let mut app = App::bare();
+        let main = app.main_window;
+        let mixer = window::Id::unique();
+        app.mixer_open = true;
+        app.mixer_wants_alone = true;
+        app.mixer_window = Some(mixer);
+        app.mixer_size = mixer::MIXER_WINDOW;
+        app.focused = mixer;
+        (app, main, mixer)
+    }
+
+    fn a_track(app: &mut App, name: &str) -> TrackId {
+        match app.project.apply(Command::AddTrack { name: name.into() }) {
+            Ok(Outcome::Track(track)) => track,
+            _ => panic!("the track was not made"),
+        }
+    }
+
+    fn a_plugin() -> loupe_engine::Fx {
+        loupe_engine::Fx {
+            path: std::path::PathBuf::from(loupe_plugins::BUILT_IN),
+            index: 1,
+            name: "Reverb".into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: false,
+            mix: 1.0,
+        }
+    }
+
+    #[test]
+    fn everything_opened_from_the_torn_off_mixer_is_drawn_in_the_mixer_window() {
+        let (mut app, main, mixer) = torn_off();
+        let track = a_track(&mut app, "Drums");
+        let opens = [
+            Message::OpenChain(stockwin::Spot::Track(track)),
+            Message::OpenPlugins(track),
+            Message::OpenMasterPlugins,
+            Message::OpenMonitorPlugins,
+            Message::OpenRouting(track),
+            Message::OpenKnobs(stockwin::Spot::Track(track), 0),
+            Message::MixerMenu { at: Point::new(8.0, 8.0) },
+            Message::TrackMenu { track, at: Point::new(8.0, 8.0) },
+        ];
+        for open in opens {
+            let named = format!("{open:?}");
+            let _ = app.update(open);
+            assert_ne!(app.overlay, Overlay::None, "{named} opened nothing");
+            assert!(app.overlay_is_in(mixer), "{named} was not drawn in the mixer window");
+            assert!(!app.overlay_is_in(main), "{named} was drawn in the main window as well");
+            let _ = app.update(Message::CloseOverlay);
+        }
+    }
+
+    #[test]
+    fn a_double_click_on_a_mixer_name_renames_in_the_mixer_window() {
+        let (mut app, main, mixer) = torn_off();
+        let track = a_track(&mut app, "Drums");
+        let _ = app.update(Message::MixerNameClicked(track));
+        let _ = app.update(Message::MixerNameClicked(track));
+        assert_eq!(app.overlay, Overlay::Rename { track, at: Point::ORIGIN });
+        assert!(app.overlay_is_in(mixer), "the rename box was not drawn in the mixer window");
+        assert!(!app.overlay_is_in(main), "the rename box was drawn in the main window as well");
+        let _ = app.update(Message::EntryTyped("Kit".to_string()));
+        let _ = app.update(Message::EntryEntered);
+        assert_eq!(app.project.track(track).map(|found| found.name.clone()), Some("Kit".to_string()));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn a_slot_renamed_from_the_mixer_keeps_its_window_and_applies_the_name() {
+        let (mut app, main, mixer) = torn_off();
+        app.project.apply(Command::AddMasterFx(a_plugin())).expect("the plugin was not added");
+        let _ = app.update(Message::StartRenameFx(stockwin::Spot::Master, 0));
+        assert_eq!(app.overlay, Overlay::RenameFx(stockwin::Spot::Master, 0));
+        assert!(app.overlay_is_in(mixer), "the slot rename was not drawn in the mixer window");
+        assert!(!app.overlay_is_in(main), "the slot rename was drawn in the main window as well");
+        let _ = app.update(Message::EntryTyped("Hall".to_string()));
+        let _ = app.update(Message::EntryEntered);
+        assert_eq!(app.project.master_fx.first().map(|fx| fx.name.clone()), Some("Hall".to_string()));
+        assert_eq!(app.overlay, Overlay::None);
+    }
+
+    #[test]
+    fn an_overlay_opened_from_the_main_window_stays_out_of_the_mixer_window() {
+        let (mut app, main, mixer) = torn_off();
+        let track = a_track(&mut app, "Drums");
+        let _ = app.update(Message::WindowFocused(main));
+        let _ = app.update(Message::OpenRouting(track));
+        assert!(app.overlay_is_in(main), "the routing sheet left the main window");
+        assert!(!app.overlay_is_in(mixer), "the routing sheet was drawn in the mixer window as well");
+    }
+
+    #[test]
+    fn the_pointer_wandering_over_the_mixer_does_not_take_the_overlay_with_it() {
+        let (mut app, main, mixer) = torn_off();
+        let track = a_track(&mut app, "Drums");
+        let _ = app.update(Message::WindowFocused(main));
+        let _ = app.update(Message::PointerAt(mixer, Point::new(20.0, 20.0)));
+        let _ = app.update(Message::OpenRouting(track));
+        assert!(app.overlay_is_in(main), "hovering the mixer moved the sheet out of the main window");
+    }
+
+    #[test]
+    fn a_keyboard_shortcut_opens_in_the_window_that_has_the_keys() {
+        let (mut app, main, mixer) = torn_off();
+        let _ = app.update(Message::OpenMatrix);
+        assert!(app.overlay_is_in(mixer), "the matrix did not open in the focused mixer window");
+        let _ = app.update(Message::CloseOverlay);
+        let _ = app.update(Message::WindowFocused(main));
+        let _ = app.update(Message::OpenMatrix);
+        assert!(app.overlay_is_in(main), "the matrix did not open in the focused main window");
+    }
+
+    #[test]
+    fn the_main_window_takes_an_overlay_whose_window_has_gone() {
+        let (mut app, main, mixer) = torn_off();
+        let track = a_track(&mut app, "Drums");
+        let _ = app.update(Message::OpenRouting(track));
+        assert!(app.overlay_is_in(mixer));
+        app.mixer_window = None;
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.overlay, Overlay::Routing(track), "the sheet was lost with the window");
+        assert!(app.overlay_is_in(main), "the sheet stayed with a window that is gone");
+    }
+
+    #[test]
+    fn re_docking_the_mixer_brings_its_overlay_back_to_the_song() {
+        let (mut app, main, mixer) = torn_off();
+        let track = a_track(&mut app, "Drums");
+        let _ = app.update(Message::MixerNameClicked(track));
+        let _ = app.update(Message::MixerNameClicked(track));
+        assert!(app.overlay_is_in(mixer));
+        match closing::window_closed(mixer, main, Some(mixer), false) {
+            closing::Closing::Redock => app.mixer_window = None,
+            other => panic!("closing the mixer window gave {other:?}"),
+        }
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.overlay, Overlay::Rename { track, at: Point::ORIGIN }, "the rename box was lost on re-docking");
+        assert!(app.overlay_is_in(main), "the rename box stayed in the window that was re-docked");
+        let _ = app.update(Message::EntryTyped("Kit".to_string()));
+        let _ = app.update(Message::EntryEntered);
+        assert_eq!(app.project.track(track).map(|found| found.name.clone()), Some("Kit".to_string()));
+    }
+
+    #[test]
+    fn a_menu_goes_away_with_the_window_it_was_opened_in() {
+        let (mut app, _, mixer) = torn_off();
+        let _ = app.update(Message::MixerMenu { at: Point::new(8.0, 8.0) });
+        assert!(app.overlay_is_in(mixer));
+        app.mixer_window = None;
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.overlay, Overlay::None, "a menu was left behind in the main window");
+        assert_eq!(app.overlay_since, None);
+    }
+
+    #[test]
+    fn a_dead_window_never_gets_the_next_overlay() {
+        let (mut app, main, _) = torn_off();
+        app.mixer_window = None;
+        let track = a_track(&mut app, "Drums");
+        let _ = app.update(Message::OpenRouting(track));
+        assert!(app.overlay_is_in(main), "the sheet opened in a window that is gone");
+    }
+
+    #[test]
+    fn a_floating_menu_is_placed_against_the_window_holding_it() {
+        let (mut app, main, _) = torn_off();
+        app.window = Size::new(1280.0, 760.0);
+        let _ = app.update(Message::MixerMenu { at: Point::new(8.0, 8.0) });
+        assert_eq!(app.room_for_the_overlay(), mixer::MIXER_WINDOW, "the mixer menu was placed against the main window");
+        let _ = app.update(Message::CloseOverlay);
+        let _ = app.update(Message::WindowFocused(main));
+        let _ = app.update(Message::MixerMenu { at: Point::new(8.0, 8.0) });
+        assert_eq!(app.room_for_the_overlay(), app.window, "the docked mixer menu was placed against the mixer window");
+    }
+
+    #[test]
+    fn the_mixer_window_remembers_how_big_it_is() {
+        let (mut app, _, mixer) = torn_off();
+        let _ = app.update(Message::ResizedTo(mixer, Size::new(700.0, 300.0)));
+        assert_eq!(app.mixer_size, Size::new(700.0, 300.0));
+        assert_eq!(app.window, Size::new(1280.0, 760.0), "the mixer window resized the main window");
     }
 }

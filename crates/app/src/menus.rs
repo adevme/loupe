@@ -43,7 +43,6 @@ impl App {
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::MixerMenu { at } => self.floating(*at, self.mixer_menu()),
-            Overlay::Chain(_) if self.chain_from_mixer && self.mixer_window.is_some() => Space::new(0, 0).into(),
             Overlay::Chain(spot) => self.centred(self.chain_sheet(*spot)),
             Overlay::Exported(folder, note) => self.centred(self.exported_sheet(folder, note.as_deref())),
             Overlay::Rename { at, .. } if *at == Point::ORIGIN => self.centred(self.rename_sheet()),
@@ -58,8 +57,6 @@ impl App {
             Overlay::ClipPlugins(clip) => self.centred(self.clip_plugin_sheet(*clip)),
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
             Overlay::RenameFx(..) => self.centred(self.rename_fx_sheet()),
-            Overlay::RenameInMixer(..) if self.mixer_window.is_none() => self.centred(self.rename_sheet()),
-            Overlay::RenameInMixer(..) => Space::new(0, 0).into(),
             Overlay::Automation(target) => self.centred(self.automation_sheet(*target)),
             Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Matrix => self.centred(self.matrix_sheet()),
@@ -124,8 +121,9 @@ impl App {
     }
 
     fn floating<'a>(&self, at: Point, menu: Element<'a, Message>) -> Element<'a, Message> {
-        let left = at.x.min(self.window.width - MENU_WIDTH - EDGE_GAP).max(EDGE_GAP);
-        let top = at.y.min(self.window.height - TALLEST_MENU - EDGE_GAP).max(EDGE_GAP);
+        let room = self.room_for_the_overlay();
+        let left = at.x.min(room.width - MENU_WIDTH - EDGE_GAP).max(EDGE_GAP);
+        let top = at.y.min(room.height - TALLEST_MENU - EDGE_GAP).max(EDGE_GAP);
         let placed = column![Space::with_height(top), row![Space::with_width(left), opaque(menu)]];
         opaque(
             mouse_area(container(placed).width(Length::Fill).height(Length::Fill))
