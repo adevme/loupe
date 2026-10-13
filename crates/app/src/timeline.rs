@@ -1259,6 +1259,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 ) => {
                     (Captured, Some(Message::DragEnd))
                 }
+                Some(Drag::Point { .. }) => (Captured, Some(Message::PointLetGo)),
                 Some(Drag::Marquee { .. }) => (Captured, Some(Message::Refresh)),
                 Some(Drag::Slice { from, to }) => {
                     let cuts = self
@@ -1655,48 +1656,7 @@ impl Timeline<'_> {
     }
 
     fn lane_label(&self, target: loupe_engine::Target) -> String {
-        use loupe_engine::Target;
-        let track_name = |want: TrackId| {
-            self.project.tracks.iter().find(|t| t.id == want).map(|t| t.name.clone()).unwrap_or_default()
-        };
-        match target {
-            Target::MasterGain => "Master volume".into(),
-            Target::TrackGain(_) => "Volume".into(),
-            Target::TrackPan(_) => "Pan".into(),
-            Target::SendGain { to, .. } => format!("Send to {}", track_name(to)),
-            Target::TrackFx { slot, knob, track } => {
-                let name = self
-                    .project
-                    .tracks
-                    .iter()
-                    .find(|t| t.id == track)
-                    .and_then(|t| t.fx.get(slot))
-                    .map(|fx| fx.name.clone())
-                    .unwrap_or_default();
-                format!("{name}: {}", self.knob_name(track.0, slot, knob, false))
-            }
-            Target::MasterFx { slot, knob } => {
-                let name = self.project.master_fx.get(slot).map(|fx| fx.name.clone()).unwrap_or_default();
-                format!("Master {name}: {}", self.knob_name(crate::MASTER_OWNER, slot, knob, false))
-            }
-            Target::ClipGain(_) => "Clip gain".into(),
-            Target::ClipFx { clip, slot, knob } => {
-                let name = self
-                    .project
-                    .clip(clip)
-                    .and_then(|found| found.fx.get(slot))
-                    .map(|fx| fx.name.clone())
-                    .unwrap_or_default();
-                format!("Clip {name}: {}", self.knob_name(clip.0, slot, knob, true))
-            }
-        }
-    }
-
-    fn knob_name(&self, owner: u64, slot: usize, knob: usize, on_clip: bool) -> String {
-        match self.knobs.get(&(owner, slot, knob, on_clip)) {
-            Some(found) => found.clone(),
-            None => format!("knob {knob}"),
-        }
+        crate::readings::lane_label(self.project, self.knobs, target)
     }
 
     fn lane_offset(&self, target: loupe_engine::Target) -> Frames {
