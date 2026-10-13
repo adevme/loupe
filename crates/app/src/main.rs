@@ -2822,7 +2822,7 @@ impl App {
             && self.project.monitor_fx.is_empty()
             && self.project.tracks.iter().all(|track| track.fx.is_empty())
             && self.project.tracks.iter().flat_map(|track| track.clips.iter()).all(|clip| clip.fx.is_empty());
-        if bare {
+        if bare || crate::touches::racks_must_stay(&self.engine) {
             return;
         }
         let Some(mut racks) = self.borrow_racks() else { return };
