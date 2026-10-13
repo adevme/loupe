@@ -1,9 +1,14 @@
 mod blame;
 mod channel;
+mod waking;
 mod window;
 
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use loupe_plugins::blend::Dry;
 use loupe_plugins::wire::{next_line, read_block, write_block, Ask, Link, Region, Reply, Song};
@@ -202,11 +207,16 @@ fn open_one(path: &Path, index: usize, rate: f64, block: usize, region: Option<&
     }
 }
 
-enum Came {
-    Ask(Ask),
-    Audio(Vec<[f32; 2]>),
+enum ForMain {
+    Ask(Ask, usize),
     Mumble(String),
     Done,
+}
+
+enum ForAudio {
+    Run { ask: Ask, seat: usize, audio: Vec<[f32; 2]>, side: Vec<[f32; 2]> },
+    Time(Song),
+    Turn { seat: usize, knob: usize, value: f32 },
 }
 
 struct Seated {
@@ -221,32 +231,25 @@ struct Seated {
 
 struct Seats {
     taken: Vec<Option<Seated>>,
-    at: usize,
+    song: Song,
 }
+
+unsafe impl Send for Seats {}
 
 impl Seats {
     fn empty() -> Self {
-        Self { taken: Vec::new(), at: 0 }
-    }
-
-    fn here(&mut self) -> Option<&mut Seated> {
-        self.taken.get_mut(self.at)?.as_mut()
+        Self { taken: Vec::new(), song: Song::default() }
     }
 
     fn at(&mut self, seat: usize) -> Option<&mut Seated> {
         self.taken.get_mut(seat)?.as_mut()
     }
 
-    fn move_to(&mut self, seat: usize) {
+    fn put(&mut self, seat: usize, seated: Seated) {
         if self.taken.len() <= seat {
             self.taken.resize_with(seat + 1, || None);
         }
-        self.at = seat;
-    }
-
-    fn put_here(&mut self, seated: Seated) {
-        self.move_to(self.at);
-        self.taken[self.at] = Some(seated);
+        self.taken[seat] = Some(seated);
     }
 
     fn clear(&mut self, seat: usize) {
@@ -266,8 +269,17 @@ impl Seats {
     }
 
     fn tell_the_time(&mut self, song: Song) {
+        self.song = song;
         for seated in self.taken.iter_mut().flatten() {
             seated.open.told_the_time(song);
+        }
+    }
+
+    fn process(&mut self, seat: usize, audio: &mut [[f32; 2]], side: &[[f32; 2]], at: Option<i64>) {
+        if let Some(seated) = self.at(seat) {
+            blame::working_on(seat);
+            seated.open.process_at(audio, side, at);
+            blame::finished();
         }
     }
 
@@ -289,48 +301,161 @@ impl Seats {
     }
 }
 
-fn main() {
-    com::start();
-    let (sends, came) = std::sync::mpsc::channel::<Came>();
-    std::thread::spawn(move || {
-        let mut input = BufReader::new(std::io::stdin());
-        while let Some(line) = next_line(&mut input) {
-            let Some(ask) = Ask::read(&line) else {
-                if sends.send(Came::Mumble(line.trim().to_string())).is_err() {
-                    return;
-                }
-                continue;
-            };
-            let blocks = match &ask {
-                Ask::Process => 1,
-                Ask::ProcessWithSide => 2,
-                Ask::ProcessAt(_) => 1,
-                Ask::Chain { side, .. } => 1 + *side as usize,
-                _ => 0,
-            };
-            if sends.send(Came::Ask(ask)).is_err() {
+fn hold(seats: &Mutex<Seats>) -> MutexGuard<'_, Seats> {
+    seats.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct Out(Mutex<Box<dyn Write + Send>>);
+
+impl Out {
+    fn open(&self) -> MutexGuard<'_, Box<dyn Write + Send>> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn say(&self, reply: &Reply) {
+        let _ = reply.write(&mut *self.open());
+    }
+
+    fn hand_back(&self, audio: &[[f32; 2]]) -> bool {
+        write_block(&mut *self.open(), audio).is_ok()
+    }
+
+    fn flush(&self) {
+        let _ = self.open().flush();
+    }
+}
+
+#[derive(Default)]
+struct Touches(Mutex<Option<Arc<AtomicBool>>>);
+
+impl Touches {
+    fn watch(&self, flag: Option<Arc<AtomicBool>>) {
+        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = flag;
+    }
+
+    fn taken(&self) -> bool {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().is_some_and(|flag| flag.swap(false, Ordering::Relaxed))
+    }
+}
+
+const WINDOW_TICK: Duration = Duration::from_millis(8);
+const IDLE_EVERY: Duration = Duration::from_millis(30);
+
+fn blocks_after(ask: &Ask) -> usize {
+    match ask {
+        Ask::Process => 1,
+        Ask::ProcessWithSide => 2,
+        Ask::ProcessAt(_) => 1,
+        Ask::Chain { side, .. } => 1 + *side as usize,
+        _ => 0,
+    }
+}
+
+fn read_asks(to_main: Sender<ForMain>, to_audio: Sender<ForAudio>, out: Arc<Out>, touches: Arc<Touches>, bell: Arc<waking::Bell>) {
+    waking::hurry_this_thread();
+    let tell_main = |item: ForMain| {
+        let sent = to_main.send(item).is_ok();
+        bell.ring();
+        sent
+    };
+    let mut input = BufReader::new(std::io::stdin());
+    let mut seat = 0;
+    while let Some(line) = next_line(&mut input) {
+        let Some(ask) = Ask::read(&line) else {
+            if !tell_main(ForMain::Mumble(line.trim().to_string())) {
                 return;
             }
-            for _ in 0..blocks {
-                let mut audio = Vec::new();
-                if read_block(&mut input, &mut audio).is_err() {
-                    return;
+            continue;
+        };
+        let blocks = blocks_after(&ask);
+        if blocks > 0 {
+            let mut audio = Vec::new();
+            let mut side = Vec::new();
+            if read_block(&mut input, &mut audio).is_err() || (blocks > 1 && read_block(&mut input, &mut side).is_err()) {
+                break;
+            }
+            if to_audio.send(ForAudio::Run { ask, seat, audio, side }).is_err() {
+                return;
+            }
+            continue;
+        }
+        let sent = match ask {
+            Ask::Timing(song) => to_audio.send(ForAudio::Time(song)).is_ok(),
+            Ask::Turn { knob, value } => to_audio.send(ForAudio::Turn { seat, knob, value }).is_ok(),
+            Ask::Seat(to) => {
+                seat = to;
+                out.say(&Reply::Fine);
+                true
+            }
+            Ask::Touched => {
+                out.say(&Reply::Edited(touches.taken()));
+                true
+            }
+            other => tell_main(ForMain::Ask(other, seat)),
+        };
+        if !sent {
+            return;
+        }
+    }
+    tell_main(ForMain::Done);
+}
+
+fn play(jobs: Receiver<ForAudio>, seats: Arc<Mutex<Seats>>, out: Arc<Out>) {
+    waking::hurry_this_thread();
+    while let Ok(job) = jobs.recv() {
+        match job {
+            ForAudio::Run { ask, seat, mut audio, side } => {
+                {
+                    let mut held = hold(&seats);
+                    match ask {
+                        Ask::Chain { links, .. } => held.run(&links, &mut audio, &side),
+                        Ask::ProcessAt(at) => held.process(seat, &mut audio, &side, Some(at)),
+                        _ => held.process(seat, &mut audio, &side, None),
+                    }
                 }
-                if sends.send(Came::Audio(audio)).is_err() {
+                if !out.hand_back(&audio) {
                     return;
                 }
             }
+            ForAudio::Time(song) => hold(&seats).tell_the_time(song),
+            ForAudio::Turn { seat, knob, value } => {
+                {
+                    let mut held = hold(&seats);
+                    if let Some(seated) = held.at(seat) {
+                        seated.open.turn(knob, value);
+                    }
+                    say_if_it_moved(&mut held, seat, &out);
+                }
+                out.say(&Reply::Fine);
+            }
         }
-        let _ = sends.send(Came::Done);
-    });
+    }
+}
 
-    let (mut out, telling) = channel::take_stdout();
+type Showing = Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)>;
+
+fn main() {
+    com::start();
+    let (out, telling) = channel::take_stdout();
     blame::tell_on_a_crash(telling);
-    let mut seats = Seats::empty();
-    let mut editor: Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)> = None;
+    let out = Arc::new(Out(Mutex::new(out)));
+    let seats = Arc::new(Mutex::new(Seats::empty()));
+    let touches = Arc::new(Touches::default());
+    let bell = Arc::new(waking::Bell::new());
+    let (to_main, came) = mpsc::channel::<ForMain>();
+    let (to_audio, jobs) = mpsc::channel::<ForAudio>();
+    {
+        let (out, touches, bell) = (out.clone(), touches.clone(), bell.clone());
+        std::thread::spawn(move || read_asks(to_main, to_audio, out, touches, bell));
+    }
+    {
+        let (seats, out) = (seats.clone(), out.clone());
+        std::thread::spawn(move || play(jobs, seats, out));
+    }
+
+    let mut editor: Showing = None;
     let mut was_sized = (0, 0);
     let mut region: Option<Region> = None;
-    let mut song = Song::default();
     let mut idled = std::time::Instant::now();
     'living: loop {
         if let Some((made, pane, seat)) = editor.as_ref() {
@@ -343,14 +468,15 @@ fn main() {
                     }
                     continue;
                 }
-                let name = seats.at(seat).map(|seated| seated.name.clone()).unwrap_or_default();
-                use_preset(asked, seats.at(seat).map(|seated| &mut seated.open), pane, &name);
+                let mut held = hold(&seats);
+                let name = held.at(seat).map(|seated| seated.name.clone()).unwrap_or_default();
+                use_preset(asked, held.at(seat).map(|seated| &mut seated.open), pane, &name);
             }
             for chord in chords {
-                let _ = chord.write(&mut out);
+                out.say(&chord);
             }
             if made.latency_moved() {
-                say_if_it_moved(&mut seats, seat, &mut out);
+                say_if_it_moved(&mut hold(&seats), seat, &out);
             }
             if let Some((width, height)) = made.wanted_size() {
                 let scale = pane.screen_scale();
@@ -372,116 +498,62 @@ fn main() {
                 }
             }
         }
-        if idled.elapsed() >= std::time::Duration::from_millis(30) {
+        if idled.elapsed() >= IDLE_EVERY {
             idled = std::time::Instant::now();
-            seats.all_idle();
+            hold(&seats).all_idle();
         }
-        let ticking = editor.is_some() || seats.anyone_is_ara();
-        let next = if ticking {
-            match came.recv_timeout(std::time::Duration::from_millis(8)) {
-                Ok(next) => next,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => break,
-            }
-        } else {
-            match came.recv() {
-                Ok(next) => next,
-                Err(_) => break,
-            }
-        };
-        let ask = match next {
-            Came::Ask(ask) => ask,
-            Came::Audio(_) => continue,
-            Came::Mumble(line) => {
-                let _ = Reply::Trouble(format!("I did not understand {line}")).write(&mut out);
+        let ticking = editor.is_some() || hold(&seats).anyone_is_ara();
+        let next = match came.try_recv() {
+            Ok(next) => next,
+            Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) if ticking => {
+                bell.wait(WINDOW_TICK);
                 continue;
             }
-            Came::Done => break,
+            Err(TryRecvError::Empty) => match came.recv() {
+                Ok(next) => next,
+                Err(_) => break,
+            },
+        };
+        let (ask, seat) = match next {
+            ForMain::Ask(ask, seat) => (ask, seat),
+            ForMain::Mumble(line) => {
+                out.say(&Reply::Trouble(format!("I did not understand {line}")));
+                continue;
+            }
+            ForMain::Done => break,
         };
         let reply = match ask {
-            Ask::Process | Ask::ProcessWithSide | Ask::ProcessAt(_) => {
-                let wants_side = ask == Ask::ProcessWithSide;
-                let at = match ask {
-                    Ask::ProcessAt(at) => Some(at),
-                    _ => None,
-                };
-                let mut audio = match came.recv() {
-                    Ok(Came::Audio(audio)) => audio,
-                    _ => break 'living,
-                };
-                let side = if wants_side {
-                    match came.recv() {
-                        Ok(Came::Audio(side)) => side,
-                        _ => break 'living,
-                    }
-                } else {
-                    Vec::new()
-                };
-                let here = seats.at;
-                if let Some(seated) = seats.here() {
-                    blame::working_on(here);
-                    seated.open.process_at(&mut audio, &side, at);
-                    blame::finished();
-                }
-                if write_block(&mut out, &audio).is_err() {
-                    break;
-                }
-                continue;
-            }
-            Ask::Chain { side: wants_side, links } => {
-                let mut audio = match came.recv() {
-                    Ok(Came::Audio(audio)) => audio,
-                    _ => break 'living,
-                };
-                let side = if wants_side {
-                    match came.recv() {
-                        Ok(Came::Audio(side)) => side,
-                        _ => break 'living,
-                    }
-                } else {
-                    Vec::new()
-                };
-                seats.run(&links, &mut audio, &side);
-                if write_block(&mut out, &audio).is_err() {
-                    break;
-                }
-                continue;
-            }
-            Ask::Timing(told) => {
-                song = told;
-                seats.tell_the_time(song);
-                continue;
-            }
-            Ask::Seat(seat) => {
-                seats.move_to(seat);
-                Reply::Fine
-            }
-            Ask::Unload(seat) => {
-                if editor.as_ref().is_some_and(|(_, _, held)| *held == seat) {
+            Ask::Process | Ask::ProcessWithSide | Ask::ProcessAt(_) | Ask::Chain { .. } | Ask::Timing(_) | Ask::Turn { .. } | Ask::Seat(_) | Ask::Touched => continue,
+            Ask::Unload(gone) => {
+                if editor.as_ref().is_some_and(|(_, _, held)| *held == gone) {
                     editor = None;
                 }
-                seats.clear(seat);
+                hold(&seats).clear(gone);
                 Reply::Fine
             }
-            Ask::Quit => break,
-            Ask::Region(wanted) => match seats.here().map(|seated| &mut seated.open).filter(|effect| effect.is_ara()) {
-                Some(effect) => match effect.place(&wanted) {
-                    Ok(()) => Reply::Fine,
-                    Err(why) => Reply::Trouble(why),
-                },
-                None => {
-                    region = Some(wanted);
-                    Reply::Fine
+            Ask::Quit => break 'living,
+            Ask::Region(wanted) => {
+                let mut held = hold(&seats);
+                match held.at(seat).map(|seated| &mut seated.open).filter(|effect| effect.is_ara()) {
+                    Some(effect) => match effect.place(&wanted) {
+                        Ok(()) => Reply::Fine,
+                        Err(why) => Reply::Trouble(why),
+                    },
+                    None => {
+                        region = Some(wanted);
+                        Reply::Fine
+                    }
                 }
-            },
+            }
             Ask::Show => {
-                let here = seats.at;
-                let name = seats.here().map(|seated| match seated.shown_as.is_empty() {
+                let mut held = hold(&seats);
+                let name = held.at(seat).map(|seated| match seated.shown_as.is_empty() {
                     true => seated.name.clone(),
                     false => seated.shown_as.clone(),
                 }).unwrap_or_default();
-                let on = seats.here().map(|seated| (seated.on_track.clone(), seated.seat_index)).unwrap_or_default();
-                match show(seats.here().map(|seated| &mut seated.open), &mut editor, &name, here, &on) {
+                let on = held.at(seat).map(|seated| (seated.on_track.clone(), seated.seat_index)).unwrap_or_default();
+                match show(held.at(seat).map(|seated| &mut seated.open), &mut editor, &name, seat, &on) {
                     Ok(()) => {
                         if let Some((_, pane, _)) = editor.as_ref() {
                             was_sized = pane.inside();
@@ -491,16 +563,15 @@ fn main() {
                     Err(why) => Reply::Trouble(why),
                 }
             }
-            Ask::Touched => Reply::Edited(editor.as_ref().map(|(made, _, _)| made.was_touched()).unwrap_or(false)),
             Ask::OnTrack(name, index) => {
-                if let Some(seated) = seats.here() {
+                if let Some(seated) = hold(&seats).at(seat) {
                     seated.on_track = name;
                     seated.seat_index = index;
                 }
                 Reply::Fine
             }
             Ask::Called(called) => {
-                if let Some(seated) = seats.here() {
+                if let Some(seated) = hold(&seats).at(seat) {
                     seated.shown_as = called;
                 }
                 Reply::Fine
@@ -511,7 +582,7 @@ fn main() {
                     *seat
                 });
                 if let Some(seat) = shut {
-                    say_if_it_moved(&mut seats, seat, &mut out);
+                    say_if_it_moved(&mut hold(&seats), seat, &out);
                 }
                 Reply::Fine
             }
@@ -520,47 +591,39 @@ fn main() {
                 Err(why) => Reply::Trouble(why),
             },
             Ask::Load { path, index, rate, block } => {
-                let here = seats.at;
-                if editor.as_ref().is_some_and(|(_, _, held)| *held == here) {
+                if editor.as_ref().is_some_and(|(_, _, held)| *held == seat) {
                     editor = None;
                 }
                 let name = names_in(&PathBuf::from(&path)).ok().and_then(|names| names.get(index).cloned()).unwrap_or_default();
-                blame::working_on(here);
+                blame::working_on(seat);
                 let made = open_one(&PathBuf::from(&path), index, rate as f64, block, region.as_ref());
                 blame::finished();
                 match made {
                     Ok(mut effect) => {
                         let latency = effect.latency();
                         let ara = effect.is_ara();
-                        effect.told_the_time(song);
-                        seats.put_here(Seated { open: effect, name, shown_as: String::new(), on_track: String::new(), seat_index: 0, latency, dry: Dry::empty() });
+                        let mut held = hold(&seats);
+                        effect.told_the_time(held.song);
+                        held.put(seat, Seated { open: effect, name, shown_as: String::new(), on_track: String::new(), seat_index: 0, latency, dry: Dry::empty() });
                         Reply::Loaded { inputs: 2, outputs: 2, latency, ara }
                     }
                     Err(why) => Reply::Trouble(why),
                 }
             }
-            Ask::Knobs => match seats.here() {
+            Ask::Knobs => match hold(&seats).at(seat) {
                 Some(seated) => Reply::Knobs(seated.open.knobs()),
                 None => Reply::Trouble("no plugin is open".into()),
             },
-            Ask::Readings => match seats.here() {
+            Ask::Readings => match hold(&seats).at(seat) {
                 Some(seated) => Reply::Readings(seated.open.readings()),
                 None => Reply::Trouble("no plugin is open".into()),
             },
-            Ask::FromText { knob, text } => match seats.here().map(|seated| seated.open.from_text(knob, &text)) {
+            Ask::FromText { knob, text } => match hold(&seats).at(seat).map(|seated| seated.open.from_text(knob, &text)) {
                 Some(Some(value)) => Reply::Value(value),
                 Some(None) => Reply::Trouble(format!("the plugin did not understand \"{text}\"")),
                 None => Reply::Trouble("no plugin is open".into()),
             },
-            Ask::Turn { knob, value } => {
-                let here = seats.at;
-                if let Some(seated) = seats.here() {
-                    seated.open.turn(knob, value);
-                }
-                say_if_it_moved(&mut seats, here, &mut out);
-                Reply::Fine
-            }
-            Ask::Save => match seats.here() {
+            Ask::Save => match hold(&seats).at(seat) {
                 Some(seated) => match seated.open.save() {
                     Ok(state) => Reply::State(state),
                     Err(why) => Reply::Trouble(why),
@@ -568,15 +631,15 @@ fn main() {
                 None => Reply::Trouble("no plugin is open".into()),
             },
             Ask::Restore(state) => {
-                let here = seats.at;
-                match seats.here() {
+                let mut held = hold(&seats);
+                match held.at(seat) {
                     Some(seated) => {
-                        blame::working_on(here);
+                        blame::working_on(seat);
                         let put = seated.open.restore(&state);
                         blame::finished();
                         match put {
                             Ok(()) => {
-                                say_if_it_moved(&mut seats, here, &mut out);
+                                say_if_it_moved(&mut held, seat, &out);
                                 Reply::Fine
                             }
                             Err(why) => Reply::Trouble(why),
@@ -586,17 +649,19 @@ fn main() {
                 }
             }
         };
-        let _ = reply.write(&mut out);
+        out.say(&reply);
+        touches.watch(editor.as_ref().map(|(made, _, _)| made.touches()));
     }
+    touches.watch(None);
     drop(editor);
-    drop(seats);
-    let _ = out.flush();
+    hold(&seats).taken.clear();
+    out.flush();
     com::stop();
 }
 
 fn show(
     open: Option<&mut Open>,
-    editor: &mut Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)>,
+    editor: &mut Showing,
     name: &str,
     seat: usize,
     on: &(String, i64),
@@ -677,9 +742,9 @@ fn how_late_it_is_now(seats: &mut Seats, seat: usize) -> Option<usize> {
     Some(now)
 }
 
-fn say_if_it_moved(seats: &mut Seats, seat: usize, out: &mut impl Write) {
+fn say_if_it_moved(seats: &mut Seats, seat: usize, out: &Out) {
     if let Some(frames) = how_late_it_is_now(seats, seat) {
-        let _ = Reply::LatencyMoved { seat, frames }.write(out);
+        out.say(&Reply::LatencyMoved { seat, frames });
     }
 }
 

@@ -2,12 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ceiling::{Ceiling, Seat};
-use crate::sandbox::Sandbox;
+use crate::sandbox::{Ran, Sandbox};
 use crate::wire::{Ask, Region, Reply, Song};
 
 const SETTLING_BLOCKS: usize = 24;
 const SETTLING_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
 const BLOCKS_BEFORE_WAITING: usize = 4;
+const GRACE_IN_BLOCKS: u32 = 2;
+const LEAST_GRACE: std::time::Duration = std::time::Duration::from_millis(5);
 pub const QUIET: f32 = 1.0e-7;
 pub const QUIET_SECONDS_BEFORE_DOZING: f32 = 10.0;
 
@@ -206,6 +208,8 @@ pub struct Rack {
     song: Song,
     told: Option<Song>,
     since: i64,
+    on_time: bool,
+    late_replies: u64,
 }
 
 impl Rack {
@@ -232,6 +236,8 @@ impl Rack {
             song: Song::default(),
             told: None,
             since: 0,
+            on_time: false,
+            late_replies: 0,
         }
     }
 
@@ -367,12 +373,7 @@ impl Rack {
             made.set(knob, value);
             return;
         }
-        let Some(host) = found.host.as_mut() else { return };
-        let asked = host.ask(Ask::Turn { knob, value });
-        let fell = host.gone();
-        if let Err(why) = asked {
-            self.lost_host(slot, why, fell);
-        }
+        self.turn_in_the_host(slot, knob, value);
     }
 
     pub fn automate(&mut self, slot: usize, knob: usize, value: f32) {
@@ -383,12 +384,39 @@ impl Rack {
             made.set(knob, param.from_position(value));
             return;
         }
-        let Some(host) = found.host.as_mut() else { return };
-        let asked = host.ask(Ask::Turn { knob, value });
+        self.turn_in_the_host(slot, knob, value);
+    }
+
+    fn turn_in_the_host(&mut self, slot: usize, knob: usize, value: f32) {
+        let within = self.on_time.then(|| self.deadline(self.block));
+        let Some(host) = self.slots.get_mut(slot).and_then(|found| found.host.as_mut()) else { return };
+        let asked = match within {
+            Some(within) => host.ask_within(Ask::Turn { knob, value }, within).map(|reply| reply.is_some()),
+            None => host.ask(Ask::Turn { knob, value }).map(|_| true),
+        };
         let fell = host.gone();
-        if let Err(why) = asked {
-            self.lost_host(slot, why, fell);
+        match asked {
+            Ok(true) => {}
+            Ok(false) => self.late_replies += 1,
+            Err(why) => self.lost_host(slot, why, fell),
         }
+    }
+
+    pub fn keep_time(&mut self, on_time: bool) {
+        self.on_time = on_time;
+    }
+
+    pub fn keeps_time(&self) -> bool {
+        self.on_time
+    }
+
+    pub fn late_replies(&self) -> u64 {
+        self.late_replies
+    }
+
+    fn deadline(&self, frames: usize) -> std::time::Duration {
+        let block = std::time::Duration::from_secs_f64(frames.max(1) as f64 / self.rate.max(1) as f64);
+        (block * GRACE_IN_BLOCKS).max(LEAST_GRACE)
     }
 
     pub fn knobs(&mut self, slot: usize) -> Vec<String> {
@@ -704,17 +732,20 @@ impl Rack {
             return;
         }
         let rate = self.rate;
+        let deadline = self.on_time.then(|| self.deadline(block));
+        let mut late = 0;
         for (which, slot) in self.slots.iter_mut().enumerate() {
             if slot.record != takes || slot.bypassed || slot.trouble.is_some() {
                 continue;
             }
             let blending = slot.mix < 1.0;
-            if blending {
+            let remembering = blending || slot.host.is_some();
+            if remembering {
                 slot.dry.room_for(slot.latency, block);
                 slot.dry.remember(audio);
             }
             if slot.dozes_through(audio, rate) {
-                if blending {
+                if remembering {
                     slot.dry.slide(block);
                 }
                 continue;
@@ -728,15 +759,22 @@ impl Rack {
                 continue;
             }
             let Some(host) = slot.host.as_mut() else { continue };
+            let within = deadline.unwrap_or_else(|| host.patience());
             let ran = match at {
-                Some(at) if slot.ara => host.run_at(audio, at),
-                _ => host.run_with(audio, side),
+                Some(at) if slot.ara => host.run_within(audio, &[], Some(at), within),
+                _ => host.run_within(audio, side, None, within),
             };
             match ran {
-                Ok(()) => {
-                    if blending {
-                        slot.dry.blend(audio, slot.mix);
+                Ok(Ran::InTime) => {
+                    match blending {
+                        true => slot.dry.blend(audio, slot.mix),
+                        false => slot.dry.slide(block),
                     }
+                    slot.note_what_came_out(audio, rate);
+                }
+                Ok(Ran::Late) => {
+                    late += 1;
+                    slot.dry.blend(audio, 0.0);
                     slot.note_what_came_out(audio, rate);
                 }
                 Err(why) => {
@@ -749,6 +787,7 @@ impl Rack {
                 }
             }
         }
+        self.late_replies += late;
     }
 
     pub fn reconcile(&mut self, want: &[Wanted]) -> Vec<String> {
@@ -1736,6 +1775,108 @@ mod fallen_tests {
         assert_eq!(audio, vec![[0.5; 2]; 64], "a late block passes the song through untouched");
         assert!(rack.slots()[0].trouble.is_none(), "being late is not being dead");
         assert!(!rack.has_fallen(), "a late plugin is not reported as a crash");
+    }
+
+    const ANSWERS: &str = "while read ask; do\n  case \"$ask\" in\n    process*) sleep \"$SLOW\"; head -c 517 ;;\n    turn*) sleep \"$SLOW\"; printf 'fine\\n' ;;\n    knobs*) printf 'knobs\\tGain\\n' ;;\n  esac\ndone\n";
+
+    fn answering_host(name: &str, slow: &str, latency: usize) -> Host {
+        host(name, &format!("SLOW={slow}\nread ask\nprintf 'loaded\\t2\\t2\\t{latency}\\n'\n{ANSWERS}"))
+    }
+
+    fn kept_in_time(script: &Host) -> Rack {
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
+        assert!(rack.reconcile(&[wanted("Dawdler")]).is_empty());
+        rack.keep_time(true);
+        play_until_settled(&mut rack);
+        rack
+    }
+
+    #[test]
+    fn a_host_that_falls_behind_never_holds_a_block_up_past_its_deadline() {
+        let script = answering_host("behind", "0.3", 0);
+        let mut rack = kept_in_time(&script);
+        let gave_up = std::time::Instant::now();
+        let mut slowest = std::time::Duration::ZERO;
+        let mut blocks = 0;
+        while gave_up.elapsed() < std::time::Duration::from_millis(900) {
+            let mut audio = vec![[0.5; 2]; 64];
+            let began = std::time::Instant::now();
+            rack.process(&mut audio);
+            slowest = slowest.max(began.elapsed());
+            assert_eq!(audio, vec![[0.5; 2]; 64], "a late block did not come back dry");
+            blocks += 1;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(slowest < std::time::Duration::from_millis(50), "one block waited {slowest:?} for a late host");
+        assert!(rack.late_replies() as usize >= blocks - 4, "only {} of {blocks} late blocks were counted", rack.late_replies());
+        assert!(rack.slots()[0].trouble.is_none(), "a late host is not a dead one");
+        assert!(!rack.has_fallen());
+    }
+
+    #[test]
+    fn a_host_that_catches_up_is_heard_again() {
+        let script = answering_host("catches-up", "0", 0);
+        let mut rack = kept_in_time(&script);
+        let mut answered = 0;
+        for _ in 0..50 {
+            let mut audio = vec![[0.5; 2]; 64];
+            rack.process(&mut audio);
+            answered += 1;
+        }
+        assert_eq!(answered, 50);
+        assert!(rack.late_replies() < 50, "a host that answers at once was counted late every time");
+        assert!(rack.slots()[0].trouble.is_none());
+    }
+
+    #[test]
+    fn a_late_block_comes_back_dry_but_at_the_plugins_latency() {
+        let latency = 32;
+        let script = answering_host("held-dry", "2", latency);
+        let mut rack = kept_in_time(&script);
+        let song = a_click(64 * 6, 64);
+        let mut heard = Vec::new();
+        for block in song.chunks(64) {
+            let mut audio = block.to_vec();
+            rack.process(&mut audio);
+            heard.extend(audio);
+        }
+        assert_eq!(first_loud_frame(&heard), Some(64 + latency), "the dry sound moved against the rest of the mix");
+    }
+
+    #[test]
+    fn a_knob_turned_on_time_does_not_wait_for_a_late_host_and_its_answer_is_collected() {
+        let script = answering_host("late-turn", "0.2", 0);
+        let mut rack = kept_in_time(&script);
+        let late_before = rack.late_replies();
+        let began = std::time::Instant::now();
+        rack.tweak(0, 0, 0.5);
+        assert!(began.elapsed() < std::time::Duration::from_millis(50), "turning a knob waited {:?}", began.elapsed());
+        assert_eq!(rack.late_replies(), late_before + 1);
+        assert_eq!(rack.knobs(0), vec!["Gain".to_string()], "the late answer to the turn was taken for the next answer");
+        assert!(rack.slots()[0].trouble.is_none());
+    }
+
+    #[test]
+    fn a_question_asked_while_a_block_is_owed_gets_its_own_answer() {
+        let script = answering_host("owed-block", "0.2", 0);
+        let mut rack = kept_in_time(&script);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut audio = vec![[0.5; 2]; 64];
+        let late_before = rack.late_replies();
+        rack.process(&mut audio);
+        assert_eq!(rack.late_replies(), late_before + 1);
+        assert_eq!(rack.knobs(0), vec!["Gain".to_string()], "the late block was read as the answer");
+        assert!(rack.slots()[0].trouble.is_none());
+    }
+
+    fn a_click(frames: usize, at: usize) -> Vec<[f32; 2]> {
+        let mut song = vec![[0.0; 2]; frames];
+        song[at] = [1.0, 1.0];
+        song
+    }
+
+    fn first_loud_frame(audio: &[[f32; 2]]) -> Option<usize> {
+        audio.iter().position(|frame| frame[0] > 0.9)
     }
 }
 

@@ -226,14 +226,28 @@ impl Racks {
 
     pub fn away_from_the_audio_thread(mut self) -> Self {
         self.off_the_audio_thread = true;
+        self.keep_time();
         self.own_ceiling = Some(loupe_plugins::ceiling::Ceiling::of(loupe_plugins::ceiling::Ceiling::for_this_computer().most()));
         self
     }
 
     fn a_new_rack(&self) -> Rack {
-        match &self.own_ceiling {
+        let mut made = match &self.own_ceiling {
             Some(ceiling) => Rack::sharing(self.host.clone(), self.rate, self.block, ceiling.clone()),
             None => Rack::new(self.host.clone(), self.rate, self.block),
+        };
+        made.keep_time(!self.off_the_audio_thread);
+        made
+    }
+
+    fn every_rack(&self) -> impl Iterator<Item = &Rack> {
+        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).chain(self.monitor.iter())
+    }
+
+    fn keep_time(&mut self) {
+        let on_time = !self.off_the_audio_thread;
+        for rack in self.chains.values_mut().chain(self.clips.values_mut()).chain(self.master.iter_mut()).chain(self.monitor.iter_mut()) {
+            rack.keep_time(on_time);
         }
     }
 
@@ -807,6 +821,7 @@ impl Chains for Racks {
 
     fn takes_its_time(&mut self, spare: bool) {
         self.off_the_audio_thread = spare;
+        self.keep_time();
     }
 
     fn process_wave(&mut self, jobs: &mut [loupe_engine::Job<'_>]) {
@@ -823,6 +838,7 @@ impl Chains for Racks {
             waves: self.waves.load(Ordering::Relaxed),
             tracks_in_waves: self.tracks_in_waves.load(Ordering::Relaxed),
             at_once: tracks_at_once(),
+            late_replies: self.every_rack().map(Rack::late_replies).sum(),
         }
     }
 
