@@ -215,6 +215,7 @@ struct Ear {
     lowest: usize,
     looked: f64,
     nudge: f64,
+    locked: bool,
     since_dry: f64,
     was: [f32; MOST_INPUTS],
     next: [f32; MOST_INPUTS],
@@ -243,6 +244,7 @@ impl Default for Ear {
             lowest: usize::MAX,
             looked: 0.0,
             nudge: 0.0,
+            locked: false,
             since_dry: f64::INFINITY,
             was: [0.0; MOST_INPUTS],
             next: [0.0; MOST_INPUTS],
@@ -310,6 +312,11 @@ impl Ear {
 
     fn keep_close(&mut self, read: f64) {
         self.since_dry += read;
+        if self.locked {
+            self.nudge = 0.0;
+            self.start_looking();
+            return;
+        }
         self.lowest = self.lowest.min(self.waiting());
         self.looked += read;
         if self.looked < self.rate as f64 * EAR_LOOKS_OVER_SECONDS {
@@ -512,6 +519,7 @@ impl Rt {
                     self.ear.filling = true;
                     self.ear.spare = self.ear.frames_in(EAR_SPARE_SECONDS);
                     self.ear.nudge = 0.0;
+                    self.ear.locked = devices::one_device_both_ways();
                     self.ear.since_dry = f64::INFINITY;
                 }
                 Msg::HearOn(on) => self.ear.on = on,
