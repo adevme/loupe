@@ -86,10 +86,13 @@ pub(crate) fn output_named(host: &cpal::Host, name: Option<&str>) -> Option<cpal
             .or_else(|| host.default_output_device()),
         None => host.default_output_device(),
     };
-    if let Ok(mut held) = IN_USE.lock() {
-        *held = found.clone();
-    }
     found
+}
+
+pub(crate) fn hold(device: &cpal::Device) {
+    if let Ok(mut held) = IN_USE.lock() {
+        *held = Some(device.clone());
+    }
 }
 
 pub(crate) fn in_use() -> Option<cpal::Device> {

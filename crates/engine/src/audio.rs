@@ -1275,6 +1275,7 @@ fn open_device(choice: &Device) -> Result<(cpal::Stream, Remote, Running, Option
             cpal::BufferSize::Default => None,
         },
     };
+    devices::hold(&device);
     Ok((stream, remote, running, warning))
 }
 
