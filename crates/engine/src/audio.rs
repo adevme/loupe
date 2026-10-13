@@ -723,7 +723,7 @@ impl Rt {
     }
 
     fn look_ahead(&mut self) {
-        if self.roll != Roll::No || self.fade > 0 {
+        if self.roll != Roll::No || self.fade > 0 || self.ear.on.iter().any(Option::is_some) {
             return;
         }
         let at = match self.count_in > 0 {
