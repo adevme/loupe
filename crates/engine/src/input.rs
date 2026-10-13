@@ -452,33 +452,86 @@ fn named_of(device: &cpal::Device) -> String {
     device.name().unwrap_or_else(|_| "an unnamed input".to_string())
 }
 
-fn devices_to_try(choice: &InputChoice) -> Result<Vec<cpal::Device>, String> {
-    if crate::devices::one_device_both_ways() {
-        return crate::devices::in_use()
-            .map(|device| vec![device])
-            .ok_or_else(|| "the ASIO driver is not open, so there is nothing to record from".to_string());
+#[derive(Debug, Default)]
+struct Offered {
+    listed: Vec<String>,
+    usual: Option<String>,
+    output: Option<String>,
+    one_device_both_ways: bool,
+}
+
+fn sound_card_of(name: &str) -> Option<&str> {
+    let close = name.rfind(')')?;
+    let open = name[..close].rfind('(')?;
+    Some(&name[open + 1..close])
+}
+
+fn beside_the_output(offered: &Offered) -> Option<String> {
+    let output = offered.output.as_deref()?;
+    if offered.listed.iter().any(|name| name == output) {
+        return Some(output.to_string());
     }
-    let host = crate::devices::host();
-    let listed: Vec<cpal::Device> = host.input_devices().map_err(|why| why.to_string())?.collect();
-    let mut order = Vec::new();
+    let card = sound_card_of(output).unwrap_or(output);
+    offered.listed.iter().find(|name| sound_card_of(name).unwrap_or(name.as_str()) == card).cloned()
+}
+
+fn order_to_try(choice: &InputChoice, offered: &Offered) -> Vec<String> {
+    if offered.one_device_both_ways {
+        return beside_the_output(offered).into_iter().collect();
+    }
+    let mut order: Vec<String> = Vec::new();
     if let InputChoice::Named(wanted) = choice {
-        if let Some(found) = listed.iter().position(|device| device.name().is_ok_and(|name| &name == wanted)) {
-            order.push(listed[found].clone());
+        if offered.listed.contains(wanted) {
+            order.push(wanted.clone());
         }
     }
-    if let Some(usual) = host.default_input_device() {
-        let name = named_of(&usual);
-        if !order.iter().any(|device| named_of(device) == name) {
-            order.push(usual);
+    if let Some(beside) = beside_the_output(offered) {
+        if !order.contains(&beside) {
+            order.push(beside);
         }
     }
-    for device in listed {
-        let name = named_of(&device);
-        if !order.iter().any(|already| named_of(already) == name) {
-            order.push(device);
+    if let Some(usual) = offered.usual.as_ref() {
+        if offered.listed.contains(usual) && !order.contains(usual) {
+            order.push(usual.clone());
         }
     }
+    for name in &offered.listed {
+        if !order.contains(name) {
+            order.push(name.clone());
+        }
+    }
+    order
+}
+
+fn devices_to_try(choice: &InputChoice) -> Result<Vec<cpal::Device>, String> {
+    let one_device_both_ways = crate::devices::one_device_both_ways();
+    let host = crate::devices::host();
+    let output = crate::devices::in_use();
+    let mut pool: Vec<cpal::Device> = if one_device_both_ways {
+        output.iter().cloned().collect()
+    } else {
+        host.input_devices().map_err(|why| why.to_string())?.collect()
+    };
+    let usual = if one_device_both_ways { None } else { host.default_input_device() };
+    if let Some(usual) = usual.as_ref() {
+        if !pool.iter().any(|device| named_of(device) == named_of(usual)) {
+            pool.push(usual.clone());
+        }
+    }
+    let offered = Offered {
+        listed: pool.iter().map(named_of).collect(),
+        usual: usual.as_ref().map(named_of),
+        output: output.as_ref().map(named_of),
+        one_device_both_ways,
+    };
+    let order: Vec<cpal::Device> = order_to_try(choice, &offered)
+        .into_iter()
+        .filter_map(|name| pool.iter().find(|device| named_of(device) == name).cloned())
+        .collect();
     if order.is_empty() {
+        if one_device_both_ways {
+            return Err("the ASIO driver is not open, so there is nothing to record from".to_string());
+        }
         return Err("no recording input found".to_string());
     }
     Ok(order)
@@ -576,6 +629,72 @@ mod tests {
     use super::*;
     use crate::source::Source;
 
+    const WAVES: &str = "Line In /Microphone (Waves SoundGrid)";
+    const FOCUSRITE_IN: &str = "Analogue 1 + 2 (Focusrite USB Audio)";
+    const FOCUSRITE_OUT: &str = "Speakers (Focusrite USB Audio)";
+    const REALTEK: &str = "Microphone (Realtek Audio)";
+    const FOCUSRITE_ASIO: &str = "Focusrite USB ASIO";
+
+    fn on_his_pc() -> Offered {
+        Offered {
+            listed: vec![WAVES.to_string(), FOCUSRITE_IN.to_string(), REALTEK.to_string()],
+            usual: Some(WAVES.to_string()),
+            output: Some(FOCUSRITE_OUT.to_string()),
+            one_device_both_ways: false,
+        }
+    }
+
+    #[test]
+    fn the_input_he_named_is_tried_first() {
+        let order = order_to_try(&InputChoice::Named(REALTEK.to_string()), &on_his_pc());
+        assert_eq!(order.first().map(String::as_str), Some(REALTEK));
+    }
+
+    #[test]
+    fn the_input_beside_the_output_beats_the_system_default() {
+        let order = order_to_try(&InputChoice::SystemDefault, &on_his_pc());
+        assert_eq!(order.first().map(String::as_str), Some(FOCUSRITE_IN));
+        assert!(order.iter().position(|name| name == FOCUSRITE_IN) < order.iter().position(|name| name == WAVES));
+    }
+
+    #[test]
+    fn under_asio_the_input_is_the_asio_device() {
+        let offered = Offered {
+            listed: vec![FOCUSRITE_ASIO.to_string()],
+            usual: None,
+            output: Some(FOCUSRITE_ASIO.to_string()),
+            one_device_both_ways: true,
+        };
+        assert_eq!(order_to_try(&InputChoice::Named(WAVES.to_string()), &offered), vec![FOCUSRITE_ASIO.to_string()]);
+    }
+
+    #[test]
+    fn asio_with_nothing_open_has_nothing_to_record_from() {
+        let offered = Offered { one_device_both_ways: true, ..Offered::default() };
+        assert!(order_to_try(&InputChoice::SystemDefault, &offered).is_empty());
+    }
+
+    #[test]
+    fn an_input_that_has_gone_is_skipped() {
+        let order = order_to_try(&InputChoice::Named("Microphone (A Dongle He Unplugged)".to_string()), &on_his_pc());
+        assert_eq!(order.first().map(String::as_str), Some(FOCUSRITE_IN));
+        assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn an_output_with_no_input_of_its_own_leaves_the_system_default_first() {
+        let mut offered = on_his_pc();
+        offered.output = Some("Headphones (Some Other Card)".to_string());
+        let order = order_to_try(&InputChoice::SystemDefault, &offered);
+        assert_eq!(order.first().map(String::as_str), Some(WAVES));
+        assert_eq!(order.len(), 3);
+    }
+
+    #[test]
+    fn every_listed_input_is_still_tried() {
+        let order = order_to_try(&InputChoice::Named(REALTEK.to_string()), &on_his_pc());
+        assert_eq!(order, vec![REALTEK.to_string(), FOCUSRITE_IN.to_string(), WAVES.to_string()]);
+    }
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("loupe-take-{}-{name}", std::process::id())).join("Audio").join("take.wav")
     }
