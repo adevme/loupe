@@ -346,6 +346,8 @@ impl App {
             .height(self.strip_tall())
             .style(move |_| {
                 let mut look = palette.channel();
+                let tint = if muted { crate::timeline::MUTED_HEADER_TINT } else { crate::timeline::HEADER_TINT };
+                look.background = Some(palette.sheen(crate::theme::mix(palette.panel, colour, tint)));
                 if lifted {
                     look.border = look.border.color(palette.accent).width(2.0);
                 }
