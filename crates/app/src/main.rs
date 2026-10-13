@@ -3702,7 +3702,7 @@ impl App {
             hinted(record, "Record onto every armed track. Ctrl+R does the same."),
             hinted(punch, "Punch: record only inside the part marked on the ruler, replacing what was there."),
             hinted(metronome, "The click you record to. Ctrl+M turns it on and off."),
-            hinted(typing_keys, "Play notes with your letter keys, A to L like a keyboard. Ctrl+T turns it on and off."),
+            hinted(typing_keys, "Play notes with your letter keys: the Z row is the lower octave, the Q row the upper. Ctrl+T turns it on and off."),
         ]
         .push_maybe(lag)
         .spacing(8)

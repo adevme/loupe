@@ -286,7 +286,7 @@ impl App {
         let palette = self.palette;
         column![
             text("Updates").size(13).font(palette.medium),
-            text("Loupe asks the Loupe server whether a newer version is out. It never downloads one without you pressing Update.")
+            text("Loupe asks GitHub whether a newer version is out. It never downloads one without you pressing Update.")
                 .size(12)
                 .color(palette.text_dim),
             iced::widget::checkbox("Check for updates when Loupe starts", self.check_updates)
