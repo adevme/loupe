@@ -81,6 +81,8 @@ pub const MASTER_OWNER: u64 = u64::MAX;
 pub const MONITOR_OWNER: u64 = u64::MAX - 1;
 const SETTLES_IN: std::time::Duration = std::time::Duration::from_millis(180);
 const METER_FALL_PER_TICK: f32 = 0.86;
+const READOUT_HOLD_TICKS: u32 = 25;
+const READOUT_FALL_PER_TICK: f32 = 0.97;
 const FADER_STEP_DB: f32 = 0.5;
 const MASTER_STEP_PERCENT: f32 = 1.0;
 const SYSTEM_INPUT: &str = "System default";
@@ -560,6 +562,8 @@ struct App {
     taking_shape: Vec<f32>,
     chosen_tracks: std::collections::HashSet<loupe_engine::TrackId>,
     track_levels: [f32; loupe_engine::METERS],
+    track_readouts: [(f32, u32); loupe_engine::METERS],
+    master_readout: (f32, u32),
     master_level: f32,
     input_name: Option<String>,
     theme_name: Option<String>,
@@ -737,6 +741,8 @@ impl App {
             taking_shape: Vec::new(),
             chosen_tracks: std::collections::HashSet::new(),
             track_levels: [0.0; loupe_engine::METERS],
+            track_readouts: [(0.0, 0); loupe_engine::METERS],
+            master_readout: (0.0, 0),
             master_level: 0.0,
             input_name: settings.input.clone(),
             theme_name: settings.theme.clone(),
@@ -942,6 +948,8 @@ impl App {
             taking_shape: Vec::new(),
             chosen_tracks: std::collections::HashSet::new(),
             track_levels: [0.0; loupe_engine::METERS],
+            track_readouts: [(0.0, 0); loupe_engine::METERS],
+            master_readout: (0.0, 0),
             master_level: 0.0,
             input_name: None,
             theme_name: None,
@@ -1269,6 +1277,10 @@ impl App {
                     *shown = now.max(*shown * METER_FALL_PER_TICK);
                 }
                 self.master_level = master.max(self.master_level * METER_FALL_PER_TICK);
+                for (held, now) in self.track_readouts.iter_mut().zip(self.track_levels) {
+                    *held = readout_held(*held, now);
+                }
+                self.master_readout = readout_held(self.master_readout, self.master_level);
                 self.engine.collect();
                 self.settle = self.settle.saturating_sub(1);
                 let position = self.engine.position();
@@ -4387,5 +4399,32 @@ mod overlay_window_tests {
         let _ = app.update(Message::ResizedTo(mixer, Size::new(700.0, 300.0)));
         assert_eq!(app.mixer_size, Size::new(700.0, 300.0));
         assert_eq!(app.window, Size::new(1280.0, 760.0), "the mixer window resized the main window");
+    }
+}
+
+fn readout_held((value, hold): (f32, u32), now: f32) -> (f32, u32) {
+    if now >= value {
+        return (now, READOUT_HOLD_TICKS);
+    }
+    if hold > 0 {
+        return (value, hold - 1);
+    }
+    ((value * READOUT_FALL_PER_TICK).max(now), 0)
+}
+
+#[cfg(test)]
+mod readout_tests {
+    use super::*;
+
+    #[test]
+    fn the_peak_readout_holds_then_falls_gently() {
+        let mut held = readout_held((0.0, 0), 0.5);
+        for _ in 0..READOUT_HOLD_TICKS {
+            held = readout_held(held, 0.01);
+            assert_eq!(held.0, 0.5, "the readout dropped before its hold ran out");
+        }
+        held = readout_held(held, 0.01);
+        assert!(held.0 < 0.5 && held.0 > 0.4, "after the hold it falls by a small step, got {}", held.0);
+        assert_eq!(readout_held(held, 0.9).0, 0.9, "a louder peak shows straight away");
     }
 }

@@ -191,7 +191,7 @@ impl App {
                 .spacing(6)
                 .height(Length::Fill)
                 .align_y(Alignment::Center),
-                self.readouts(Level::Master, heard, self.master_level),
+                self.readouts(Level::Master, heard, self.master_readout.0),
                 button(text("M").size(11.5).font(palette.semibold).width(Length::Fill).center())
                     .padding([3, 0])
                     .width(Length::Fill)
@@ -318,7 +318,7 @@ impl App {
                     .spacing(6)
                     .height(Length::Fill)
                     .align_y(Alignment::Center),
-                    self.readouts(Level::Track(id), shown, level),
+                    self.readouts(Level::Track(id), shown, self.track_readouts.get(index).map_or(0.0, |held| held.0)),
                     hrow![
                         button(small("M".into()))
                             .padding([3, 0])
