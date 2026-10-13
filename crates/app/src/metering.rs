@@ -14,8 +14,6 @@ pub const REFRESH_HZ: RangeInclusive<f32> = 10.0..=60.0;
 pub const DEFAULT_DECAY_DB_PER_SECOND: f32 = 82.0;
 pub const DEFAULT_HOLD_SECONDS: f32 = 1.0;
 pub const DEFAULT_REFRESH_HZ: f32 = 60.0;
-pub const READOUT_HOLD_SECONDS: f32 = 0.4;
-pub const READOUT_FALL_DB_PER_SECOND: f32 = 16.5;
 const EARLY_SAMPLE_SECONDS: f32 = 0.004;
 const STILL_LEVEL: f32 = 0.0005;
 const DECAY_KEY: &str = "meter_decay_db_per_second";
@@ -95,8 +93,6 @@ pub struct Meter {
     pub hold: f32,
     hold_left: f32,
     pub max: f32,
-    pub readout: f32,
-    readout_left: f32,
 }
 
 impl Meter {
@@ -115,16 +111,6 @@ impl Meter {
         }
         self.hold = self.hold.max(self.shown);
         self.max = self.max.max(peak);
-        if peak >= self.readout {
-            self.readout = peak;
-            self.readout_left = READOUT_HOLD_SECONDS;
-        } else if self.readout_left >= seconds {
-            self.readout_left -= seconds;
-        } else {
-            let falling = seconds - self.readout_left;
-            self.readout_left = 0.0;
-            self.readout = (self.readout * 10f32.powf(-READOUT_FALL_DB_PER_SECOND * falling / 20.0)).max(peak);
-        }
     }
 
     pub fn reset_max(&mut self) {
@@ -475,25 +461,5 @@ mod tests {
         assert_eq!(junk, MeterSettings::default());
         let not_a_number = MeterSettings { decay_db_per_second: f32::NAN, hold_seconds: f32::INFINITY, refresh_hz: f32::NAN }.clamped();
         assert_eq!(not_a_number, MeterSettings::default());
-    }
-}
-
-#[cfg(test)]
-mod live_readout_tests {
-    use super::*;
-
-    #[test]
-    fn the_number_holds_briefly_then_falls_with_the_signal() {
-        let settings = MeterSettings::default();
-        let mut meter = Meter::default();
-        meter.take(0.5, 0.016, &settings);
-        assert_eq!(meter.readout, 0.5);
-        meter.take(0.01, READOUT_HOLD_SECONDS - 0.05, &settings);
-        assert_eq!(meter.readout, 0.5, "the number dropped before its hold ran out");
-        meter.take(0.01, 1.0, &settings);
-        let db = 20.0 * meter.readout.log10();
-        assert!(db < -6.0 - 15.0 && db > -6.0 - 18.0, "after the hold it falls about 16.5 dB a second, got {db}");
-        meter.take(0.9, 0.016, &settings);
-        assert_eq!(meter.readout, 0.9, "a louder peak shows straight away");
     }
 }
