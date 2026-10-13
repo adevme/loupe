@@ -162,6 +162,7 @@ pub enum Message {
     RulerClicked(Frames),
     SetLoop(LoopRange),
     ResizeTrack { track: TrackId, height: f32 },
+    ResizeLane { target: loupe_engine::Target, height: f32 },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
     DragEnd,
     Split,
@@ -552,6 +553,7 @@ struct Aim {
 struct App {
     palette: Palette,
     heights: HashMap<TrackId, f32>,
+    lane_heights: HashMap<loupe_engine::Target, f32>,
     loop_range: LoopRange,
     tool: Tool,
     level_press: Option<(mixer::Level, Instant)>,
@@ -734,6 +736,7 @@ impl App {
         let mut app = Self {
             palette: loaded.palette,
             heights: HashMap::new(),
+            lane_heights: HashMap::new(),
             loop_range: None,
             tool: Tool::default(),
             level_press: None,
@@ -944,6 +947,7 @@ impl App {
         Self {
             palette: theme::NEUTRAL,
             heights: HashMap::new(),
+            lane_heights: HashMap::new(),
             loop_range: None,
             tool: Tool::default(),
             level_press: None,
@@ -1374,6 +1378,10 @@ impl App {
                 self.seek(at);
             }
             Message::SetLoop(range) => self.set_loop(range),
+            Message::ResizeLane { target, height } => {
+                self.lane_heights.insert(target, height);
+                self.cache.clear();
+            }
             Message::ResizeTrack { track, height } => {
                 match self.chosen_tracks.contains(&track) {
                     true => {
@@ -3526,6 +3534,7 @@ impl App {
             palette: &self.palette,
             view: self.view,
             heights: &self.heights,
+            lane_heights: &self.lane_heights,
             selected: self.selected,
             selection: &self.selection,
             playhead: self.playhead,
@@ -3923,6 +3932,8 @@ impl App {
             Space::new(0, 0).into()
         } else if let Some(notice) = &self.notice {
             text(notice.as_str()).size(12).color(palette.text).into()
+        } else if let (Some(words), None) = (self.hint, &self.reading) {
+            text(words).size(12).color(palette.text_dim).into()
         } else if let (versions::UpdateState::Found(update), false) = (&self.update_state, self.update_dismissed) {
             row![
                 text(format!("Loupe {} is available.", update.version)).size(12).color(palette.text),

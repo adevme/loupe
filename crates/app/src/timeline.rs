@@ -10,7 +10,11 @@ use crate::pointer::EndlessDrag;
 use crate::theme::{self, ArmShape, Palette, PlayheadCap, Side};
 use crate::{icons, Message};
 
-const LANE_HEIGHT: f32 = 54.0;
+const LANE_HEIGHT: f32 = 90.0;
+const LANE_SHORTEST: f32 = 40.0;
+const LANE_TALLEST: f32 = 400.0;
+const LANE_EDGE_REACH: f32 = 4.0;
+const LANE_INSET: f32 = 9.0;
 const INDENT_W: f32 = 14.0;
 const MIN_THUMB_PX: f32 = 28.0;
 const SONG_SPAN_HEADROOM: f64 = 1.2;
@@ -130,6 +134,7 @@ pub struct Timeline<'a> {
     pub palette: &'a Palette,
     pub view: View,
     pub heights: &'a HashMap<TrackId, f32>,
+    pub lane_heights: &'a HashMap<loupe_engine::Target, f32>,
     pub selected: Option<ClipId>,
     pub selection: &'a HashSet<ClipId>,
     pub playhead: Frames,
@@ -158,6 +163,7 @@ pub struct Interaction {
     last_pan_press: Option<(TrackId, Instant)>,
     last_name_press: Option<(TrackId, Instant)>,
     modifiers: keyboard::Modifiers,
+    pointing: Option<(loupe_engine::Target, usize)>,
 }
 
 enum Drag {
@@ -165,6 +171,7 @@ enum Drag {
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
     Resize { track: TrackId, top: f32 },
+    LaneResize { target: loupe_engine::Target, top: f32 },
     Reorder { track: TrackId, from: Point, at: Option<usize> },
     Scroll { grab_x: f32, span: f64 },
     Slice { from: Point, to: Point },
@@ -209,6 +216,7 @@ enum Hit<'a> {
     Scrollbar,
     Ruler,
     Resize(&'a Track),
+    LaneEdge(loupe_engine::Target),
     Mute(&'a Track),
     Solo(&'a Track),
     Pan(&'a Track),
@@ -317,7 +325,7 @@ impl Timeline<'_> {
         if self.hidden(track) {
             return 0.0;
         }
-        self.clips_height(track) + self.takes_height(track) + self.lanes_of(track).len() as f32 * LANE_HEIGHT
+        self.clips_height(track) + self.takes_height(track) + self.lanes_of(track).iter().map(|shape| self.lane_tall(shape.target)).sum::<f32>()
     }
 
     fn take_lanes(&self, track: &Track) -> usize {
@@ -837,6 +845,11 @@ impl Timeline<'_> {
         if let Some(track) = self.resize_grip_at(p) {
             return Hit::Resize(track);
         }
+        if !self.in_header(p.x) {
+            if let Some(target) = self.lane_edge_at(p) {
+                return Hit::LaneEdge(target);
+            }
+        }
         if self.in_header(p.x) {
             if let Some(i) = self.track_at(p.y) {
                 let track = &self.project.tracks[i];
@@ -1071,6 +1084,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Range { anchor, origin: p, moving: false });
                         None
                     }
+                    (_, Hit::LaneEdge(target)) => {
+                        let top = self.lane_top_of(target).unwrap_or(p.y);
+                        state.drag = Some(Drag::LaneResize { target, top });
+                        None
+                    }
                     (_, Hit::Resize(track)) => {
                         let index = self.project.tracks.iter().position(|t| t.id == track.id);
                         let top = index.map_or(self.lanes_top(), |i| self.track_top(i));
@@ -1139,6 +1157,14 @@ impl canvas::Program<Message> for Timeline<'_> {
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let (Some(p), Some(drag)) = (anywhere, state.drag.as_mut()) else {
                     let inside = cursor.is_over(bounds);
+                    let pointing = match anywhere.filter(|_| inside).map(|p| self.hit(p)) {
+                        Some(Hit::Envelope(target, Some(which), ..)) => Some((target, which)),
+                        _ => None,
+                    };
+                    if pointing != state.pointing {
+                        state.pointing = pointing;
+                        return (Ignored, Some(Message::Refresh));
+                    }
                     let over = anywhere.filter(|_| inside).and_then(|p| self.tool_at(p));
                     if let Some(words) = hint_now(self.hinting, over, inside) {
                         return (Ignored, Some(Message::Hint(words)));
@@ -1157,10 +1183,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let Some(top) = self.lane_top_of(target) else {
                             return (Captured, None);
                         };
-                        let inset = 7.0;
-                        let span = (LANE_HEIGHT - inset * 2.0).max(1.0);
-                        let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
-                        let value = shape.lowest + reach * (1.0 - ((p.y - top - inset) / span).clamp(0.0, 1.0));
+                        let value = self.value_at_y(shape, top, p.y);
                         if *which == usize::MAX {
                             *which = shape.points.iter().position(|point| point.at == at).unwrap_or(usize::MAX);
                         }
@@ -1312,6 +1335,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let moved = (p.y - from.y).abs() > REORDER_STARTS_AT;
                         *at = moved.then(|| self.landing_at(p.y));
                         (Captured, None)
+                    }
+                    Drag::LaneResize { target, top } => {
+                        let height = (p.y - *top).clamp(LANE_SHORTEST, LANE_TALLEST).round();
+                        let changed = self.lane_tall(*target) != height;
+                        (Captured, changed.then_some(Message::ResizeLane { target: *target, height }))
                     }
                     Drag::Resize { track, top } => {
                         let below = self.project.track(*track).map_or(0.0, |t| self.height_of(t) - self.clips_height(t));
@@ -1600,6 +1628,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                 });
             }
         }
+        if let Some((target, at, value, spot)) = self.point_tip(state, cursor, bounds) {
+            self.draw_point_tip(&mut overlay, target, at, value, spot);
+        }
         vec![content, overlay.into_geometry()]
     }
 
@@ -1607,6 +1638,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         match state.drag {
             Some(Drag::Clip { moving: true, .. }) => return mouse::Interaction::Grabbing,
             Some(Drag::Resize { .. }) => return mouse::Interaction::ResizingVertically,
+            Some(Drag::LaneResize { .. }) => return mouse::Interaction::ResizingVertically,
             Some(Drag::Reorder { at: Some(_), .. }) => return mouse::Interaction::Grabbing,
             Some(Drag::Grip { grip, .. }) => return grip.pointer(),
             Some(Drag::Trim { .. }) => return mouse::Interaction::ResizingHorizontally,
@@ -1616,6 +1648,7 @@ impl canvas::Program<Message> for Timeline<'_> {
         }
         match (self.tool, cursor.position_in(bounds).map(|p| self.hit(p))) {
             (_, Some(Hit::Resize(_))) => mouse::Interaction::ResizingVertically,
+            (_, Some(Hit::LaneEdge(_))) => mouse::Interaction::ResizingVertically,
             (
                 _,
                 Some(
@@ -1711,7 +1744,7 @@ impl Timeline<'_> {
             let mut lane_top = top + self.envelopes_top(track);
             for shape in self.lanes_of(track) {
                 self.draw_envelope(frame, size, shape, lane_top);
-                lane_top += LANE_HEIGHT;
+                lane_top += self.lane_tall(shape.target);
             }
         }
     }
@@ -1720,22 +1753,18 @@ impl Timeline<'_> {
         let track = &self.project.tracks[index];
         let mut top = self.track_top(index) + self.envelopes_top(track);
         for shape in self.lanes_of(track) {
-            if p.y >= top && p.y < top + LANE_HEIGHT {
-                let inset = 7.0;
-                let span = (LANE_HEIGHT - inset * 2.0).max(1.0);
-                let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
-                let value = shape.lowest + reach * (1.0 - ((p.y - top - inset) / span).clamp(0.0, 1.0));
+            let tall = self.lane_tall(shape.target);
+            if p.y >= top && p.y < top + tall {
+                let value = self.value_at_y(shape, top, p.y);
                 let offset = self.lane_offset(shape.target);
                 let at = (self.frames_at(p.x).max(0.0) as Frames).saturating_sub(offset);
                 let near = shape.points.iter().position(|point| {
-                    let seen = Point::new(self.x_of((point.at + offset) as f64), {
-                        top + inset + span * (1.0 - (point.value - shape.lowest) / reach)
-                    });
+                    let seen = Point::new(self.x_of((point.at + offset) as f64), self.y_of_value(shape, top, point.value));
                     seen.distance(p) <= HANDLE_REACH
                 });
                 return Some(Hit::Envelope(shape.target, near, at, value));
             }
-            top += LANE_HEIGHT;
+            top += tall;
         }
         None
     }
@@ -1747,7 +1776,7 @@ impl Timeline<'_> {
                 if shape.target == target {
                     return Some(top);
                 }
-                top += LANE_HEIGHT;
+                top += self.lane_tall(shape.target);
             }
         }
         None
@@ -1755,6 +1784,93 @@ impl Timeline<'_> {
 
     fn lane_label(&self, target: loupe_engine::Target) -> String {
         crate::readings::lane_label(self.project, self.knobs, target)
+    }
+
+    fn lane_tall(&self, target: loupe_engine::Target) -> f32 {
+        self.lane_heights.get(&target).copied().unwrap_or(LANE_HEIGHT)
+    }
+
+    fn lane_span(&self, shape: &loupe_engine::Envelope) -> f32 {
+        (self.lane_tall(shape.target) - LANE_INSET * 2.0).max(1.0)
+    }
+
+    fn value_at_y(&self, shape: &loupe_engine::Envelope, top: f32, y: f32) -> f32 {
+        let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
+        shape.lowest + reach * (1.0 - ((y - top - LANE_INSET) / self.lane_span(shape)).clamp(0.0, 1.0))
+    }
+
+    fn y_of_value(&self, shape: &loupe_engine::Envelope, top: f32, value: f32) -> f32 {
+        let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
+        top + LANE_INSET + self.lane_span(shape) * (1.0 - (value - shape.lowest) / reach)
+    }
+
+    fn point_tip(&self, state: &Interaction, cursor: mouse::Cursor, bounds: Rectangle) -> Option<(loupe_engine::Target, Frames, f32, Point)> {
+        let (target, at, value) = match &state.drag {
+            Some(Drag::Point { target, .. }) => {
+                let p = cursor.position_in(bounds)?;
+                let shape = self.project.envelope(*target)?;
+                let top = self.lane_top_of(*target)?;
+                let at = (self.frames_at(p.x).max(0.0) as Frames).saturating_sub(self.lane_offset(*target));
+                (*target, at, self.value_at_y(shape, top, p.y))
+            }
+            None => {
+                let (target, which) = state.pointing?;
+                let point = self.project.envelope(target)?.points.get(which)?;
+                (target, point.at, point.value)
+            }
+            _ => return None,
+        };
+        let shape = self.project.envelope(target)?;
+        let top = self.lane_top_of(target)?;
+        let value = value.clamp(shape.lowest, shape.highest);
+        let spot = Point::new(self.x_of((at + self.lane_offset(target)) as f64), self.y_of_value(shape, top, value));
+        Some((target, at, value, spot))
+    }
+
+    fn draw_point_tip(&self, overlay: &mut Frame, target: loupe_engine::Target, at: Frames, value: f32, spot: Point) {
+        let p = self.palette;
+        if spot.x < self.lanes_left() || spot.x > self.lanes_right() {
+            return;
+        }
+        overlay.stroke(&Path::circle(spot, 6.0), Stroke::default().with_color(p.accent).with_width(1.5));
+        let words = crate::readings::point_tip(self.project, target, at, value);
+        let size = 12.0;
+        let wide = words.chars().count() as f32 * size * 0.58 + 16.0;
+        let tall = 24.0;
+        let lane_top = self.lane_top_of(target).unwrap_or(spot.y);
+        let mut left = spot.x + 12.0;
+        if left + wide > self.lanes_right() {
+            left = spot.x - 12.0 - wide;
+        }
+        let mut top = spot.y - tall - 8.0;
+        if top < lane_top.max(self.lanes_top()) {
+            top = spot.y + 10.0;
+        }
+        let corner = Point::new(left.round(), top.round());
+        overlay.fill(&Path::rounded_rectangle(corner, Size::new(wide, tall), 5.0.into()), p.panel);
+        overlay.stroke(&Path::rounded_rectangle(corner, Size::new(wide, tall), 5.0.into()), Stroke::default().with_color(p.line).with_width(1.0));
+        overlay.fill_text(Text {
+            content: words,
+            position: Point::new(corner.x + 8.0, corner.y + tall / 2.0),
+            color: p.text,
+            size: size.into(),
+            font: p.medium,
+            vertical_alignment: iced::alignment::Vertical::Center,
+            ..Text::default()
+        });
+    }
+
+    fn lane_edge_at(&self, p: Point) -> Option<loupe_engine::Target> {
+        for (i, track) in self.project.tracks.iter().enumerate() {
+            let mut top = self.track_top(i) + self.envelopes_top(track);
+            for shape in self.lanes_of(track) {
+                top += self.lane_tall(shape.target);
+                if (p.y - top).abs() <= LANE_EDGE_REACH {
+                    return Some(shape.target);
+                }
+            }
+        }
+        None
     }
 
     fn lane_offset(&self, target: loupe_engine::Target) -> Frames {
@@ -1766,12 +1882,10 @@ impl Timeline<'_> {
 
     fn draw_envelope(&self, frame: &mut Frame, size: Size, shape: &loupe_engine::Envelope, top: f32) {
         let p = self.palette;
-        frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, LANE_HEIGHT), theme::mix(p.background, p.panel, 0.5));
-        frame.fill_rectangle(Point::new(0.0, top + LANE_HEIGHT - 1.0), Size::new(size.width, 1.0), p.line);
-        let inset = 7.0;
-        let span = (LANE_HEIGHT - inset * 2.0).max(1.0);
-        let reach = (shape.highest - shape.lowest).max(f32::EPSILON);
-        let y_of = |value: f32| top + inset + span * (1.0 - (value - shape.lowest) / reach);
+        let tall = self.lane_tall(shape.target);
+        frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, tall), theme::mix(p.background, p.panel, 0.5));
+        frame.fill_rectangle(Point::new(0.0, top + tall - 1.0), Size::new(size.width, 1.0), p.line);
+        let y_of = |value: f32| self.y_of_value(shape, top, value);
         let offset = self.lane_offset(shape.target);
         let x_of = |at: Frames| self.x_of((at + offset) as f64) - self.lanes_left();
         let mut line = iced::widget::canvas::path::Builder::new();
@@ -2742,8 +2856,9 @@ impl crate::App {
                 .envelopes
                 .iter()
                 .filter(|shape| shape.lane_open && (shape.target.on_track() == Some(track.id) || shape.target.on_clip().is_some_and(|clip| track.clips.iter().any(|kept| kept.id == clip))))
-                .count() as f32;
-            let tall = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height) + open_take_lanes(track) as f32 * TAKE_LANE_HEIGHT + lanes * LANE_HEIGHT;
+                .map(|shape| self.lane_heights.get(&shape.target).copied().unwrap_or(LANE_HEIGHT))
+                .sum::<f32>();
+            let tall = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height) + open_take_lanes(track) as f32 * TAKE_LANE_HEIGHT + lanes;
             if at.y >= y && at.y < y + tall {
                 let seconds = (at.x - left) as f64 / self.view.zoom + self.view.scroll;
                 let start = (seconds * self.project.rate as f64).max(0.0) as Frames;
@@ -2944,6 +3059,7 @@ mod take_folders {
             palette: &app.palette,
             view: app.view,
             heights: &app.heights,
+            lane_heights: &app.lane_heights,
             selected: app.selected,
             selection: &app.selection,
             playhead: app.playhead,

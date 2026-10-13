@@ -115,6 +115,11 @@ pub fn point_reading(project: &Project, knobs: &KnobNames, target: Target, at: F
     )
 }
 
+pub fn point_tip(project: &Project, target: Target, at: Frames, value: f32) -> String {
+    let offset = target.on_clip().and_then(|clip| project.clip(clip)).map_or(0, |clip| clip.start);
+    format!("{}  \u{b7}  {}", value_text(target, value), bar_beat(at + offset, project.rate, project.bpm))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
