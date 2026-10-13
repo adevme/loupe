@@ -945,8 +945,8 @@ impl canvas::Program<Message> for Timeline<'_> {
         use canvas::event::Status::{Captured, Ignored};
 
         let anywhere = cursor.position().map(|p| Point::new(p.x - bounds.x, p.y - bounds.y));
-        let free = !self.snap || state.modifiers.shift();
-        let pace = if state.modifiers.shift() { crate::knob::FINE } else { 1.0 };
+        let free = !self.snap || state.modifiers.alt();
+        let pace = if state.modifiers.alt() { crate::knob::FINE } else { 1.0 };
 
         match event {
             canvas::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
@@ -1456,7 +1456,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 Stroke::default().with_color(theme::alpha(p.accent, 0.6)).with_width(1.0),
             );
         }
-        let free = !self.snap || state.modifiers.shift();
+        let free = !self.snap || state.modifiers.alt();
         let slicing = match (&state.drag, self.tool, cursor.position_in(bounds)) {
             (Some(Drag::Slice { from, to }), _, _) => Some((*from, *to)),
             (None, Tool::Razor, Some(at)) if self.in_lanes(at.x) && at.y >= self.lanes_top() => Some((at, at)),
