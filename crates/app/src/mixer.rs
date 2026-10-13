@@ -492,7 +492,7 @@ impl canvas::Program<Message> for Meter {
             let y = (h - inset - up(mark)).round();
             let named = labelled.iter().all(|other| (other - y).abs() >= 11.0);
             frame.fill_rectangle(iced::Point::new(x, y), iced::Size::new(w, 1.0), crate::theme::alpha(p.background, 0.7));
-            frame.fill_rectangle(iced::Point::new(SCALE_W - 3.0, y), iced::Size::new(3.0, 1.0), p.text_faint);
+            frame.fill_rectangle(iced::Point::new(SCALE_W - 3.0, y), iced::Size::new(3.0, 1.0), p.text_dim);
             if !named {
                 continue;
             }
@@ -500,7 +500,7 @@ impl canvas::Program<Message> for Meter {
             frame.fill_text(canvas::Text {
                 content: if mark > 0.0 { format!("+{}", mark as i32) } else { format!("{}", mark.abs() as i32) },
                 position: iced::Point::new(SCALE_W - 4.0, y),
-                color: p.text_faint,
+                color: p.text_dim,
                 size: 9.0.into(),
                 font: p.mono,
                 horizontal_alignment: iced::alignment::Horizontal::Right,
