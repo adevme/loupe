@@ -418,7 +418,7 @@ impl App {
                 .style(move |_, status| palette.outlined(status))
                 .on_press(Message::CopyText(why.to_string())),
             horizontal_space(),
-            button(text("OK").size(13).font(palette.medium).color(Color::WHITE))
+            button(text("OK").size(13).font(palette.medium))
                 .padding([7, 18])
                 .style(move |_, status| palette.solid(status))
                 .on_press(Message::CloseOverlay),

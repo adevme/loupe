@@ -538,11 +538,13 @@ fn devices_to_try(choice: &InputChoice) -> Result<Vec<cpal::Device>, String> {
 }
 
 fn settings_for(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig, String> {
-    if let Ok(usual) = device.default_input_config() {
+    let asked = device.default_input_config();
+    if let Ok(usual) = asked {
         return Ok(usual);
     }
     if crate::devices::one_device_both_ways() {
-        return Err("the ASIO driver would not say how it records".to_string());
+        let why = asked.err().map(|why| why.to_string()).unwrap_or_default();
+        return Err(format!("the ASIO driver would not say how it records ({why})"));
     }
     let offered = device.supported_input_configs().map_err(|why| why.to_string())?;
     offered
