@@ -162,6 +162,7 @@ pub enum Message {
     RulerClicked(Frames),
     SetLoop(LoopRange),
     ResizeTrack { track: TrackId, height: f32 },
+    ResizeLane { target: loupe_engine::Target, height: f32 },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
     DragEnd,
     Split,
@@ -469,6 +470,7 @@ enum Run {
     Stretch(ClipId),
     Send(TrackId, TrackId),
     Point(loupe_engine::Target),
+    LaneHeight(loupe_engine::Target),
     Notes(ClipId),
     Sampler(TrackId),
 }
@@ -1374,6 +1376,9 @@ impl App {
                 self.seek(at);
             }
             Message::SetLoop(range) => self.set_loop(range),
+            Message::ResizeLane { target, height } => {
+                self.edit(Some(Run::LaneHeight(target)), Command::SizeEnvelopeLane { target, height: Some(height) });
+            }
             Message::ResizeTrack { track, height } => {
                 match self.chosen_tracks.contains(&track) {
                     true => {
@@ -3923,6 +3928,8 @@ impl App {
             Space::new(0, 0).into()
         } else if let Some(notice) = &self.notice {
             text(notice.as_str()).size(12).color(palette.text).into()
+        } else if let (Some(words), None) = (self.hint, &self.reading) {
+            text(words).size(12).color(palette.text_dim).into()
         } else if let (versions::UpdateState::Found(update), false) = (&self.update_state, self.update_dismissed) {
             row![
                 text(format!("Loupe {} is available.", update.version)).size(12).color(palette.text),

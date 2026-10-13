@@ -58,6 +58,7 @@ pub struct Envelope {
     pub points: Vec<Point>,
     pub armed: Option<Mode>,
     pub lane_open: bool,
+    pub lane_height: Option<f32>,
     pub lowest: f32,
     pub highest: f32,
 }
@@ -69,6 +70,7 @@ impl Envelope {
             points: vec![Point { at: 0, value: resting.clamp(lowest, highest), shape: Shape::Linear }],
             armed: None,
             lane_open: true,
+            lane_height: None,
             lowest,
             highest,
         }
