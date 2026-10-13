@@ -23,6 +23,7 @@ mod routing;
 mod safe_mode;
 mod plugins;
 mod racks;
+mod readings;
 mod stretching;
 mod stockwin;
 mod printing;
@@ -261,6 +262,7 @@ pub enum Message {
     PutPoint { target: loupe_engine::Target, at: Frames, value: f32 },
     DragPoint { target: loupe_engine::Target, which: usize, at: Frames, value: f32 },
     DropPoint { target: loupe_engine::Target, which: usize },
+    PointLetGo,
     AddEnvelope(loupe_engine::Target),
     RemoveEnvelope(loupe_engine::Target),
     ArmEnvelope(loupe_engine::Target, Option<loupe_engine::Mode>),
@@ -2244,6 +2246,7 @@ impl App {
             Message::PutPoint { target, at, value } => {
                 let point = loupe_engine::Point { at, value, shape: loupe_engine::Shape::Linear };
                 self.edit(Some(Run::Point(target)), Command::PutPoint { target, point });
+                self.read_point(target, at, value);
             }
             Message::DragPoint { target, which, at, value } => {
                 let shape = self.project.envelope(target).and_then(|found| found.points.get(which)).map(|point| point.shape);
@@ -2251,10 +2254,12 @@ impl App {
                 self.edit(Some(Run::Point(target)), Command::DropPoint { target, which });
                 let point = loupe_engine::Point { at, value, shape };
                 self.edit(Some(Run::Point(target)), Command::PutPoint { target, point });
+                self.read_point(target, at, value);
             }
             Message::DropPoint { target, which } => {
                 self.edit(None, Command::DropPoint { target, which });
             }
+            Message::PointLetGo => self.reading = None,
             Message::PluginHighlight(step) => {
                 let count = self.in_the_picker().len();
                 if count > 0 {
@@ -3038,6 +3043,14 @@ impl App {
         self.write_point(writer.target, writer.value, loupe_engine::Mode::Latch);
     }
 
+    fn read_point(&mut self, target: loupe_engine::Target, at: Frames, value: f32) {
+        let value = match self.project.envelope(target) {
+            Some(shape) => value.clamp(shape.lowest, shape.highest),
+            None => value,
+        };
+        self.reading = Some(readings::point_reading(&self.project, &self.knob_names, target, at, value));
+    }
+
     pub(crate) fn stop_writing(&mut self) {
         let Some(writer) = self.writing.take() else { return };
         let at = self.playhead;
@@ -3558,8 +3571,7 @@ impl App {
     fn transport(&self) -> Element<'_, Message> {
         let palette = self.palette;
         let seconds = self.playhead as f64 / self.project.rate as f64;
-        let beats = seconds * self.project.bpm / 60.0;
-        let position = format!("{}.{}", (beats / 4.0) as u64 + 1, beats as u64 % 4 + 1);
+        let position = readings::bar_beat(self.playhead, self.project.rate, self.project.bpm);
         let clock = format!(
             "{}:{:02}.{:03}",
             (seconds / 60.0) as u64,
