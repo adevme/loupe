@@ -35,7 +35,7 @@ impl vst3::Steinberg::IPlugFrameTrait for Frame {
 
 pub struct Quiet {
     turns: std::cell::RefCell<Option<vst3::ComWrapper<crate::changes::Turns>>>,
-    touched: std::cell::Cell<bool>,
+    touched: std::sync::Arc<std::sync::atomic::AtomicBool>,
     latency_moved: std::cell::Cell<bool>,
 }
 
@@ -43,13 +43,13 @@ impl Quiet {
     pub fn new() -> Self {
         Self {
             turns: std::cell::RefCell::new(None),
-            touched: std::cell::Cell::new(false),
+            touched: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             latency_moved: std::cell::Cell::new(false),
         }
     }
 
     pub fn was_touched(&self) -> bool {
-        self.touched.replace(false)
+        self.touched.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn latency_moved(&self) -> bool {
@@ -77,7 +77,7 @@ impl IComponentHandlerTrait for Quiet {
     }
 
     unsafe fn performEdit(&self, id: u32, value: f64) -> i32 {
-        self.touched.set(true);
+        self.touched.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(turns) = self.turns.borrow().as_ref() {
             turns.set(id, value);
         }
@@ -176,6 +176,10 @@ impl Editor {
 
     pub fn was_touched(&self) -> bool {
         self._handler.was_touched()
+    }
+
+    pub fn touches(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self._handler.touched.clone()
     }
 
     pub fn latency_moved(&self) -> bool {

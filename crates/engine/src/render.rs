@@ -19,6 +19,7 @@ pub struct PluginSpending {
     pub waves: u64,
     pub tracks_in_waves: u64,
     pub at_once: usize,
+    pub late_replies: u64,
 }
 
 #[derive(Default)]

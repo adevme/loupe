@@ -554,6 +554,7 @@ impl Effect {
             self.side_left[i] = frame[0];
             self.side_right[i] = frame[1];
         }
+        self.turns.take_in();
         unsafe {
             let mut channels = [self.left.as_mut_ptr(), self.right.as_mut_ptr()];
             let mut side_channels = [self.side_left.as_mut_ptr(), self.side_right.as_mut_ptr()];

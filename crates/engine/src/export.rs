@@ -1064,6 +1064,7 @@ mod tests {
             waves: 4,
             tracks_in_waves: 8,
             at_once: 2,
+            late_replies: 0,
         });
         pacer.wrote(span);
         pacer.finished_a_stage();

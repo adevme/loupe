@@ -1,16 +1,22 @@
+use std::cell::Cell;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 use loupe_plugins::wire::FELL;
 
-static SEAT_AND_ONE: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static SEAT_AND_ONE: Cell<usize> = const { Cell::new(0) };
+}
+static ANY_SEAT_AND_ONE: AtomicUsize = AtomicUsize::new(0);
 static TELLING: AtomicI32 = AtomicI32::new(-1);
 
 pub fn working_on(seat: usize) {
-    SEAT_AND_ONE.store(seat + 1, Ordering::Relaxed);
+    SEAT_AND_ONE.set(seat + 1);
+    ANY_SEAT_AND_ONE.store(seat + 1, Ordering::Relaxed);
 }
 
 pub fn finished() {
-    SEAT_AND_ONE.store(0, Ordering::Relaxed);
+    let mine = SEAT_AND_ONE.replace(0);
+    let _ = ANY_SEAT_AND_ONE.compare_exchange(mine, 0, Ordering::Relaxed, Ordering::Relaxed);
 }
 
 pub fn tell_on_a_crash(fd: i32) {
@@ -19,7 +25,10 @@ pub fn tell_on_a_crash(fd: i32) {
 }
 
 fn name_the_seat() {
-    let seat = SEAT_AND_ONE.load(Ordering::Relaxed);
+    let seat = match SEAT_AND_ONE.get() {
+        0 => ANY_SEAT_AND_ONE.load(Ordering::Relaxed),
+        mine => mine,
+    };
     let fd = TELLING.load(Ordering::Relaxed);
     if seat == 0 || fd < 0 {
         return;
