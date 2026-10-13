@@ -11,6 +11,7 @@ mod crash;
 mod crash_reports;
 mod exporting;
 mod files;
+mod following;
 mod home;
 mod icons;
 mod knob;
@@ -340,6 +341,7 @@ pub enum Message {
     PasteClips,
     DuplicateClips,
     CountInChosen(CountIn),
+    FollowChosen(following::Follow),
     PrerollChosen(CountIn),
     TogglePunch,
     ClipToTrack(ClipId, TrackId),
@@ -687,6 +689,7 @@ struct App {
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
     snap: bool,
+    follow: following::Follow,
     midi_chosen: Vec<String>,
     midi_around: Vec<String>,
     stretches: stretching::Stretches,
@@ -837,6 +840,7 @@ impl App {
             copied_clips: None,
             scripts: Vec::new(),
             snap: settings.snap,
+            follow: settings.follow,
             midi_chosen: settings.midi_inputs.clone().unwrap_or_default(),
             midi_around: loupe_engine::MidiKeys::around(),
             stretches: stretching::Stretches::default(),
@@ -1041,6 +1045,7 @@ impl App {
             copied_clips: None,
             scripts: Vec::new(),
             snap: false,
+            follow: following::Follow::default(),
             midi_chosen: Vec::new(),
             midi_around: Vec::new(),
             stretches: stretching::Stretches::default(),
@@ -1266,8 +1271,8 @@ impl App {
                 self.settle = self.settle.saturating_sub(1);
                 let position = self.engine.position();
                 if position != self.playhead {
-                    self.playhead = position;
-                    self.follow();
+                    let was = std::mem::replace(&mut self.playhead, position);
+                    self.follow(was);
                 }
                 return self.take_plugin_window_chords();
             }
@@ -2670,6 +2675,12 @@ impl App {
                     self.problem = Some(format!("Could not save settings: {why}"));
                 }
             }
+            Message::FollowChosen(follow) => {
+                self.follow = follow;
+                if let Err(why) = settings::save("follow", follow.saved_as()) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
             Message::ThemeChosen(name) => return self.use_theme(name),
             Message::ThemeFontLoaded => self.cache.clear(),
             Message::ShowThemes => self.show_themes_folder(),
@@ -3333,12 +3344,19 @@ impl App {
         }
     }
 
-    fn follow(&mut self) {
-        let width = (self.canvas_width() - self.palette.header_width) as f64;
-        let x = (self.playhead as f64 / self.project.rate as f64 - self.view.scroll) * self.view.zoom;
-        if self.playing && (x > width - 24.0 || x < 0.0) {
-            let lead = width * 0.1 / self.view.zoom;
-            self.view.scroll = (self.playhead as f64 / self.project.rate as f64 - lead).max(0.0);
+    fn follow(&mut self, was: Frames) {
+        if !self.playing {
+            return;
+        }
+        let rate = self.project.rate.max(1) as f64;
+        let at = self.playhead as f64 / rate;
+        let sight = following::Sight { scroll: self.view.scroll, zoom: self.view.zoom, width: (self.canvas_width() - self.palette.header_width) as f64 };
+        let endless = self.recording.as_ref().is_some_and(|recording| recording.looping.is_none());
+        let loop_range = self.loop_range.map(|(from, to)| (from as f64 / rate, to as f64 / rate));
+        let round = following::round_at(at, loop_range, self.project.length() as f64 / rate, endless);
+        let scroll = self.follow.scroll(sight, was as f64 / rate, at, round);
+        if scroll != self.view.scroll {
+            self.view.scroll = scroll;
             self.cache.clear();
         }
     }
@@ -3754,6 +3772,15 @@ impl App {
         ]
         .spacing(8);
 
+        let follow = column![
+            text("Follow the playhead").size(13).font(palette.medium),
+            text("Smooth keeps the playhead in the middle and slides the song under it. Page turns a whole page when the playhead reaches the right edge.")
+                .size(12)
+                .color(palette.text_dim),
+            theme::picker(palette, following::Follow::ALL, Some(self.follow), Message::FollowChosen).width(160),
+        ]
+        .spacing(8);
+
         let home = settings::home_folder(self.folder.as_deref());
         let folder = column![
             text("Loupe folder").size(13).font(palette.medium),
@@ -3808,7 +3835,7 @@ impl App {
         }))
         .spacing(4);
         let page = match current {
-            SettingsTab::Display => column![self.theme_picker(), rule(palette), scale].spacing(16),
+            SettingsTab::Display => column![self.theme_picker(), rule(palette), scale, rule(palette), follow].spacing(16),
             SettingsTab::File => column![folder, rule(palette), self.autosave_settings()].spacing(16),
             SettingsTab::Recording => recording,
             SettingsTab::Audio => column![self.audio_settings()],

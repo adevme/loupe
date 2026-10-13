@@ -16,7 +16,7 @@ pub struct Recording {
     note_tracks: Vec<TrackId>,
     pub taped: Vec<TapedKey>,
     counted_in: bool,
-    looping: Option<(Frames, Frames)>,
+    pub looping: Option<(Frames, Frames)>,
     pub began: Option<i64>,
     pub punch: Option<(Frames, Frames)>,
 }

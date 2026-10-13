@@ -33,6 +33,7 @@ pub struct Settings {
     pub hear_input: Hearing,
     pub hear_through_chain: bool,
     pub snap: bool,
+    pub follow: crate::following::Follow,
     pub midi_inputs: Option<Vec<String>>,
     pub audio: loupe_engine::Device,
     pub export: ExportChoices,
@@ -103,6 +104,7 @@ impl Settings {
             hear_input: Hearing::from_saved(value_of("hear_input")),
             hear_through_chain: value_of("hear_through_chain") != Some("off"),
             snap: value_of("snap") != Some("off"),
+            follow: crate::following::Follow::from_saved(value_of("follow")),
             midi_inputs: value_of("midi_inputs").map(|value| value.split('\t').filter(|name| !name.is_empty()).map(str::to_string).collect()),
             audio: loupe_engine::Device {
                 driver: value_of("audio_driver").map(str::to_string),

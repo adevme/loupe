@@ -198,7 +198,7 @@ mod tests {
 
     #[test]
     fn the_first_run_says_nothing_until_the_notice_has_been_seen() {
-        let fresh = settings::Settings { midi_inputs: None, mixer_alone: false, hear_through_chain: true,
+        let fresh = settings::Settings { midi_inputs: None, follow: crate::following::Follow::Smooth, mixer_alone: false, hear_through_chain: true,
             theme: None,
             scale: 1.0,
             mixer_height: None,
