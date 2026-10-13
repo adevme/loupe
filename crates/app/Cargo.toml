@@ -17,6 +17,9 @@ sha2 = "0.10"
 iced_runtime = "0.13"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
+[dev-dependencies]
+iced_tiny_skia = "0.13"
+
 [build-dependencies]
 winresource = "0.1"
 

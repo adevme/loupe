@@ -252,6 +252,7 @@ impl App {
     }
 
     pub(crate) fn replace_project(&mut self, project: Project, heights: HashMap<TrackId, f32>) {
+        self.fx_windows_closing.extend(self.fx_windows.drain(..).map(|fx| fx.id));
         self.project = project;
         self.heights = heights;
         self.undo.clear();

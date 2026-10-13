@@ -363,9 +363,9 @@ pub enum Message {
     MidiInputToggled(String),
     OpenMasterPlugins,
     AddMasterPlugin(usize),
-    ChainName(String),
-    SaveChain,
-    UseChain(PathBuf),
+    ChainName(stockwin::Spot, String),
+    SaveChain(stockwin::Spot),
+    UseChain(stockwin::Spot, PathBuf),
     RemoveMasterPlugin(usize),
     BypassMasterPlugin(usize),
     ShowMasterPlugin(usize),
@@ -477,7 +477,6 @@ pub enum Overlay {
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
-    Chain(stockwin::Spot),
     Exported(PathBuf, Option<String>),
     MixerMenu { at: Point },
     Rename { track: TrackId, at: Point },
@@ -584,7 +583,7 @@ struct App {
     scanning: bool,
     plugin_filter: String,
     chains: Vec<(String, PathBuf)>,
-    chain_name: String,
+    chain_names: HashMap<stockwin::Spot, String>,
     plugin_highlight: usize,
     plugin_uses: plugins::Uses,
     falls: racks::Falls,
@@ -638,6 +637,8 @@ struct App {
     main_window: window::Id,
     focused: window::Id,
     mixer_window: Option<window::Id>,
+    fx_windows: Vec<chainwin::FxWindow>,
+    fx_windows_closing: Vec<window::Id>,
     mixer_size: Size,
     mixer_open: bool,
     mixer_wants_alone: bool,
@@ -789,6 +790,8 @@ impl App {
             main_window: main,
             focused: main,
             mixer_window: None,
+            fx_windows: Vec::new(),
+            fx_windows_closing: Vec::new(),
             mixer_size: mixer::MIXER_WINDOW,
             mixer_open: settings.mixer_open,
             mixer_wants_alone: settings.mixer_alone,
@@ -866,7 +869,7 @@ impl App {
             reading: None,
             plugin_filter: String::new(),
             chains: Vec::new(),
-            chain_name: String::new(),
+            chain_names: HashMap::new(),
             plugin_highlight: 0,
             plugin_uses: plugins::Uses::load(),
             plugins_off: racks::PluginsOff::default(),
@@ -994,6 +997,8 @@ impl App {
             main_window: main,
             focused: main,
             mixer_window: None,
+            fx_windows: Vec::new(),
+            fx_windows_closing: Vec::new(),
             mixer_size: mixer::MIXER_WINDOW,
             mixer_open: false,
             mixer_wants_alone: false,
@@ -1071,7 +1076,7 @@ impl App {
             reading: None,
             plugin_filter: String::new(),
             chains: Vec::new(),
-            chain_name: String::new(),
+            chain_names: HashMap::new(),
             plugin_highlight: 0,
             plugin_uses: plugins::Uses::default(),
             plugins_off: racks::PluginsOff::default(),
@@ -1089,7 +1094,7 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let before = self.overlay.clone();
-        let task = self.with_overlay_time(message);
+        let mut task = self.with_overlay_time(message);
         if std::mem::discriminant(&self.overlay) != std::mem::discriminant(&before) {
             self.overlay_since = matches!(self.overlay, Overlay::None).then_some(None).unwrap_or(Some(Instant::now()));
         }
@@ -1098,7 +1103,11 @@ impl App {
                 Overlay::None => self.main_window,
                 _ => self.opens_in_front(),
             };
+            if self.overlay != Overlay::None && self.fx_window_at(self.focused).is_some() {
+                task = Task::batch([task, window::gain_focus(self.overlay_window)]);
+            }
         }
+        task = Task::batch([task, self.settle_fx_windows()]);
         if !self.a_window_of_ours(self.overlay_window) {
             self.overlay_window = self.main_window;
             if self.overlay.is_a_menu() {
@@ -1109,9 +1118,10 @@ impl App {
         task
     }
 
-    fn opens_in_front(&self) -> window::Id {
-        match self.a_window_of_ours(self.focused) {
-            true => self.focused,
+    pub(crate) fn opens_in_front(&self) -> window::Id {
+        let behind = self.fx_window_at(self.focused).map_or(self.focused, |fx| fx.home);
+        match self.a_window_of_ours(behind) {
+            true => behind,
             false => self.main_window,
         }
     }
@@ -1666,7 +1676,7 @@ impl App {
                     return self.update(Message::CloseOverlay);
                 }
             }
-            Message::OpenChain(spot) => self.overlay = Overlay::Chain(spot),
+            Message::OpenChain(spot) => return self.open_fx_window(spot),
             Message::SetFxMix(spot, slot, mix) => self.set_fx_mix(spot, slot, mix),
             Message::ChainGrab(spot, slot) => {
                 self.chain_drag = Some((spot, slot));
@@ -1831,11 +1841,18 @@ impl App {
                 let _ = settings::save("mixer_alone", "yes");
             }
             Message::WindowFocused(window) => {
-                if self.a_window_of_ours(window) {
+                if self.a_window_of_ours(window) || self.fx_window_at(window).is_some() {
                     self.focused = window;
                 }
             }
             Message::WindowClosed(window) => {
+                if !self.going && self.fx_window_at(window).is_some() {
+                    self.fx_windows.retain(|fx| fx.id != window);
+                    if self.focused == window {
+                        self.focused = self.main_window;
+                    }
+                    return window::close(window);
+                }
                 match closing::window_closed(window, self.main_window, self.mixer_window, self.going) {
                     closing::Closing::Redock => {
                         self.mixer_window = None;
@@ -1932,9 +1949,11 @@ impl App {
             Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
-            Message::ChainName(typed) => self.chain_name = typed,
-            Message::SaveChain => self.save_chain(),
-            Message::UseChain(file) => self.use_chain(file),
+            Message::ChainName(spot, typed) => {
+                self.chain_names.insert(spot, typed);
+            }
+            Message::SaveChain(spot) => self.save_chain(spot),
+            Message::UseChain(spot, file) => self.use_chain(spot, file),
             Message::OpenMasterPlugins => {
                 self.refresh_chains();
                 self.plugin_filter.clear();
@@ -3372,8 +3391,14 @@ impl App {
     }
 
     fn view_of(&self, window: window::Id) -> Element<'_, Message> {
-        if self.mixer_window != Some(window) {
+        if let Some(fx) = self.fx_window_at(window) {
+            return self.fx_window_view(fx.spot);
+        }
+        if window == self.main_window {
             return self.view();
+        }
+        if self.mixer_window != Some(window) {
+            return self.closing_window_view();
         }
         match self.overlay_is_in(window) {
             true => stack![self.mixer_alone(), self.overlay()].into(),
@@ -3382,6 +3407,9 @@ impl App {
     }
 
     fn title_of(&self, window: window::Id) -> String {
+        if let Some(fx) = self.fx_window_at(window) {
+            return format!("FX — {}", self.chain_name(fx.spot));
+        }
         match self.mixer_window == Some(window) {
             true => "Mixer".to_string(),
             false => self.title(),
@@ -3392,8 +3420,8 @@ impl App {
         self.going = true;
         self.overlay = Overlay::None;
         let mixer = self.mixer_window.take();
-        let mut leaving: Vec<Task<Message>> =
-            closing::tear_down(self.main_window, mixer).into_iter().map(window::close).collect();
+        let mut leaving: Vec<Task<Message>> = self.fx_windows.drain(..).map(|fx| window::close(fx.id)).collect();
+        leaving.extend(closing::tear_down(self.main_window, mixer).into_iter().map(window::close));
         leaving.push(iced::exit());
         Task::batch(leaving)
     }
@@ -4239,7 +4267,6 @@ mod overlay_window_tests {
         let (mut app, main, mixer) = torn_off();
         let track = a_track(&mut app, "Drums");
         let opens = [
-            Message::OpenChain(stockwin::Spot::Track(track)),
             Message::OpenPlugins(track),
             Message::OpenMasterPlugins,
             Message::OpenMonitorPlugins,

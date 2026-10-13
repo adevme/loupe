@@ -30,7 +30,7 @@ pub enum Face {
     Denoise(Box<DenoiseEditor>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Spot {
     Track(TrackId),
     Clip(loupe_engine::ClipId),
