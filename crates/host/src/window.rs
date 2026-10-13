@@ -204,7 +204,7 @@ mod real {
     const NO_CLIP_ELLIPSIS: u32 = 0x0004_0000;
     const NAME_HINT: &str = "Name this preset";
     const NAME_WIDEST: i32 = 300;
-    const NAME_LEAST: i32 = 160;
+    const NAME_LEAST: i32 = 90;
     const TEXT_HEIGHT: i32 = 15;
     const FONT_FACE: &str = "Segoe UI";
     const PAINT_MESSAGE: u32 = 0x000F;
@@ -222,9 +222,11 @@ mod real {
     const ONE_LINE: u32 = 0x0020;
     const BAR: i32 = 44;
     const GAP: i32 = 9;
-    const LIST_WIDTH: i32 = 260;
-    const SAVE_WIDTH: i32 = 86;
-    const DELETE_WIDTH: i32 = 86;
+    const PICK_LEAST: i32 = 120;
+    const PICK_WIDEST: i32 = 300;
+    const BUTTON_WIDTH: i32 = 64;
+    const MENU_WIDTH: i32 = 220;
+    const SAVE_ITEM: &str = "Save preset...";
     const ROW: i32 = 30;
     const PICK: &str = "Presets";
 
@@ -254,7 +256,20 @@ mod real {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Spot {
         Picker,
+        More,
         Name,
+        Save,
+        Cancel,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Listing {
+        Presets,
+        Menu,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MenuPick {
         Save,
         Delete,
     }
@@ -264,15 +279,42 @@ mod real {
         chosen: Option<usize>,
         typed: String,
         typing: bool,
+        naming: bool,
         hover: Option<Spot>,
         held: Option<Spot>,
-        listing: bool,
+        listing: Option<Listing>,
         lit: Option<usize>,
     }
 
     impl Bar {
         const fn empty() -> Self {
-            Self { names: Vec::new(), chosen: None, typed: String::new(), typing: false, hover: None, held: None, listing: false, lit: None }
+            Self { names: Vec::new(), chosen: None, typed: String::new(), typing: false, naming: false, hover: None, held: None, listing: None, lit: None }
+        }
+
+        fn chosen_name(&self) -> Option<&String> {
+            self.chosen.and_then(|at| self.names.get(at))
+        }
+
+        fn menu(&self) -> Vec<(String, MenuPick)> {
+            let mut items = vec![(SAVE_ITEM.to_string(), MenuPick::Save)];
+            if let Some(name) = self.chosen_name() {
+                items.push((format!("Delete \"{name}\""), MenuPick::Delete));
+            }
+            items
+        }
+
+        fn start_naming(&mut self) {
+            self.typed = self.chosen_name().cloned().unwrap_or_default();
+            self.naming = true;
+            self.typing = true;
+            self.hover = None;
+        }
+
+        fn stop_naming(&mut self) {
+            self.typed.clear();
+            self.naming = false;
+            self.typing = false;
+            self.held = None;
         }
 
         fn showing(&self) -> String {
@@ -287,6 +329,7 @@ mod real {
         static STRIP: RefCell<Bar> = const { RefCell::new(Bar::empty()) };
         static LIST_WINDOW: Cell<Handle> = const { Cell::new(std::ptr::null_mut()) };
         static LIST_ARMED: Cell<bool> = const { Cell::new(false) };
+        static BAR_WINDOW: Cell<Handle> = const { Cell::new(std::ptr::null_mut()) };
         static PLUGIN_WIDE: Cell<i32> = const { Cell::new(0) };
         static FOLLOWING: RefCell<Option<Box<dyn Fn(i32, i32)>>> = const { RefCell::new(None) };
     }
@@ -324,28 +367,43 @@ mod real {
     }
 
     fn bar_least() -> i32 {
-        grown(GAP) * 5 + grown(LIST_WIDTH) + grown(NAME_LEAST) + grown(SAVE_WIDTH) + grown(DELETE_WIDTH)
+        let picking = grown(GAP) * 3 + grown(PICK_LEAST) + grown(ROW);
+        let naming = grown(GAP) * 3 + grown(NAME_LEAST) + grown(BUTTON_WIDTH);
+        picking.max(naming)
     }
 
-    fn spots(width: i32) -> [(Spot, [i32; 4]); 4] {
+    fn naming_now() -> bool {
+        STRIP.with(|held| held.borrow().naming)
+    }
+
+    fn spots(width: i32, naming: bool) -> Vec<(Spot, [i32; 4])> {
         let (bar, row, gap) = (grown(BAR), grown(ROW), grown(GAP));
-        let (picker, save_wide, delete_wide) = (grown(LIST_WIDTH), grown(SAVE_WIDTH), grown(DELETE_WIDTH));
         let top = (bar - row) / 2;
         let bottom = top + row;
-        let save_at = width - gap - save_wide - gap - delete_wide;
-        let delete_at = width - gap - delete_wide;
-        let name_at = gap * 2 + picker;
-        let name_to = (save_at - gap).min(name_at + grown(NAME_WIDEST)).max(name_at + grown(NAME_LEAST));
-        [
-            (Spot::Picker, [gap, top, gap + picker, bottom]),
-            (Spot::Name, [name_at, top, name_to, bottom]),
-            (Spot::Save, [save_at, top, save_at + save_wide, bottom]),
-            (Spot::Delete, [delete_at, top, delete_at + delete_wide, bottom]),
-        ]
+        if naming {
+            let button = grown(BUTTON_WIDTH);
+            let room_for_cancel = width >= gap * 4 + grown(NAME_LEAST) + button * 2;
+            let buttons = if room_for_cancel { gap * 3 + button * 2 } else { gap * 2 + button };
+            let name_to = (width - buttons).min(gap + grown(NAME_WIDEST)).max(gap + grown(NAME_LEAST));
+            let save_at = name_to + gap;
+            let mut found = vec![(Spot::Name, [gap, top, name_to, bottom]), (Spot::Save, [save_at, top, save_at + button, bottom])];
+            if room_for_cancel {
+                let cancel_at = save_at + button + gap;
+                found.push((Spot::Cancel, [cancel_at, top, cancel_at + button, bottom]));
+            }
+            return found;
+        }
+        let picker_to = (width - gap * 2 - row).min(gap + grown(PICK_WIDEST)).max(gap + grown(PICK_LEAST));
+        let more_at = picker_to + gap;
+        vec![(Spot::Picker, [gap, top, picker_to, bottom]), (Spot::More, [more_at, top, more_at + row, bottom])]
+    }
+
+    fn spot_rect(width: i32, wanted: Spot) -> Option<[i32; 4]> {
+        spots(width, naming_now()).into_iter().find(|(spot, _)| *spot == wanted).map(|(_, rect)| rect)
     }
 
     fn spot_at(width: i32, x: i32, y: i32) -> Option<Spot> {
-        spots(width)
+        spots(width, naming_now())
             .into_iter()
             .find(|(_, rect)| x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3])
             .map(|(spot, _)| spot)
@@ -409,7 +467,12 @@ mod real {
                 let was_font = SelectObject(dc, lettering());
                 STRIP.with(|kept| {
                     let bar = kept.borrow();
-                    for (at, name) in bar.names.iter().enumerate() {
+                    let rows: Vec<String> = if bar.listing == Some(Listing::Menu) {
+                        bar.menu().into_iter().map(|(label, _)| label).collect()
+                    } else {
+                        bar.names.clone()
+                    };
+                    for (at, name) in rows.iter().enumerate() {
                         let row = [1, 1 + at as i32 * grown(ROW_TALL), whole[2] - 1, 1 + (at as i32 + 1) * grown(ROW_TALL)];
                         if bar.lit == Some(at) {
                             FillRect(dc, &row, shade.accent_brush);
@@ -417,7 +480,7 @@ mod real {
                         let colour = if bar.lit == Some(at) { shade.on_accent } else { shade.text };
                         text_out(dc, name, row, colour, false);
                     }
-                    if bar.names.is_empty() {
+                    if rows.is_empty() {
                         text_out(dc, "No presets saved yet", [1, 1, whole[2] - 1, 1 + grown(ROW_TALL)], shade.dim, false);
                     }
                 });
@@ -430,7 +493,8 @@ mod real {
                 let over = usize::try_from((y - 1) / grown(ROW_TALL)).ok();
                 let changed = STRIP.with(|kept| {
                     let mut bar = kept.borrow_mut();
-                    let lit = over.filter(|at| *at < bar.names.len());
+                    let count = if bar.listing == Some(Listing::Menu) { bar.menu().len() } else { bar.names.len() };
+                    let lit = over.filter(|at| *at < count);
                     let was = bar.lit;
                     bar.lit = lit;
                     was != lit
@@ -454,8 +518,21 @@ mod real {
                     return 0;
                 }
                 let picked = within.then(|| usize::try_from((y - 1) / grown(ROW_TALL)).ok()).flatten();
+                let mut naming = false;
                 let asked = STRIP.with(|kept| {
                     let mut bar = kept.borrow_mut();
+                    if bar.listing == Some(Listing::Menu) {
+                        let items = bar.menu();
+                        let (_, pick) = picked.and_then(|at| items.get(at).cloned())?;
+                        return match pick {
+                            MenuPick::Save => {
+                                bar.start_naming();
+                                naming = true;
+                                None
+                            }
+                            MenuPick::Delete => bar.chosen_name().cloned().map(Asked::Delete),
+                        };
+                    }
                     let at = picked.filter(|at| *at < bar.names.len())?;
                     bar.chosen = Some(at);
                     bar.names.get(at).cloned().map(Asked::Load)
@@ -464,6 +541,13 @@ mod real {
                     ASKED.with(|kept| kept.borrow_mut().push(asked));
                 }
                 shut_list();
+                let owner = BAR_WINDOW.with(Cell::get);
+                if !owner.is_null() {
+                    if naming {
+                        SetFocus(owner);
+                    }
+                    redraw(owner);
+                }
                 return 0;
             }
             CAPTURE_LOST => {
@@ -484,22 +568,35 @@ mod real {
         }
         STRIP.with(|held| {
             let mut bar = held.borrow_mut();
-            bar.listing = false;
+            bar.listing = None;
             bar.lit = None;
         });
     }
 
-    unsafe fn open_list(parent: Handle) {
+    unsafe fn open_list(parent: Handle, kind: Listing) {
         if !LIST_WINDOW.with(Cell::get).is_null() {
             shut_list();
             return;
         }
-        let rows = STRIP.with(|held| held.borrow().names.len().max(1)) as i32;
+        let rows = STRIP.with(|held| {
+            let bar = held.borrow();
+            match kind {
+                Listing::Presets => bar.names.len(),
+                Listing::Menu => bar.menu().len(),
+            }
+        })
+        .max(1) as i32;
         let mut where_it_is = [0i32; 4];
         GetWindowRect(parent, &mut where_it_is);
         let mut inside = [0i32; 4];
         GetClientRect(parent, &mut inside);
         let edge = (where_it_is[2] - where_it_is[0] - inside[2]) / 2;
+        let (anchor, spot) = match kind {
+            Listing::Presets => (Spot::Picker, None),
+            Listing::Menu => (Spot::More, Some(grown(MENU_WIDTH))),
+        };
+        let Some(under) = spot_rect(inside[2], anchor) else { return };
+        let list_wide = spot.unwrap_or(under[2] - under[0]);
         let top = where_it_is[3] - (inside[3] - grown(BAR)) - edge - (grown(BAR) - grown(ROW)) / 2 - grown(ROW);
         let name = wide(LIST_CLASS);
         let instance = GetModuleHandleW(std::ptr::null());
@@ -509,9 +606,9 @@ mod real {
             name.as_ptr(),
             std::ptr::null(),
             POPUP | CLIP_CHILDREN,
-            where_it_is[0] + edge + grown(GAP),
+            where_it_is[0] + edge + under[0],
             top + grown(ROW),
-            grown(LIST_WIDTH),
+            list_wide,
             rows * grown(ROW_TALL) + 2,
             parent,
             std::ptr::null_mut(),
@@ -523,7 +620,7 @@ mod real {
         }
         LIST_WINDOW.with(|held| held.set(made));
         LIST_ARMED.with(|held| held.set(false));
-        STRIP.with(|held| held.borrow_mut().listing = true);
+        STRIP.with(|held| held.borrow_mut().listing = Some(kind));
         ShowWindow(made, SHOW_NO_FOCUS);
         SetCapture(made);
     }
@@ -540,12 +637,12 @@ mod real {
         let was_font = SelectObject(dc, lettering());
         STRIP.with(|held| {
             let bar = held.borrow();
-            for (spot, rect) in spots(width) {
+            for (spot, rect) in spots(width, bar.naming) {
                 let hovered = bar.hover == Some(spot) && bar.held.is_none();
                 let pushed = bar.held == Some(spot);
                 match spot {
                     Spot::Picker => {
-                        let edge = if hovered || bar.listing { shade.accent_colour } else { shade.line_colour };
+                        let edge = if hovered || bar.listing == Some(Listing::Presets) { shade.accent_colour } else { shade.line_colour };
                         panel_in(dc, rect, shade.field_colour, edge);
                         let said = bar.showing();
                         let colour = if bar.chosen.is_some() { shade.text } else { shade.dim };
@@ -561,14 +658,20 @@ mod real {
                             text_out(dc, &bar.typed, rect, shade.text, false);
                             if bar.typing {
                                 let width_of = measured(dc, &bar.typed);
-                                let caret = rect[0] + TEXT_INSET + width_of;
+                                let caret = rect[0] + grown(TEXT_INSET) + width_of;
                                 let bar_rect = [caret, rect[1] + 4, caret + 1, rect[3] - 4];
                                 FillRect(dc, &bar_rect, shade.caret);
                             }
                         }
                     }
-                    Spot::Save | Spot::Delete => {
-                        let can = if spot == Spot::Save { !bar.typed.trim().is_empty() } else { bar.chosen.is_some() };
+                    Spot::More => {
+                        let open = bar.listing == Some(Listing::Menu);
+                        let fill = if open { shade.accent_colour } else if hovered { shade.line_colour } else { shade.field_colour };
+                        panel_in(dc, rect, fill, if open { shade.accent_colour } else { shade.line_colour });
+                        plus_sign(dc, rect, if open { shade.on_accent } else { shade.text });
+                    }
+                    Spot::Save | Spot::Cancel => {
+                        let can = spot == Spot::Cancel || !bar.typed.trim().is_empty();
                         let fill = if !can {
                             shade.panel_colour
                         } else if pushed {
@@ -587,12 +690,23 @@ mod real {
                         } else {
                             shade.text
                         };
-                        text_out(dc, if spot == Spot::Save { "Save" } else { "Delete" }, rect, colour, true);
+                        text_out(dc, if spot == Spot::Save { "Save" } else { "Cancel" }, rect, colour, true);
                     }
                 }
             }
         });
         SelectObject(dc, was_font);
+    }
+
+    unsafe fn plus_sign(dc: Handle, rect: [i32; 4], colour: u32) {
+        let brush = CreateSolidBrush(colour);
+        let (across, down) = ((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2);
+        let (arm, thick) = (grown(6), grown(1).max(1));
+        let flat = [across - arm, down - thick / 2, across + arm + 1, down - thick / 2 + thick];
+        let tall = [across - thick / 2, down - arm, across - thick / 2 + thick, down + arm + 1];
+        FillRect(dc, &flat, brush);
+        FillRect(dc, &tall, brush);
+        DeleteObject(brush);
     }
 
     unsafe fn measured(dc: Handle, text: &str) -> i32 {
@@ -664,14 +778,16 @@ mod real {
                 STRIP.with(|held| {
                     let mut bar = held.borrow_mut();
                     bar.typing = hit == Some(Spot::Name);
-                    bar.held = hit.filter(|spot| matches!(spot, Spot::Save | Spot::Delete));
+                    bar.held = hit.filter(|spot| matches!(spot, Spot::Save | Spot::Cancel));
                 });
-                if hit.is_some() && hit != Some(Spot::Picker) {
-                    SetCapture(window);
-                    SetFocus(window);
-                }
-                if hit == Some(Spot::Picker) {
-                    open_list(window);
+                match hit {
+                    Some(Spot::Picker) => open_list(window, Listing::Presets),
+                    Some(Spot::More) => open_list(window, Listing::Menu),
+                    Some(_) => {
+                        SetCapture(window);
+                        SetFocus(window);
+                    }
+                    None => {}
                 }
                 redraw(window);
                 return 0;
@@ -692,7 +808,10 @@ mod real {
                     }
                     match hit {
                         Some(Spot::Save) if !bar.typed.trim().is_empty() => Some(Asked::Save(bar.typed.trim().to_string())),
-                        Some(Spot::Delete) => bar.chosen.and_then(|at| bar.names.get(at)).cloned().map(Asked::Delete),
+                        Some(Spot::Cancel) => {
+                            bar.stop_naming();
+                            None
+                        }
                         _ => None,
                     }
                 });
@@ -706,6 +825,10 @@ mod real {
                 let typed = char::from_u32(first as u32);
                 let acted = STRIP.with(|held| {
                     let mut bar = held.borrow_mut();
+                    if bar.naming && typed == Some('\u{1b}') {
+                        bar.stop_naming();
+                        return true;
+                    }
                     if !bar.typing {
                         return false;
                     }
@@ -857,6 +980,7 @@ mod real {
                     return Err("Loupe could not open a window for the plugin".into());
                 }
                 measure_screen(handle);
+                BAR_WINDOW.with(|held| held.set(handle));
                 PLUGIN_WIDE.with(|held| held.set(width));
                 let mut fitted = [0, 0, width.max(bar_least()), height + grown(BAR)];
                 AdjustWindowRectEx(&mut fitted, frame, 0, 0);
@@ -938,8 +1062,7 @@ mod real {
         pub fn clear_name(&self) {
             STRIP.with(|held| {
                 let mut bar = held.borrow_mut();
-                bar.typed.clear();
-                bar.typing = false;
+                bar.stop_naming();
             });
             unsafe { redraw(self.handle) };
         }
@@ -962,6 +1085,7 @@ mod real {
 
     impl Drop for Window {
         fn drop(&mut self) {
+            BAR_WINDOW.with(|held| held.set(std::ptr::null_mut()));
             PARTS.with(|held| held.set(None));
             FOLLOWING.with(|held| *held.borrow_mut() = None);
             unsafe { shut_list() };
