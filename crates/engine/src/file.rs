@@ -30,6 +30,7 @@ pub struct SavedEnvelope {
     pub target: SavedTarget,
     pub armed: Option<crate::envelope::Mode>,
     pub lane_open: bool,
+    pub lane_height: Option<f32>,
     pub lowest: f32,
     pub highest: f32,
     pub points: Vec<crate::envelope::Point>,
@@ -148,6 +149,7 @@ impl SavedProject {
                             target: target_from(&target_text(shape.target, &place, &spot))?,
                             armed: shape.armed,
                             lane_open: shape.lane_open,
+                            lane_height: shape.lane_height,
                             lowest: shape.lowest,
                             highest: shape.highest,
                             points: shape.points.clone(),
@@ -309,9 +311,10 @@ impl SavedProject {
                 None => "-",
             };
             out.push_str(&format!(
-                "envelope on={} armed={armed} lane={} low={} high={}\n",
+                "envelope on={} armed={armed} lane={}{} low={} high={}\n",
                 where_text(&shape.target),
                 shape.lane_open as u8,
+                shape.lane_height.map_or(String::new(), |tall| format!(" tall={tall}")),
                 shape.lowest,
                 shape.highest
             ));
@@ -423,6 +426,7 @@ impl SavedProject {
                             _ => None,
                         },
                         lane_open: fields.get("lane") != Some(&"0"),
+                        lane_height: number_in(&fields, "tall"),
                         lowest: number_in(&fields, "low").unwrap_or(0.0),
                         highest: number_in(&fields, "high").unwrap_or(1.0),
                         points: Vec::new(),
@@ -664,6 +668,9 @@ impl SavedProject {
             }
             let _ = project.apply(Command::ArmEnvelope { target, mode: shape.armed });
             let _ = project.apply(Command::ShowEnvelopeLane { target, open: shape.lane_open });
+            if shape.lane_height.is_some() {
+                let _ = project.apply(Command::SizeEnvelopeLane { target, height: shape.lane_height });
+            }
         }
         (project, heights)
     }
@@ -795,6 +802,21 @@ mod tests {
         let mut out = vec![[0.0; 2]; 2400];
         render(p, 0, &mut out);
         out
+    }
+
+    #[test]
+    fn an_automation_lane_keeps_its_height() {
+        let mut original = song();
+        let target = crate::envelope::Target::TrackGain(original.tracks[0].id);
+        original.apply(Command::AddEnvelope { target }).unwrap();
+        original.apply(Command::SizeEnvelopeLane { target, height: Some(150.0) }).unwrap();
+        let text = SavedProject::capture(&original, |_| None).to_text();
+        assert!(text.contains(" tall=150 "), "{text}");
+        let (reopened, _) = SavedProject::parse(&text).unwrap().build(&original.sources, 48_000);
+        assert_eq!(reopened.envelope(target).and_then(|shape| shape.lane_height), Some(150.0));
+        let plain = text.replace(" tall=150", "");
+        let (older, _) = SavedProject::parse(&plain).unwrap().build(&original.sources, 48_000);
+        assert_eq!(older.envelope(target).and_then(|shape| shape.lane_height), None);
     }
 
     #[test]

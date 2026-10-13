@@ -470,6 +470,7 @@ enum Run {
     Stretch(ClipId),
     Send(TrackId, TrackId),
     Point(loupe_engine::Target),
+    LaneHeight(loupe_engine::Target),
     Notes(ClipId),
     Sampler(TrackId),
 }
@@ -553,7 +554,6 @@ struct Aim {
 struct App {
     palette: Palette,
     heights: HashMap<TrackId, f32>,
-    lane_heights: HashMap<loupe_engine::Target, f32>,
     loop_range: LoopRange,
     tool: Tool,
     level_press: Option<(mixer::Level, Instant)>,
@@ -736,7 +736,6 @@ impl App {
         let mut app = Self {
             palette: loaded.palette,
             heights: HashMap::new(),
-            lane_heights: HashMap::new(),
             loop_range: None,
             tool: Tool::default(),
             level_press: None,
@@ -947,7 +946,6 @@ impl App {
         Self {
             palette: theme::NEUTRAL,
             heights: HashMap::new(),
-            lane_heights: HashMap::new(),
             loop_range: None,
             tool: Tool::default(),
             level_press: None,
@@ -1379,8 +1377,7 @@ impl App {
             }
             Message::SetLoop(range) => self.set_loop(range),
             Message::ResizeLane { target, height } => {
-                self.lane_heights.insert(target, height);
-                self.cache.clear();
+                self.edit(Some(Run::LaneHeight(target)), Command::SizeEnvelopeLane { target, height: Some(height) });
             }
             Message::ResizeTrack { track, height } => {
                 match self.chosen_tracks.contains(&track) {
@@ -3534,7 +3531,6 @@ impl App {
             palette: &self.palette,
             view: self.view,
             heights: &self.heights,
-            lane_heights: &self.lane_heights,
             selected: self.selected,
             selection: &self.selection,
             playhead: self.playhead,

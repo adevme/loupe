@@ -343,6 +343,7 @@ pub enum Command {
     RemoveEnvelope { target: crate::envelope::Target },
     ArmEnvelope { target: crate::envelope::Target, mode: Option<crate::envelope::Mode> },
     ShowEnvelopeLane { target: crate::envelope::Target, open: bool },
+    SizeEnvelopeLane { target: crate::envelope::Target, height: Option<f32> },
     PutPoint { target: crate::envelope::Target, point: crate::envelope::Point },
     DropPoint { target: crate::envelope::Target, which: usize },
     ShapePoint { target: crate::envelope::Target, which: usize, shape: crate::envelope::Shape },
@@ -939,6 +940,14 @@ impl Project {
             Command::ShowEnvelopeLane { target, open } => {
                 let shape = self.envelope_mut(target)?;
                 shape.lane_open = open;
+                Ok(Outcome::Done)
+            }
+            Command::SizeEnvelopeLane { target, height } => {
+                if height.is_some_and(|tall| !tall.is_finite() || tall <= 0.0) {
+                    return Err(CommandError::InvalidValue);
+                }
+                let shape = self.envelope_mut(target)?;
+                shape.lane_height = height;
                 Ok(Outcome::Done)
             }
             Command::PutPoint { target, point } => {

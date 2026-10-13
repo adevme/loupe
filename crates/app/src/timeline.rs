@@ -134,7 +134,6 @@ pub struct Timeline<'a> {
     pub palette: &'a Palette,
     pub view: View,
     pub heights: &'a HashMap<TrackId, f32>,
-    pub lane_heights: &'a HashMap<loupe_engine::Target, f32>,
     pub selected: Option<ClipId>,
     pub selection: &'a HashSet<ClipId>,
     pub playhead: Frames,
@@ -1191,7 +1190,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                             return (Captured, None);
                         }
                         let moving = *which;
-                        *which = shape.points.iter().position(|point| point.at >= at).unwrap_or(shape.points.len() - 1);
+                        let lowest = moving.checked_sub(1).and_then(|before| shape.points.get(before)).map_or(0, |before| before.at + 1);
+                        let highest = shape.points.get(moving + 1).map_or(Frames::MAX, |after| after.at.saturating_sub(1));
+                        let at = at.clamp(lowest, highest.max(lowest));
                         (Captured, Some(Message::DragPoint { target, which: moving, at, value }))
                     }
                     Drag::Range { anchor, origin, moving } => {
@@ -1628,7 +1629,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 });
             }
         }
-        if let Some((target, at, value, spot)) = self.point_tip(state, cursor, bounds) {
+        if let Some((target, at, value, spot)) = self.point_tip(state) {
             self.draw_point_tip(&mut overlay, target, at, value, spot);
         }
         vec![content, overlay.into_geometry()]
@@ -1787,7 +1788,7 @@ impl Timeline<'_> {
     }
 
     fn lane_tall(&self, target: loupe_engine::Target) -> f32 {
-        self.lane_heights.get(&target).copied().unwrap_or(LANE_HEIGHT)
+        self.project.envelope(target).and_then(|shape| shape.lane_height).unwrap_or(LANE_HEIGHT)
     }
 
     fn lane_span(&self, shape: &loupe_engine::Envelope) -> f32 {
@@ -1804,14 +1805,11 @@ impl Timeline<'_> {
         top + LANE_INSET + self.lane_span(shape) * (1.0 - (value - shape.lowest) / reach)
     }
 
-    fn point_tip(&self, state: &Interaction, cursor: mouse::Cursor, bounds: Rectangle) -> Option<(loupe_engine::Target, Frames, f32, Point)> {
+    fn point_tip(&self, state: &Interaction) -> Option<(loupe_engine::Target, Frames, f32, Point)> {
         let (target, at, value) = match &state.drag {
-            Some(Drag::Point { target, .. }) => {
-                let p = cursor.position_in(bounds)?;
-                let shape = self.project.envelope(*target)?;
-                let top = self.lane_top_of(*target)?;
-                let at = (self.frames_at(p.x).max(0.0) as Frames).saturating_sub(self.lane_offset(*target));
-                (*target, at, self.value_at_y(shape, top, p.y))
+            Some(Drag::Point { target, which }) => {
+                let point = self.project.envelope(*target)?.points.get(*which)?;
+                (*target, point.at, point.value)
             }
             None => {
                 let (target, which) = state.pointing?;
@@ -2856,7 +2854,7 @@ impl crate::App {
                 .envelopes
                 .iter()
                 .filter(|shape| shape.lane_open && (shape.target.on_track() == Some(track.id) || shape.target.on_clip().is_some_and(|clip| track.clips.iter().any(|kept| kept.id == clip))))
-                .map(|shape| self.lane_heights.get(&shape.target).copied().unwrap_or(LANE_HEIGHT))
+                .map(|shape| shape.lane_height.unwrap_or(LANE_HEIGHT))
                 .sum::<f32>();
             let tall = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height) + open_take_lanes(track) as f32 * TAKE_LANE_HEIGHT + lanes;
             if at.y >= y && at.y < y + tall {
@@ -3059,7 +3057,6 @@ mod take_folders {
             palette: &app.palette,
             view: app.view,
             heights: &app.heights,
-            lane_heights: &app.lane_heights,
             selected: app.selected,
             selection: &app.selection,
             playhead: app.playhead,
