@@ -55,6 +55,7 @@ pub struct SavedTrack {
     pub instrument: Instrument,
     pub sample: Option<usize>,
     pub print_takes: bool,
+    pub takes_open: bool,
     pub input: InputChannels,
 }
 
@@ -171,6 +172,7 @@ impl SavedProject {
                     instrument: track.instrument,
                     sample: track.sample.as_ref().and_then(|sample| project.sources.iter().position(|kept| Arc::ptr_eq(kept, sample))),
                     print_takes: track.print_takes,
+                    takes_open: track.takes_open,
                     fx_on: track.fx_on,
                     input: track.input,
                     sends: track
@@ -251,8 +253,8 @@ impl SavedProject {
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             let sample = track.sample.map_or("-".to_string(), |s| s.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} hidden={} instrument={} sample={sample} print={} input={} fxon={} name={}\n",
-                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, track.hidden as u8, instrument_text(&track.instrument), track.print_takes as u8, track.input.text(), track.fx_on as u8, track.name
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} hidden={} instrument={} sample={sample} print={} takesopen={} input={} fxon={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, track.hidden as u8, instrument_text(&track.instrument), track.print_takes as u8, track.takes_open as u8, track.input.text(), track.fx_on as u8, track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -360,6 +362,7 @@ impl SavedProject {
                         instrument: fields.get("instrument").and_then(|text| instrument_from(text)).unwrap_or_default(),
                         sample: fields.get("sample").and_then(|text| text.parse::<usize>().ok()),
                         print_takes: fields.get("print") == Some(&"1"),
+                        takes_open: fields.get("takesopen") == Some(&"1"),
                         fx_on: fields.get("fxon") != Some(&"0"),
                         input: fields.get("input").and_then(|text| InputChannels::from_text(text)).unwrap_or_default(),
                     });
@@ -529,6 +532,7 @@ impl SavedProject {
             let _ = project.apply(Command::SetTrackSolo { track, solo: saved.solo });
             let _ = project.apply(Command::SetRecordsNotes { track, on: saved.records_notes });
             let _ = project.apply(Command::SetPrintTakes { track, on: saved.print_takes });
+            let _ = project.apply(Command::SetTakesOpen { track, open: saved.takes_open });
             let _ = project.apply(Command::SetTrackInput { track, input: saved.input });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
             let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
@@ -922,6 +926,26 @@ mod routing_round_trip {
         let (old, _) = SavedProject::parse(&older).unwrap().build(&[], 48_000);
         assert!(old.tracks[0].fx.iter().all(|fx| !fx.record), "songs from before keep every plugin in the mix");
         assert!(!old.tracks[0].print_takes);
+    }
+
+    #[test]
+    fn an_open_take_folder_is_still_open_when_the_song_comes_back_and_old_songs_open_closed() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(open)) = p.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(_closed)) = p.apply(Command::AddTrack { name: "Hook".into() }) else { panic!() };
+        assert!(p.tracks.iter().all(|track| !track.takes_open), "a new track starts with its takes folded away");
+        p.apply(Command::SetTakesOpen { track: open, open: true }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        assert!(text.contains(" takesopen=1 ") && text.contains(" takesopen=0 "));
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert_eq!(back.tracks.iter().map(|track| track.takes_open).collect::<Vec<_>>(), [true, false]);
+        let older = text.replace(" takesopen=1", "").replace(" takesopen=0", "");
+        let (old, _) = SavedProject::parse(&older).unwrap().build(&[], 48_000);
+        assert!(old.tracks.iter().all(|track| !track.takes_open), "songs from before open with their takes folded");
+        let ancient = "loupe project 1\nsaved_by 0.13.5\nrate 48000\nbpm 96\nmaster 1\nmaster_muted 0\ntrack gain=1 muted=0 pan=0 solo=0 keys=0 colour=- height=- parent=- collapsed=0 hidden=0 instrument=none sample=- print=0 input=mono:0 name=Vox 1\n";
+        let (ancient, _) = SavedProject::parse(ancient).unwrap().build(&[], 48_000);
+        assert_eq!(ancient.tracks.len(), 1);
+        assert!(!ancient.tracks[0].takes_open);
     }
 
     #[test]

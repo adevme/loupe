@@ -243,6 +243,11 @@ impl App {
         items.push(self.item(if keys { "Record notes from keys ✓" } else { "Record notes from keys" }, "", Some(Message::ToggleRecordsNotes(track))));
         let printing = self.project.track(track).is_some_and(|t| t.print_takes);
         items.push(self.item(if printing { "Keep Rec plugins in takes ✓" } else { "Keep Rec plugins in takes" }, "", Some(Message::TogglePrintTakes(track))));
+        if let Some(found) = self.project.track(track).filter(|t| t.clips.iter().any(|clip| clip.has_takes())) {
+            items.push(self.item(if found.takes_open { "Show takes ✓" } else { "Show takes" }, "", Some(Message::ToggleTakes(track))));
+            let unused = crate::takes::unused_takes(found) > 0;
+            items.push(self.item("Delete unused takes", "", unused.then_some(Message::DeleteUnusedTakes(track))));
+        }
         if let Some(input) = self.project.track(track).filter(|t| !t.records_notes).map(|t| t.input.name()) {
             items.push(self.item("Record from", input, Some(Message::StartInputs(track))));
         }
