@@ -995,6 +995,8 @@ impl Rt {
 pub struct Engine {
     remote: Remote,
     rate: u32,
+    heard_tracks: bool,
+    fed: bool,
     running: Option<Running>,
     output_error: Option<String>,
     output_failure: Option<Failure>,
@@ -1029,6 +1031,8 @@ impl Engine {
         Self {
             remote: ready.remote,
             rate: ready.rate,
+            heard_tracks: false,
+            fed: false,
             running: ready.running,
             output_error: ready.error,
             output_failure: ready.failure,
@@ -1164,6 +1168,10 @@ impl Engine {
         self.remote.shared.playing.load(Ordering::Relaxed)
     }
 
+    pub fn is_hearing(&self) -> bool {
+        self.fed && self.heard_tracks
+    }
+
     pub fn use_chains(&mut self, chains: Box<dyn Chains>) {
         self.send(Msg::Chains(Some(chains)));
     }
@@ -1179,15 +1187,18 @@ impl Engine {
     pub fn hear(&mut self, input: &mut crate::input::Input) {
         let rate = input.rate();
         if let Some((feed, width)) = input.take_ear() {
+            self.fed = true;
             self.send(Msg::Hear(Some((feed, rate, width))));
         }
     }
 
     pub fn stop_hearing(&mut self) {
+        self.fed = false;
         self.send(Msg::Hear(None));
     }
 
     pub fn hear_on(&mut self, tracks: &[TrackId]) {
+        self.heard_tracks = !tracks.is_empty();
         let mut on = [None; MOST_HEARD];
         for (slot, track) in on.iter_mut().zip(tracks) {
             *slot = Some(*track);
@@ -1440,6 +1451,22 @@ mod tests {
         let source = Arc::new(Source::from_frames("one", vec![[1.0, 1.0]; len]));
         p.apply(Command::AddClip { track, source, start: 0 }).unwrap();
         p
+    }
+
+    #[test]
+    fn the_engine_knows_while_it_is_hearing_the_input() {
+        let mut engine = Engine::start(Output::Silent);
+        let mut input = crate::input::Input::open(crate::input::InputChoice::Practice).expect("the practice input opens");
+        assert!(!engine.is_hearing(), "nothing is heard before an input is given");
+        engine.hear(&mut input);
+        assert!(!engine.is_hearing(), "an input with no armed track is not heard");
+        engine.hear_on(&[TrackId(1)]);
+        assert!(engine.is_hearing(), "an armed track with an input is heard");
+        engine.hear_on(&[]);
+        assert!(!engine.is_hearing(), "disarming every track stops the hearing");
+        engine.hear_on(&[TrackId(1)]);
+        engine.stop_hearing();
+        assert!(!engine.is_hearing(), "taking the input away stops the hearing");
     }
 
     #[test]

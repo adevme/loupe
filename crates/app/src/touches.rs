@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use loupe_engine::{Chains, Command, Outcome, Project, Touched};
+use loupe_engine::{Chains, Command, Engine, Outcome, Project, Touched};
 
 use crate::App;
 
@@ -66,6 +66,10 @@ fn change_for(which: Touched, state: Vec<u8>) -> Command {
     }
 }
 
+pub fn racks_must_stay(engine: &Engine) -> bool {
+    engine.is_playing() || engine.is_hearing()
+}
+
 pub fn edits(racks: &mut dyn Chains, project: &Project, spots: &[Touched]) -> Vec<Command> {
     let mut changes = Vec::new();
     for which in spots {
@@ -81,7 +85,7 @@ pub fn edits(racks: &mut dyn Chains, project: &Project, spots: &[Touched]) -> Ve
 
 impl App {
     pub(crate) fn look_for_touches(&mut self) {
-        if self.engine.is_playing() {
+        if racks_must_stay(&self.engine) {
             return;
         }
         let Some(mut racks) = self.borrow_racks() else { return };
@@ -98,7 +102,7 @@ impl App {
     }
 
     pub(crate) fn keep_plugin_edits(&mut self) {
-        if self.engine.is_playing() {
+        if racks_must_stay(&self.engine) {
             return;
         }
         let spots = self.touches.take();
@@ -451,5 +455,19 @@ mod running_tests {
         app.gather_fx_state();
         assert!(app.undo.is_empty(), "saving the song left an undo step");
         assert_eq!(state_on(&app, track), vec![0x33], "saving the song did not pick the plugin settings up");
+    }
+
+    #[test]
+    fn the_racks_stay_with_the_engine_while_it_plays_or_hears_the_input() {
+        let mut engine = Engine::start(loupe_engine::Output::Silent);
+        assert!(!racks_must_stay(&engine), "a quiet engine can lend its racks");
+        let mut input = loupe_engine::Input::open(loupe_engine::InputChoice::Practice).expect("the practice input opens");
+        engine.hear(&mut input);
+        engine.hear_on(&[TrackId(7)]);
+        assert!(racks_must_stay(&engine), "taking the racks while the input is heard drops the rec plugins out of what he hears");
+        engine.hear_on(&[]);
+        assert!(!racks_must_stay(&engine), "once nothing is armed the racks can be looked at again");
+        engine.play();
+        assert!(racks_must_stay(&engine), "the racks stay while the song plays");
     }
 }
