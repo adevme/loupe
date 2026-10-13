@@ -343,6 +343,9 @@ impl Timeline<'_> {
     }
 
     fn header_height(&self, track: &Track) -> f32 {
+        if self.take_lanes(track) > 0 {
+            return self.clips_height(track);
+        }
         self.height_of(track) - self.takes_height(track)
     }
 
