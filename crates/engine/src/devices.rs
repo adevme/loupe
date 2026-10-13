@@ -64,6 +64,9 @@ pub(crate) fn host_named(driver: Option<&str>) -> cpal::Host {
 
 pub fn outputs(driver: Option<&str>) -> Vec<String> {
     if driver == Some("ASIO") {
+        if !drivers().iter().any(|name| name == "ASIO") {
+            return Vec::new();
+        }
         return asio_drivers();
     }
     let host = host_named(driver);
@@ -100,7 +103,7 @@ pub(crate) fn in_use() -> Option<cpal::Device> {
 }
 
 pub fn one_device_both_ways() -> bool {
-    DRIVER.lock().ok().and_then(|chosen| chosen.clone()).is_some_and(|name| name == "ASIO")
+    host().id().name() == "ASIO"
 }
 
 pub fn choices(driver: Option<&str>, output: Option<&str>) -> Choices {
