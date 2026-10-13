@@ -314,6 +314,7 @@ pub enum Message {
     StartInputs(TrackId),
     UseInput(TrackId, InputChannels),
     UseTake(ClipId, usize),
+    UseTakeOnTrack(TrackId, usize),
     Comp { track: TrackId, take: usize, from: Frames, to: Frames },
     ToggleTakes(TrackId),
     DeleteUnusedTakes(TrackId),
@@ -1554,6 +1555,21 @@ impl App {
             Message::UseTake(clip, take) => {
                 if self.project.clip(clip).is_some_and(|found| found.take != take) {
                     self.edit(None, Command::UseTake { clip, take });
+                }
+            }
+            Message::UseTakeOnTrack(track, take) => {
+                let clips: Vec<ClipId> = self
+                    .project
+                    .track(track)
+                    .map(|found| found.clips.iter().filter(|clip| clip.takes.len() > take && clip.take != take).map(|clip| clip.id).collect())
+                    .unwrap_or_default();
+                if !clips.is_empty() {
+                    self.transact(None, |project| {
+                        for clip in clips {
+                            project.apply(Command::UseTake { clip, take })?;
+                        }
+                        Ok(Outcome::Done)
+                    });
                 }
             }
             Message::Comp { track, take, from, to } => self.comp(track, take, from, to),
