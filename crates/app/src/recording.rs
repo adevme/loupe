@@ -372,6 +372,20 @@ mod tests {
     }
 
     #[test]
+    fn a_new_loop_recording_arrives_with_its_takes_folded_away() {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        app.project.apply(Command::SetTakesOpen { track, open: true }).unwrap();
+        let source = Arc::new(Source::from_frames("Vox (take 1)", vec![[0.1, 0.1]; 4_000]));
+        let passes = Passes { from: 0, len: 1_000, pad: 0, offsets: vec![0, 1_000, 2_000, 3_000], active: 3 };
+        app.place_passes(passes, vec![(track, source)]);
+        let found = app.project.track(track).unwrap();
+        assert_eq!(found.clips.len(), 1);
+        assert_eq!(found.clips[0].takes.len(), 4);
+        assert!(!found.takes_open, "the new takes came in unfolded");
+    }
+
+    #[test]
     fn keys_pressed_and_released_become_notes_and_held_keys_end_at_stop() {
         let mine = TrackId(1);
         let other = TrackId(2);
@@ -444,13 +458,14 @@ impl App {
                 };
                 project.apply(Command::TrimClip { clip, offset: offsets[active].max(0) as Frames, len })?;
                 project.apply(Command::SetTakes { clip, offsets: offsets.clone(), active })?;
+                project.apply(Command::SetTakesOpen { track, open: false })?;
                 placed.push(clip);
             }
             Ok(Outcome::Done)
         });
         if !placed.is_empty() {
             self.choose(placed);
-            self.notice = Some(format!("{count} takes. Click a lane to hear it, or use the comp tool (K) to pick the best parts."));
+            self.notice = Some(format!("{count} takes. Click the takes badge on the clip to open them, then swipe a lane to pick the best parts."));
         }
     }
 }

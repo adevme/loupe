@@ -308,6 +308,8 @@ pub enum Message {
     UseInput(TrackId, InputChannels),
     UseTake(ClipId, usize),
     Comp { track: TrackId, take: usize, from: Frames, to: Frames },
+    ToggleTakes(TrackId),
+    DeleteUnusedTakes(TrackId),
     ShowChain(TrackId, bool),
     HearingChosen(settings::Hearing),
     HearThroughChainToggled(bool),
@@ -1531,6 +1533,14 @@ impl App {
                 }
             }
             Message::Comp { track, take, from, to } => self.comp(track, take, from, to),
+            Message::ToggleTakes(track) => {
+                self.overlay = Overlay::None;
+                self.toggle_takes(track);
+            }
+            Message::DeleteUnusedTakes(track) => {
+                self.overlay = Overlay::None;
+                self.delete_unused_takes(track);
+            }
             Message::TogglePrintTakes(track) => {
                 self.overlay = Overlay::None;
                 if let Some(on) = self.project.track(track).map(|t| !t.print_takes) {

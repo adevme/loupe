@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
@@ -64,7 +65,13 @@ const GAIN_FIGURE_INSET: f32 = 6.0;
 const GAIN_FIGURE_LIFT: f32 = 7.0;
 const GAIN_PLATE_HEIGHT: f32 = 14.0;
 pub const MIN_GAIN_DB: f32 = -24.0;
-const MIN_TAKE_LANE: f32 = 10.0;
+const TAKE_LANE_HEIGHT: f32 = 40.0;
+const TAKE_LANE_INSET: f32 = 3.0;
+const BADGE_LETTER: f32 = 6.2;
+const BADGE_PAD: f32 = 6.0;
+const BADGE_INSET: f32 = 3.0;
+const BADGE_CHEVRON: f32 = 7.0;
+const BADGE_ROOM: f32 = 8.0;
 pub const MAX_GAIN_DB: f32 = 12.0;
 pub const MIN_ZOOM: f64 = 2.0;
 
@@ -153,7 +160,7 @@ pub struct Interaction {
 
 enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
-    Clip { id: ClipId, grab: f64, origin: Point, moving: bool, lane: Option<usize> },
+    Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
     Resize { track: TrackId, top: f32 },
     Reorder { track: TrackId, from: Point, at: Option<usize> },
@@ -193,11 +200,6 @@ impl ClipBox {
     fn wave_height(&self) -> f32 {
         self.height - self.title - 5.0
     }
-
-    fn take_band(&self, clip: &Clip, take: usize) -> Option<(f32, f32)> {
-        let lane = take_lane_height(clip, self.wave_height())?;
-        Some((self.wave_top() + lane * take as f32, lane))
-    }
 }
 
 enum Hit<'a> {
@@ -217,6 +219,8 @@ enum Hit<'a> {
     Grip(&'a Clip, Grip),
     Edge(&'a Clip, Edge),
     Clip(&'a Clip),
+    Take(&'a Clip, usize),
+    Folder(&'a Track),
     Envelope(loupe_engine::Target, Option<usize>, Frames, f32),
     Lane,
     Nothing,
@@ -311,7 +315,26 @@ impl Timeline<'_> {
         if self.hidden(track) {
             return 0.0;
         }
-        self.clips_height(track) + self.lanes_of(track).len() as f32 * LANE_HEIGHT
+        self.clips_height(track) + self.takes_height(track) + self.lanes_of(track).len() as f32 * LANE_HEIGHT
+    }
+
+    fn take_lanes(&self, track: &Track) -> usize {
+        if self.hidden(track) {
+            return 0;
+        }
+        open_take_lanes(track)
+    }
+
+    fn takes_height(&self, track: &Track) -> f32 {
+        self.take_lanes(track) as f32 * TAKE_LANE_HEIGHT
+    }
+
+    fn header_height(&self, track: &Track) -> f32 {
+        self.height_of(track) - self.takes_height(track)
+    }
+
+    fn envelopes_top(&self, track: &Track) -> f32 {
+        self.clips_height(track) + self.takes_height(track)
     }
 
     fn clips_height(&self, track: &Track) -> f32 {
@@ -475,7 +498,7 @@ impl Timeline<'_> {
 
     fn hidden_buttons(&self, index: usize) -> usize {
         let track = &self.project.tracks[index];
-        if self.height_of(track) >= ROOMY_HEADER_H {
+        if self.header_height(track) >= ROOMY_HEADER_H {
             return 0;
         }
         let has_children = self.project.tracks.iter().any(|t| t.parent == Some(track.id));
@@ -505,7 +528,7 @@ impl Timeline<'_> {
 
     fn mute_button(&self, index: usize) -> Rectangle {
         let top = self.track_top(index);
-        let height = self.height_of(&self.project.tracks[index]);
+        let height = self.header_height(&self.project.tracks[index]);
         let corner = if height >= ROOMY_HEADER_H {
             Point::new(self.header_left() + 16.0, top + height - 36.0)
         } else {
@@ -516,27 +539,27 @@ impl Timeline<'_> {
 
     fn route_button(&self, index: usize) -> Rectangle {
         let arm = self.arm_button(index);
-        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let roomy = self.header_height(&self.project.tracks[index]) >= ROOMY_HEADER_H;
         let left = if roomy { arm.x + arm.width + ARM_GAP } else { arm.x - ARM_GAP - ARM_BUTTON };
         Rectangle::new(Point::new(left, arm.y), Size::new(ARM_BUTTON, arm.height))
     }
 
     fn fx_button(&self, index: usize) -> Rectangle {
         let route = self.route_button(index);
-        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let roomy = self.header_height(&self.project.tracks[index]) >= ROOMY_HEADER_H;
         let left = if roomy { route.x + route.width + ARM_GAP } else { route.x - ARM_GAP - ARM_BUTTON };
         Rectangle::new(Point::new(left, route.y), Size::new(ARM_BUTTON, route.height))
     }
 
     fn solo_button(&self, index: usize) -> Rectangle {
         let mute = self.mute_button(index);
-        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let roomy = self.header_height(&self.project.tracks[index]) >= ROOMY_HEADER_H;
         let left = if roomy { mute.x + mute.width + ARM_GAP } else { mute.x - ARM_GAP - mute.width };
         Rectangle::new(Point::new(left, mute.y), mute.size())
     }
 
     fn pan_knob(&self, index: usize) -> Option<Rectangle> {
-        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let roomy = self.header_height(&self.project.tracks[index]) >= ROOMY_HEADER_H;
         let route = self.route_button(index);
         let after_fx = self.fx_button(index);
         let left = after_fx.x + after_fx.width + ARM_GAP;
@@ -545,14 +568,14 @@ impl Timeline<'_> {
 
     fn arm_button(&self, index: usize) -> Rectangle {
         let mute = self.solo_button(index);
-        let roomy = self.height_of(&self.project.tracks[index]) >= ROOMY_HEADER_H;
+        let roomy = self.header_height(&self.project.tracks[index]) >= ROOMY_HEADER_H;
         let left = if roomy { mute.x + mute.width + ARM_GAP } else { mute.x - ARM_GAP - ARM_BUTTON };
         Rectangle::new(Point::new(left, mute.y), Size::new(ARM_BUTTON, mute.height))
     }
 
     fn meter_bar(&self, index: usize) -> Rectangle {
         let top = self.track_top(index);
-        let height = self.height_of(&self.project.tracks[index]);
+        let height = self.header_height(&self.project.tracks[index]);
         let inset = if height >= ROOMY_HEADER_H { 9.0 } else { 5.0 };
         Rectangle::new(
             Point::new(self.header_left() + 16.0, top + height - inset),
@@ -618,7 +641,7 @@ impl Timeline<'_> {
         let name_left = 16.0 + indent + if has_children { 14.0 } else { 0.0 };
         let top = self.track_top(index);
         let whole_width = self.header_right() - self.header_left() - name_left - NAME_GAP;
-        if self.height_of(track) >= ROOMY_HEADER_H {
+        if self.header_height(track) >= ROOMY_HEADER_H {
             return (name_left, whole_width, top + 20.0);
         }
         let leftmost = match self.hidden_buttons(index) {
@@ -637,7 +660,7 @@ impl Timeline<'_> {
 
     fn name_box(&self, index: usize) -> Option<Rectangle> {
         let (name_left, room, middle) = self.name_spot(index);
-        (self.height_of(&self.project.tracks[index]) > 0.0 && room >= NAME_NARROWEST).then(|| Rectangle {
+        (self.header_height(&self.project.tracks[index]) > 0.0 && room >= NAME_NARROWEST).then(|| Rectangle {
             x: self.header_left() + name_left,
             y: middle - NAME_LINE / 2.0,
             width: room,
@@ -685,7 +708,7 @@ impl Timeline<'_> {
             left: self.x_of(clip.start as f64),
             right: self.x_of(clip.end() as f64),
             top: self.track_top(index) + self.palette.clip_padding,
-            height: self.height_of(&self.project.tracks[index]) - self.palette.clip_padding * 2.0,
+            height: self.clips_height(&self.project.tracks[index]) - self.palette.clip_padding * 2.0,
             title: self.palette.clip_title_height,
         })
     }
@@ -731,11 +754,51 @@ impl Timeline<'_> {
         grips
     }
 
-    fn take_at(&self, clip: &Clip, p: Point) -> Option<usize> {
-        let shape = self.clip_box(clip)?;
-        let lane = take_lane_height(clip, shape.wave_height())?;
-        let row = ((p.y - shape.wave_top()) / lane).floor();
-        (row >= 0.0 && (row as usize) < clip.takes.len()).then_some(row as usize)
+    fn take_lane_top(&self, index: usize, take: usize) -> f32 {
+        self.track_top(index) + self.clips_height(&self.project.tracks[index]) + take as f32 * TAKE_LANE_HEIGHT
+    }
+
+    fn take_lane_at(&self, index: usize, p: Point) -> Option<Hit<'_>> {
+        let track = &self.project.tracks[index];
+        let lanes = self.take_lanes(track);
+        let row = (p.y - self.take_lane_top(index, 0)) / TAKE_LANE_HEIGHT;
+        if lanes == 0 || row < 0.0 || row >= lanes as f32 {
+            return None;
+        }
+        let take = row as usize;
+        let at = self.frames_at(p.x);
+        let found = track.clips.iter().rev().find(|clip| clip.takes.len() > take && at >= clip.start as f64 && at < clip.end() as f64);
+        Some(found.map_or(Hit::Lane, |clip| Hit::Take(clip, take)))
+    }
+
+    fn take_badges(&self, index: usize) -> Vec<(Rectangle, usize)> {
+        let track = &self.project.tracks[index];
+        if self.hidden(track) {
+            return Vec::new();
+        }
+        let mut folders: Vec<&Clip> = track.clips.iter().filter(|clip| clip.has_takes() && !clip.is_notes()).collect();
+        folders.sort_by_key(|clip| clip.start);
+        let mut runs: Vec<(Frames, Frames, &Clip)> = Vec::new();
+        for clip in folders {
+            match runs.last_mut() {
+                Some((_, end, last)) if follows_in_folder(last, clip) => {
+                    *end = clip.end();
+                    *last = clip;
+                }
+                _ => runs.push((clip.start, clip.end(), clip)),
+            }
+        }
+        let top = self.track_top(index) + self.palette.clip_padding + BADGE_INSET;
+        let height = (self.palette.clip_title_height - BADGE_INSET * 2.0).max(1.0);
+        runs.into_iter()
+            .filter_map(|(start, end, last)| {
+                let count = last.takes.len();
+                let left = self.x_of(start as f64).max(self.lanes_left());
+                let right = self.x_of(end as f64).min(self.lanes_right());
+                let width = badge_width(count);
+                (right - left >= width + BADGE_ROOM * 2.0).then(|| (Rectangle::new(Point::new(left + BADGE_INSET, top), Size::new(width, height)), count))
+            })
+            .collect()
     }
 
     fn resize_grip_at(&self, p: Point) -> Option<&Track> {
@@ -796,6 +859,11 @@ impl Timeline<'_> {
             }
             return Hit::Nothing;
         }
+        if let Some(i) = self.track_at(p.y) {
+            if self.take_badges(i).iter().any(|(badge, _)| badge.contains(p)) {
+                return Hit::Folder(&self.project.tracks[i]);
+            }
+        }
         if let Some(clip) = self.selected.and_then(|id| self.project.clip(id)) {
             let reached = self.grips(clip).into_iter().find(|(_, at)| at.distance(p) <= HANDLE_REACH);
             if let Some((grip, _)) = reached {
@@ -810,7 +878,10 @@ impl Timeline<'_> {
         if let Some(found) = self.envelope_at(i, p) {
             return found;
         }
-        if p.y < top + self.palette.clip_padding || p.y > top + self.height_of(track) - self.palette.clip_padding {
+        if let Some(found) = self.take_lane_at(i, p) {
+            return found;
+        }
+        if p.y < top + self.palette.clip_padding || p.y > top + self.clips_height(track) - self.palette.clip_padding {
             return Hit::Lane;
         }
         let at = self.frames_at(p.x);
@@ -944,21 +1015,24 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Point { target, which });
                         Some(Message::Refresh)
                     }
-                    (Tool::Razor, Hit::Clip(_) | Hit::Grip(..) | Hit::Lane) => {
+                    (Tool::Razor, Hit::Clip(_) | Hit::Grip(..) | Hit::Lane | Hit::Take(..)) => {
                         state.drag = Some(Drag::Slice { from: p, to: p });
                         Some(Message::Refresh)
                     }
-                    (Tool::Comp, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
-                        let (Some(take), Some(shape), Some(track)) = (self.take_at(clip, p), self.clip_box(clip), self.project.track_of(clip.id)) else {
+                    (Tool::Pencil | Tool::Comp, Hit::Take(clip, take)) => {
+                        let Some(index) = self.project.tracks.iter().position(|t| t.clips.iter().any(|c| c.id == clip.id)) else {
                             return (Captured, None);
                         };
-                        let Some(band) = shape.take_band(clip, take) else {
-                            return (Captured, None);
-                        };
+                        let band = (self.take_lane_top(index, take), TAKE_LANE_HEIGHT);
                         let at = self.snap(self.frames_at(p.x), free);
-                        state.drag = Some(Drag::Comp { clip: clip.id, track: track.id, take, from: at, to: at, band });
+                        state.drag = Some(Drag::Comp { clip: clip.id, track: self.project.tracks[index].id, take, from: at, to: at, band });
                         Some(Message::Refresh)
                     }
+                    (Tool::Comp, Hit::Clip(clip) | Hit::Grip(clip, _)) if clip.has_takes() => {
+                        let closed = self.project.track_of(clip.id).filter(|track| !track.takes_open);
+                        closed.map(|track| Message::ToggleTakes(track.id))
+                    }
+                    (Tool::Comp, Hit::Clip(_) | Hit::Grip(..)) => None,
                     (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
                         let muted = !clip.muted;
                         state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id] });
@@ -1017,6 +1091,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                     (_, Hit::Route(track)) => Some(Message::OpenRouting(track.id)),
                     (_, Hit::Remove(track)) => Some(Message::RemoveTrack(track.id)),
                     (_, Hit::Collapse(track)) => Some(Message::ToggleCollapsed(track.id)),
+                    (_, Hit::Folder(track)) => Some(Message::ToggleTakes(track.id)),
+                    (_, Hit::Take(..)) => None,
                     (_, Hit::AddTrack) => Some(Message::AddTrack),
                     (_, Hit::Grip(clip, grip)) => {
                         let curve_at_grab = match grip {
@@ -1041,7 +1117,6 @@ impl canvas::Program<Message> for Timeline<'_> {
                             grab: self.frames_at(p.x) - clip.start as f64,
                             origin: p,
                             moving: false,
-                            lane: self.take_at(clip, p).filter(|take| *take != clip.take),
                         });
                         (!self.selection.contains(&clip.id)).then_some(Message::Select(Some(clip.id)))
                     }
@@ -1228,8 +1303,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                         (Captured, None)
                     }
                     Drag::Resize { track, top } => {
-                        let height = (p.y - *top).clamp(theme::MIN_TRACK_HEIGHT, theme::MAX_TRACK_HEIGHT).round();
-                        let current = self.project.track(*track).map(|t| self.height_of(t));
+                        let below = self.project.track(*track).map_or(0.0, |t| self.height_of(t) - self.clips_height(t));
+                        let height = (p.y - *top - below).clamp(theme::MIN_TRACK_HEIGHT, theme::MAX_TRACK_HEIGHT).round();
+                        let current = self.project.track(*track).map(|t| self.clips_height(t));
                         let changed = current.is_some_and(|h| h != height);
                         (Captured, changed.then_some(Message::ResizeTrack { track: *track, height }))
                     }
@@ -1240,7 +1316,6 @@ impl canvas::Program<Message> for Timeline<'_> {
                 Some(Drag::Reorder { track, at: Some(to), .. }) => {
                     (Captured, Some(Message::MoveTrack { track, to, parent: self.folder_at(to, track) }))
                 }
-                Some(Drag::Clip { id, moving: false, lane: Some(take), .. }) => (Captured, Some(Message::UseTake(id, take))),
                 Some(Drag::Comp { clip, track, take, from, to, .. }) => {
                     let message = match from == to {
                         true => Message::UseTake(clip, take),
@@ -1606,11 +1681,16 @@ impl Timeline<'_> {
             frame.fill_rectangle(Point::new(0.0, top + height - 1.0), Size::new(size.width, 1.0), p.line);
             let track_colour = if track.muted { p.text_faint } else { self.colour_of(i) };
             let clips_height = self.clips_height(track);
+            let badges = self.take_badges(i);
             for clip in &track.clips {
                 let colour = if clip.muted { p.text_faint } else { track_colour };
-                self.draw_clip(frame, size, clip, top, clips_height, colour);
+                self.draw_clip(frame, size, clip, top, clips_height, colour, &badges);
             }
-            let mut lane_top = top + clips_height;
+            self.draw_take_lanes(frame, size, track, top + clips_height, track_colour);
+            for (badge, count) in badges {
+                self.draw_badge(frame, badge, count, track.takes_open, track_colour);
+            }
+            let mut lane_top = top + self.envelopes_top(track);
             for shape in self.lanes_of(track) {
                 self.draw_envelope(frame, size, shape, lane_top);
                 lane_top += LANE_HEIGHT;
@@ -1620,7 +1700,7 @@ impl Timeline<'_> {
 
     fn envelope_at(&self, index: usize, p: Point) -> Option<Hit<'_>> {
         let track = &self.project.tracks[index];
-        let mut top = self.track_top(index) + self.clips_height(track);
+        let mut top = self.track_top(index) + self.envelopes_top(track);
         for shape in self.lanes_of(track) {
             if p.y >= top && p.y < top + LANE_HEIGHT {
                 let inset = 7.0;
@@ -1644,7 +1724,7 @@ impl Timeline<'_> {
 
     fn lane_top_of(&self, target: loupe_engine::Target) -> Option<f32> {
         for (i, track) in self.project.tracks.iter().enumerate() {
-            let mut top = self.track_top(i) + self.clips_height(track);
+            let mut top = self.track_top(i) + self.envelopes_top(track);
             for shape in self.lanes_of(track) {
                 if shape.target == target {
                     return Some(top);
@@ -1711,7 +1791,8 @@ impl Timeline<'_> {
         });
     }
 
-    fn draw_clip(&self, frame: &mut Frame, size: Size, clip: &Clip, lane_top: f32, lane_height: f32, colour: Color) {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_clip(&self, frame: &mut Frame, size: Size, clip: &Clip, lane_top: f32, lane_height: f32, colour: Color, badges: &[(Rectangle, usize)]) {
         let p = self.palette;
         let left = self.x_of(clip.start as f64) - self.lanes_left();
         let right = self.x_of(clip.end() as f64) - self.lanes_left();
@@ -1750,24 +1831,7 @@ impl Timeline<'_> {
         if wave_height > 4.0 {
             match &clip.notes {
                 Some(notes) => self.draw_notes(frame, clip, notes, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
-                None => match take_lane_height(clip, wave_height) {
-                    Some(lane) => {
-                        let (from_x, to_x) = (shown_left.max(0.0), shown_right.min(size.width));
-                        for take in 0..clip.takes.len() {
-                            let lane_top = wave_top + lane * take as f32;
-                            if take == clip.take {
-                                frame.fill_rectangle(Point::new(from_x, lane_top), Size::new((to_x - from_x).max(0.0), lane), theme::alpha(colour, 0.16));
-                            }
-                            if take > 0 {
-                                frame.fill_rectangle(Point::new(from_x, lane_top), Size::new((to_x - from_x).max(0.0), 1.0), theme::alpha(colour, 0.25));
-                            }
-                            let Some(offset) = clip.take_offset(take) else { continue };
-                            let tone = if take == clip.take { colour } else { theme::mix(p.background, colour, 0.45) };
-                            self.draw_waveform(frame, clip, offset, left, from_x, to_x, lane_top + 1.0, lane - 2.0, tone);
-                        }
-                    }
-                    None => self.draw_waveform(frame, clip, clip.offset, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
-                },
+                None => self.draw_waveform(frame, clip, clip.offset, left, shown_left.max(0.0), shown_right.min(size.width), wave_top, wave_height, colour),
             }
         }
 
@@ -1788,16 +1852,28 @@ impl Timeline<'_> {
             Size::new(shown_width, self.palette.clip_title_height),
         );
         let lanes_on_canvas = Rectangle::new(Point::new(self.lanes_left(), self.lanes_top()), size);
+        let continues_a_folder = self.project.track_of(clip.id).is_some_and(|track| track.clips.iter().any(|earlier| follows_in_folder(earlier, clip)));
+        let name_from = left.max(0.0);
+        let under_badge = badges.iter().find(|(badge, _)| (name_from - 1.0..right).contains(&(badge.x - self.lanes_left() - BADGE_INSET)));
+        let name_inset = under_badge.map_or(0.0, |(badge, _)| badge.width + BADGE_INSET);
+        let title = match (clip.is_stretched(), clip.waiting_for_stretch(), continues_a_folder) {
+            (_, _, true) => format!("take {}", clip.take + 1),
+            (false, _, false) => clip.called().to_string(),
+            (true, false, false) => format!("{}  {:.0}%", clip.called(), clip.stretch * 100.0),
+            (true, true, false) => format!("{}  {:.0}%  stretching…", clip.called(), clip.stretch * 100.0),
+        } + &if clip.has_takes() && !continues_a_folder { format!("  ·  take {}", clip.take + 1) } else { String::new() };
+        let room = right.min(size.width) - name_from - name_inset - 12.0;
+        let title = match (clip.has_takes(), (room / NAME_LETTER).max(0.0) as usize) {
+            (false, _) => title,
+            (true, 0) => String::new(),
+            (true, most) => shorten(&title, most),
+        };
         if let Some(visible) = title_on_canvas.intersection(&lanes_on_canvas) {
             frame.with_clip(visible, |name_region| {
                 name_region.fill_text(Text {
-                    content: match (clip.is_stretched(), clip.waiting_for_stretch()) {
-                        (false, _) => clip.called().to_string(),
-                        (true, false) => format!("{}  {:.0}%", clip.called(), clip.stretch * 100.0),
-                        (true, true) => format!("{}  {:.0}%  stretching…", clip.called(), clip.stretch * 100.0),
-                    } + &if clip.has_takes() { format!("  ·  take {} of {}", clip.take + 1, clip.takes.len()) } else { String::new() },
+                    content: title,
                     position: Point::new(
-                        self.lanes_left() + left.max(0.0) + 8.0 - visible.x,
+                        self.lanes_left() + name_from + name_inset + 8.0 - visible.x,
                         title_on_canvas.y - visible.y + self.palette.clip_title_height / 2.0,
                     ),
                     color: p.text,
@@ -1808,6 +1884,80 @@ impl Timeline<'_> {
                 });
             });
         }
+    }
+
+    fn draw_take_lanes(&self, frame: &mut Frame, size: Size, track: &Track, lanes_top: f32, track_colour: Color) {
+        let p = self.palette;
+        for take in 0..self.take_lanes(track) {
+            let top = lanes_top + take as f32 * TAKE_LANE_HEIGHT;
+            if top > size.height || top + TAKE_LANE_HEIGHT < 0.0 {
+                continue;
+            }
+            frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, TAKE_LANE_HEIGHT), theme::mix(p.background, p.panel, 0.5));
+            frame.fill_rectangle(Point::new(0.0, top + TAKE_LANE_HEIGHT - 1.0), Size::new(size.width, 1.0), p.line);
+            let box_top = top + TAKE_LANE_INSET;
+            let box_height = TAKE_LANE_HEIGHT - TAKE_LANE_INSET * 2.0;
+            for clip in track.clips.iter().filter(|clip| clip.takes.len() > take && !clip.is_notes()) {
+                let left = self.x_of(clip.start as f64) - self.lanes_left();
+                let right = self.x_of(clip.end() as f64) - self.lanes_left();
+                if right < 0.0 || left > size.width {
+                    continue;
+                }
+                let (from_x, to_x) = (left.max(0.0), right.min(size.width));
+                let colour = if clip.muted { p.text_faint } else { track_colour };
+                let chosen = take == clip.take;
+                let span = Size::new((to_x - from_x).max(1.0), box_height);
+                frame.fill_rectangle(Point::new(from_x, box_top), span, theme::mix(p.background, colour, if chosen { 0.3 } else { 0.1 }));
+                if chosen {
+                    frame.stroke(&Path::rectangle(Point::new(from_x, box_top), span), Stroke::default().with_color(colour).with_width(1.0));
+                }
+                if let Some(offset) = clip.take_offset(take) {
+                    let tone = if chosen { colour } else { theme::mix(p.background, colour, 0.45) };
+                    self.draw_waveform(frame, clip, offset, left, from_x, to_x, box_top + 1.0, box_height - 2.0, tone);
+                }
+            }
+            frame.fill_text(Text {
+                content: format!("Take {}", take + 1),
+                position: Point::new(6.0, top + 4.0),
+                color: p.text_dim,
+                size: 10.5.into(),
+                font: p.medium,
+                ..Text::default()
+            });
+        }
+    }
+
+    fn draw_badge(&self, frame: &mut Frame, badge: Rectangle, count: usize, open: bool, colour: Color) {
+        let p = self.palette;
+        let at = Point::new(badge.x - self.lanes_left(), badge.y - self.lanes_top());
+        let body = Path::new(|b| b.rounded_rectangle(at, badge.size(), (badge.height / 2.0).into()));
+        frame.fill(&body, theme::mix(p.background, colour, 0.55));
+        frame.stroke(&body, Stroke::default().with_color(theme::mix(p.background, colour, 0.8)).with_width(1.0));
+        let middle = at.y + badge.height / 2.0;
+        let x = at.x + BADGE_PAD;
+        let reach = BADGE_CHEVRON / 2.0;
+        let chevron = Path::new(|b| {
+            if open {
+                b.move_to(Point::new(x, middle - reach * 0.6));
+                b.line_to(Point::new(x + BADGE_CHEVRON, middle - reach * 0.6));
+                b.line_to(Point::new(x + reach, middle + reach * 0.8));
+            } else {
+                b.move_to(Point::new(x + reach * 0.4, middle - reach));
+                b.line_to(Point::new(x + reach * 0.4 + reach * 1.4, middle));
+                b.line_to(Point::new(x + reach * 0.4, middle + reach));
+            }
+            b.close();
+        });
+        frame.fill(&chevron, p.text);
+        frame.fill_text(Text {
+            content: badge_label(count),
+            position: Point::new(x + BADGE_CHEVRON + BADGE_PAD / 2.0, middle),
+            color: p.text,
+            size: 10.5.into(),
+            font: p.medium,
+            vertical_alignment: alignment::Vertical::Center,
+            ..Text::default()
+        });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2317,12 +2467,23 @@ fn shorten(name: &str, most: usize) -> String {
     }
 }
 
-fn take_lane_height(clip: &Clip, wave_height: f32) -> Option<f32> {
-    if !clip.has_takes() {
-        return None;
+fn follows_in_folder(earlier: &Clip, later: &Clip) -> bool {
+    earlier.has_takes() && earlier.end() == later.start && Arc::ptr_eq(&earlier.source, &later.source) && earlier.takes.len() == later.takes.len()
+}
+
+fn open_take_lanes(track: &Track) -> usize {
+    if !track.takes_open {
+        return 0;
     }
-    let lane = wave_height / clip.takes.len() as f32;
-    (lane >= MIN_TAKE_LANE).then_some(lane)
+    track.clips.iter().filter(|clip| clip.has_takes() && !clip.is_notes()).map(|clip| clip.takes.len()).max().unwrap_or(0)
+}
+
+fn badge_label(count: usize) -> String {
+    format!("{count} takes")
+}
+
+fn badge_width(count: usize) -> f32 {
+    BADGE_PAD + BADGE_CHEVRON + BADGE_PAD / 2.0 + badge_label(count).chars().count() as f32 * BADGE_LETTER + BADGE_PAD
 }
 
 fn off_unity(db: f32) -> bool {
@@ -2564,7 +2725,7 @@ impl crate::App {
                 .iter()
                 .filter(|shape| shape.lane_open && (shape.target.on_track() == Some(track.id) || shape.target.on_clip().is_some_and(|clip| track.clips.iter().any(|kept| kept.id == clip))))
                 .count() as f32;
-            let tall = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height) + lanes * LANE_HEIGHT;
+            let tall = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height) + open_take_lanes(track) as f32 * TAKE_LANE_HEIGHT + lanes * LANE_HEIGHT;
             if at.y >= y && at.y < y + tall {
                 let seconds = (at.x - left) as f64 / self.view.zoom + self.view.scroll;
                 let start = (seconds * self.project.rate as f64).max(0.0) as Frames;
@@ -2726,5 +2887,116 @@ mod dropping {
         let (mut app, tracks) = a_song_with(&["Drums", "Bass", "Vox"]);
         app.project.apply(Command::SetTrackHidden { track: tracks[1], hidden: true }).unwrap();
         assert_eq!(app.below(tracks[0], 1), Some(tracks[2]));
+    }
+}
+
+#[cfg(test)]
+mod take_folders {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::App;
+    use loupe_engine::{Command, Outcome, Source};
+
+    const CANVAS: Rectangle = Rectangle { x: 0.0, y: 0.0, width: 1200.0, height: 900.0 };
+    const TOP: f32 = theme::NEUTRAL.scrollbar_height + theme::NEUTRAL.ruler_height;
+    const TALL: f32 = theme::NEUTRAL.track_height;
+    const LEFT: f32 = theme::NEUTRAL.header_width;
+    const PASSES: usize = 13;
+
+    fn a_looped_vocal_and_drums() -> (App, TrackId, TrackId) {
+        let mut app = App::bare();
+        app.canvas_at.set(CANVAS);
+        app.view = View { zoom: 100.0, scroll: 0.0, scroll_y: 0.0 };
+        let pass = app.project.rate as Frames * 2;
+        let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(drums)) = app.project.apply(Command::AddTrack { name: "Drums".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("Vox (take 14)", vec![[0.2, 0.2]; pass as usize * PASSES]));
+        let Ok(Outcome::Clip(clip)) = app.project.apply(Command::AddClip { track: vox, source, start: 0 }) else { panic!() };
+        app.project.apply(Command::TrimClip { clip, offset: pass * (PASSES as Frames - 1), len: pass }).unwrap();
+        let offsets = (0..PASSES).map(|at| at as i64 * pass as i64).collect();
+        app.project.apply(Command::SetTakes { clip, offsets, active: 0 }).unwrap();
+        (app, vox, drums)
+    }
+
+    fn timeline_of(app: &App) -> Timeline<'_> {
+        Timeline {
+            knobs: &app.knob_names,
+            project: &app.project,
+            palette: &app.palette,
+            view: app.view,
+            heights: &app.heights,
+            selected: app.selected,
+            selection: &app.selection,
+            playhead: app.playhead,
+            loop_range: app.loop_range,
+            punch: app.punch,
+            tool: app.tool,
+            snap: app.snap,
+            hinting: app.hint,
+            armed: &app.armed,
+            recording_from: None,
+            taking_shape: &app.taking_shape,
+            chosen_tracks: &app.chosen_tracks,
+            input_levels: &app.input_levels,
+            opening: false,
+            width: CANVAS.width,
+            cache: &app.cache,
+            at: &app.canvas_at,
+            pixels_per_point: 1.0,
+        }
+    }
+
+    #[test]
+    fn a_folded_track_keeps_its_height_and_shows_one_badge_for_all_its_takes() {
+        let (app, vox, _) = a_looped_vocal_and_drums();
+        let timeline = timeline_of(&app);
+        let track = app.project.track(vox).unwrap();
+        assert_eq!(timeline.height_of(track), TALL, "thirteen takes made a folded track taller");
+        let badges = timeline.take_badges(0);
+        assert_eq!(badges.len(), 1);
+        assert_eq!(badges[0].1, PASSES);
+        assert!(matches!(timeline.hit(badges[0].0.center()), Hit::Folder(found) if found.id == vox));
+        let middle = Point::new(LEFT + 100.0, TOP + TALL / 2.0 + 8.0);
+        assert!(matches!(timeline.hit(middle), Hit::Clip(_)), "the comp row is an ordinary clip while folded");
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, TOP + TALL + TALL / 2.0)), Hit::Lane), "the next track starts right under the fold");
+    }
+
+    #[test]
+    fn an_open_folder_gives_every_take_a_readable_lane_under_the_comp() {
+        let (mut app, vox, drums) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        let below = TOP + TALL + PASSES as f32 * TAKE_LANE_HEIGHT + TALL / 2.0;
+        let timeline = timeline_of(&app);
+        let track = app.project.track(vox).unwrap();
+        assert_eq!(timeline.height_of(track), TALL + PASSES as f32 * TAKE_LANE_HEIGHT);
+        for take in [0, 6, PASSES - 1] {
+            let y = TOP + TALL + take as f32 * TAKE_LANE_HEIGHT + TAKE_LANE_HEIGHT / 2.0;
+            assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, y)), Hit::Take(_, found) if found == take), "lane {take} did not answer as take {take}");
+        }
+        assert_eq!(timeline.track_at(below), Some(1));
+        assert_eq!(app.dropped_onto(Point::new(LEFT + 10.0, TOP + TALL + 10.0)).map(|(track, _)| track), Some(vox), "a drop on the take lanes went to another track");
+        assert_eq!(app.dropped_onto(Point::new(LEFT + 10.0, below)).map(|(track, _)| track), Some(drums));
+    }
+
+    #[test]
+    fn swiping_a_lane_comps_that_take_and_a_click_picks_it() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        app.tool = Tool::Pencil;
+        let timeline = timeline_of(&app);
+        let mut state = Interaction::default();
+        let y = TOP + TALL + 3.0 * TAKE_LANE_HEIGHT + TAKE_LANE_HEIGHT / 2.0;
+        let cursor = |x: f32| mouse::Cursor::Available(Point::new(CANVAS.x + x, CANVAS.y + y));
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let moved = canvas::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(LEFT + 150.0, y) });
+        let released = canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        let _ = canvas::Program::update(&timeline, &mut state, press.clone(), CANVAS, cursor(LEFT + 50.0));
+        let _ = canvas::Program::update(&timeline, &mut state, moved, CANVAS, cursor(LEFT + 150.0));
+        let (_, swiped) = canvas::Program::update(&timeline, &mut state, released.clone(), CANVAS, cursor(LEFT + 150.0));
+        assert!(matches!(swiped, Some(crate::Message::Comp { track, take: 3, from, to }) if track == vox && from < to), "a swipe on lane 4 did not comp take 4");
+        let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 60.0));
+        let (_, clicked) = canvas::Program::update(&timeline, &mut state, released, CANVAS, cursor(LEFT + 60.0));
+        assert!(matches!(clicked, Some(crate::Message::UseTake(_, 3))), "a click on lane 4 did not pick take 4");
     }
 }

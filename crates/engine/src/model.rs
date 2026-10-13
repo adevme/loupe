@@ -240,6 +240,7 @@ pub struct Track {
     pub instrument: Instrument,
     pub sample: Option<Arc<Source>>,
     pub print_takes: bool,
+    pub takes_open: bool,
     pub input: InputChannels,
 }
 
@@ -274,6 +275,7 @@ pub enum Command {
     SetTrackSolo { track: TrackId, solo: bool },
     SetRecordsNotes { track: TrackId, on: bool },
     SetPrintTakes { track: TrackId, on: bool },
+    SetTakesOpen { track: TrackId, open: bool },
     SetTrackInput { track: TrackId, input: InputChannels },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
     PasteClip { track: TrackId, clip: Clip },
@@ -464,7 +466,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, hidden: false, sends: Vec::new(), fx: Vec::new(), fx_on: true, instrument: Instrument::default(), sample: None, print_takes: false, input: InputChannels::default() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, hidden: false, sends: Vec::new(), fx: Vec::new(), fx_on: true, instrument: Instrument::default(), sample: None, print_takes: false, takes_open: false, input: InputChannels::default() });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -534,6 +536,11 @@ impl Project {
             Command::SetPrintTakes { track, on } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].print_takes = on;
+                Ok(Outcome::Done)
+            }
+            Command::SetTakesOpen { track, open } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].takes_open = open;
                 Ok(Outcome::Done)
             }
             Command::SetTrackInput { track, input } => {
