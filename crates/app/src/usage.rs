@@ -219,6 +219,7 @@ mod tests {
             snap: true,
             audio: loupe_engine::Device::default(),
             export: settings::ExportChoices::from_settings(|_| None),
+            meters: crate::metering::MeterSettings::default(),
         };
         let (usage, told) = Usage::begin(&fresh);
         assert!(told, "the notice should be shown on the first run");

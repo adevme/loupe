@@ -39,6 +39,8 @@ const PLAYHEAD_CAP_DROP: f32 = 9.0;
 const METER_FLOOR_DB: f32 = -60.0;
 const METER_MID_DB: f32 = -12.0;
 const METER_HIGH_DB: f32 = -6.0;
+const HOLD_LINE: f32 = 2.0;
+const METER_REACH: f32 = 4.0;
 pub(crate) const HEADER_TINT: f32 = 0.42;
 pub(crate) const MUTED_HEADER_TINT: f32 = 0.16;
 const TOOL_BUTTON: f32 = 26.0;
@@ -140,7 +142,7 @@ pub struct Timeline<'a> {
     pub recording_from: Option<Frames>,
     pub taking_shape: &'a [f32],
     pub chosen_tracks: &'a HashSet<TrackId>,
-    pub input_levels: &'a [f32],
+    pub track_meters: &'a [crate::metering::Meter],
     pub opening: bool,
     pub width: f32,
     pub knobs: &'a HashMap<(u64, usize, usize, bool), String>,
@@ -573,6 +575,14 @@ impl Timeline<'_> {
         Rectangle::new(Point::new(left, mute.y), Size::new(ARM_BUTTON, mute.height))
     }
 
+    fn meter_at(&self, p: Point) -> Option<TrackId> {
+        self.project.tracks.iter().enumerate().find_map(|(index, track)| {
+            let bar = self.meter_bar(index);
+            let reach = Rectangle::new(Point::new(bar.x, bar.y - METER_REACH), Size::new(bar.width, bar.height + METER_REACH * 2.0));
+            (self.armed.contains(&track.id) && bar.y >= self.lanes_top() && reach.contains(p)).then_some(track.id)
+        })
+    }
+
     fn meter_bar(&self, index: usize) -> Rectangle {
         let top = self.track_top(index);
         let height = self.header_height(&self.project.tracks[index]);
@@ -962,6 +972,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     Hit::Envelope(target, Some(which), ..) => Some(Message::DropPoint { target, which }),
                     Hit::Envelope(..) => None,
                     Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Edge(clip, _) => Some(Message::DeleteClip(clip.id)),
+                    _ if self.meter_at(p).is_some() => self.meter_at(p).map(|track| Message::MeterMenu { track, at: Some(Point::new(bounds.x + p.x, bounds.y + p.y)) }),
                     _ => self.track_header_at(p).map(|track| Message::TrackMenu {
                         track: track.id,
                         at: Point::new(bounds.x + p.x, bounds.y + p.y),
@@ -1514,7 +1525,8 @@ impl canvas::Program<Message> for Timeline<'_> {
             if !self.armed.contains(&track.id) || bar.y < self.lanes_top() || bar.y > bounds.height {
                 continue;
             }
-            let level = track.input.level(self.input_levels);
+            let reading = self.track_meters.get(i).copied().unwrap_or_default();
+            let level = reading.shown;
             let db = 20.0 * level.max(1e-6).log10();
             let along = |db: f32| ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0) * bar.width;
             let filled = along(db);
@@ -1528,6 +1540,12 @@ impl canvas::Program<Message> for Timeline<'_> {
                     let colour = if clipping { p.danger } else { *colour };
                     overlay.fill_rectangle(Point::new(bar.x + from, bar.y), Size::new(to - from, bar.height), colour);
                 }
+            }
+            let hold_db = 20.0 * reading.hold.max(1e-6).log10();
+            if hold_db > METER_FLOOR_DB {
+                let colour = crate::metering::hold_colour(p, reading.hold, hold_db, zones);
+                let at = (bar.x + along(hold_db) - HOLD_LINE / 2.0).clamp(bar.x, bar.x + bar.width - HOLD_LINE);
+                overlay.fill_rectangle(Point::new(at, bar.y), Size::new(HOLD_LINE, bar.height), colour);
             }
         }
         let x = self.x_of(self.playhead as f64).round();
@@ -2938,7 +2956,7 @@ mod take_folders {
             recording_from: None,
             taking_shape: &app.taking_shape,
             chosen_tracks: &app.chosen_tracks,
-            input_levels: &app.input_levels,
+            track_meters: &app.track_meters,
             opening: false,
             width: CANVAS.width,
             cache: &app.cache,

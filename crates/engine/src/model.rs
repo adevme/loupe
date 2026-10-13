@@ -242,6 +242,41 @@ pub struct Track {
     pub print_takes: bool,
     pub takes_open: bool,
     pub input: InputChannels,
+    pub meter: MeterPoint,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum MeterPoint {
+    PreFx,
+    PostFx,
+    #[default]
+    PostFader,
+}
+
+pub const METER_POINTS: usize = 3;
+
+impl MeterPoint {
+    pub const ALL: [Self; METER_POINTS] = [Self::PreFx, Self::PostFx, Self::PostFader];
+
+    pub fn index(self) -> usize {
+        match self {
+            Self::PreFx => 0,
+            Self::PostFx => 1,
+            Self::PostFader => 2,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::PreFx => "prefx",
+            Self::PostFx => "postfx",
+            Self::PostFader => "fader",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|point| point.key() == key)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -276,6 +311,7 @@ pub enum Command {
     SetRecordsNotes { track: TrackId, on: bool },
     SetPrintTakes { track: TrackId, on: bool },
     SetTakesOpen { track: TrackId, open: bool },
+    SetTrackMeter { track: TrackId, point: MeterPoint },
     SetTrackInput { track: TrackId, input: InputChannels },
     AddClip { track: TrackId, source: Arc<Source>, start: Frames },
     PasteClip { track: TrackId, clip: Clip },
@@ -466,7 +502,7 @@ impl Project {
         match command {
             Command::AddTrack { name } => {
                 let id = TrackId(self.fresh());
-                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, hidden: false, sends: Vec::new(), fx: Vec::new(), fx_on: true, instrument: Instrument::default(), sample: None, print_takes: false, takes_open: false, input: InputChannels::default() });
+                self.tracks.push(Track { id, name, gain: 1.0, muted: false, pan: 0.0, solo: false, records_notes: false, colour: None, clips: Vec::new(), parent: None, collapsed: false, hidden: false, sends: Vec::new(), fx: Vec::new(), fx_on: true, instrument: Instrument::default(), sample: None, print_takes: false, takes_open: false, input: InputChannels::default(), meter: MeterPoint::PostFader });
                 Ok(Outcome::Track(id))
             }
             Command::RemoveTrack(track) => {
@@ -541,6 +577,11 @@ impl Project {
             Command::SetTakesOpen { track, open } => {
                 let t = self.track_index(track)?;
                 self.tracks[t].takes_open = open;
+                Ok(Outcome::Done)
+            }
+            Command::SetTrackMeter { track, point } => {
+                let t = self.track_index(track)?;
+                self.tracks[t].meter = point;
                 Ok(Outcome::Done)
             }
             Command::SetTrackInput { track, input } => {

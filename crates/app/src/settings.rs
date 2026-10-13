@@ -37,6 +37,7 @@ pub struct Settings {
     pub midi_inputs: Option<Vec<String>>,
     pub audio: loupe_engine::Device,
     pub export: ExportChoices,
+    pub meters: crate::metering::MeterSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,6 +114,7 @@ impl Settings {
                 buffer: value_of("audio_buffer").and_then(|text| text.parse().ok()).filter(|size| loupe_engine::BUFFERS.contains(size)),
             },
             export: ExportChoices::from_settings(|key| value_of(key).map(str::to_string)),
+            meters: crate::metering::MeterSettings::from_settings(|key| value_of(key).map(str::to_string)),
         }
     }
 }

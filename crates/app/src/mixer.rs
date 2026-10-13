@@ -151,7 +151,10 @@ impl App {
         let palette = self.palette;
         hrow![
             container(self.level_readout(level, gain)).center_x(Length::Fill).center_y(21).style(move |_| palette.readout()),
-            container(peak_text(palette, peak)).center_x(Length::Fill).center_y(21).style(move |_| palette.readout()),
+            mouse_area(container(peak_text(palette, peak)).center_x(Length::Fill).center_y(21).style(move |_| palette.readout()))
+                .on_press(Message::ResetMaxPeak(level))
+                .on_enter(Message::Hint(Some("The loudest peak since you last clicked here or pressed play. Click to reset it.")))
+                .on_exit(Message::Hint(None)),
         ]
         .spacing(4)
         .into()
@@ -186,12 +189,12 @@ impl App {
                             .style(move |_, status| palette.slider(status))
                     )
                     .on_scroll(|delta| Message::WheelOverFader(Level::Master, delta)),
-                    meter(palette, self.master_level),
+                    meter(palette, self.master_meter),
                 ]
                 .spacing(6)
                 .height(Length::Fill)
                 .align_y(Alignment::Center),
-                self.readouts(Level::Master, heard, self.master_readout.0),
+                self.readouts(Level::Master, heard, self.master_meter.max),
                 button(text("M").size(11.5).font(palette.semibold).width(Length::Fill).center())
                     .padding([3, 0])
                     .width(Length::Fill)
@@ -271,7 +274,7 @@ impl App {
         let palette = self.palette;
         let strips = self.project.tracks.iter().enumerate().map(|(index, track)| {
             let id = track.id;
-            let level = self.track_levels.get(index).copied().unwrap_or(0.0);
+            let level = self.track_meter(index);
             let shown = self
                 .project
                 .envelope(loupe_engine::Target::TrackGain(id))
@@ -313,12 +316,15 @@ impl App {
                         .on_right_press(Message::OpenAutomation(loupe_engine::Target::TrackGain(id)))
                         .on_enter(Message::Hint(Some("Track volume. Scroll to nudge it, right click to automate it.")))
                         .on_exit(Message::Hint(None)),
-                        meter(palette, level),
+                        mouse_area(meter(palette, level))
+                            .on_right_press(Message::MeterMenu { track: id, at: None })
+                            .on_enter(Message::Hint(Some("Track meter. Right click to choose where it reads: pre-FX, post-FX or post-fader.")))
+                            .on_exit(Message::Hint(None)),
                     ]
                     .spacing(6)
                     .height(Length::Fill)
                     .align_y(Alignment::Center),
-                    self.readouts(Level::Track(id), shown, self.track_readouts.get(index).map_or(0.0, |held| held.0)),
+                    self.readouts(Level::Track(id), shown, level.max),
                     hrow![
                         button(small("M".into()))
                             .padding([3, 0])
@@ -445,6 +451,7 @@ pub const METER_W: f32 = 32.0;
 const HIDDEN_MARK: f32 = 14.0;
 const TITLE_LINE: f32 = 18.0;
 const FADER_W: f32 = 20.0;
+const HOLD_LINE: f32 = 2.0;
 const SCALE_W: f32 = 20.0;
 const FLOOR_DB: f32 = -60.0;
 const MID_DB: f32 = -12.0;
@@ -452,7 +459,7 @@ const HIGH_DB: f32 = -6.0;
 const SCALE_MARKS: [f32; 8] = [0.0, -12.0, -24.0, -48.0, -6.0, -36.0, -18.0, 6.0];
 
 pub struct Meter {
-    level: f32,
+    level: crate::metering::Meter,
     palette: crate::theme::Palette,
 }
 
@@ -475,7 +482,7 @@ impl canvas::Program<Message> for Meter {
         let inset = 5.0;
         let travel = (h - inset * 2.0).max(1.0);
         frame.fill_rectangle(iced::Point::new(x, 0.0), iced::Size::new(w, h), crate::theme::mix(p.panel, p.background, 0.6));
-        let db = 20.0 * self.level.max(1e-6).log10();
+        let db = 20.0 * self.level.shown.max(1e-6).log10();
         let up = |db: f32| ((db - FLOOR_DB) / (LOUDEST_DB - FLOOR_DB)).clamp(0.0, 1.0) * travel;
         let filled = up(db);
         let zones = [(FLOOR_DB, p.meter_low), (MID_DB, p.meter_mid), (HIGH_DB, p.meter_high)];
@@ -483,9 +490,14 @@ impl canvas::Program<Message> for Meter {
             let from = up(*from_db);
             let to = zones.get(i + 1).map_or(travel, |(next, _)| up(*next)).min(filled);
             if to > from {
-                let colour = if self.level >= 1.0 { p.danger } else { *colour };
+                let colour = if self.level.shown >= 1.0 { p.danger } else { *colour };
                 frame.fill_rectangle(iced::Point::new(x, h - inset - to), iced::Size::new(w, to - from), colour);
             }
+        }
+        let hold_db = 20.0 * self.level.hold.max(1e-6).log10();
+        if hold_db > FLOOR_DB {
+            let colour = crate::metering::hold_colour(&p, self.level.hold, hold_db, [(FLOOR_DB, p.meter_low), (MID_DB, p.meter_mid), (HIGH_DB, p.meter_high)]);
+            frame.fill_rectangle(iced::Point::new(x, (h - inset - up(hold_db) - HOLD_LINE / 2.0).max(0.0)), iced::Size::new(w, HOLD_LINE), colour);
         }
         let mut labelled: Vec<f32> = Vec::new();
         for mark in SCALE_MARKS {
@@ -516,7 +528,7 @@ impl canvas::Program<Message> for Meter {
     }
 }
 
-pub fn meter(palette: crate::theme::Palette, level: f32) -> Element<'static, Message> {
+pub fn meter(palette: crate::theme::Palette, level: crate::metering::Meter) -> Element<'static, Message> {
     canvas(Meter { level, palette }).width(METER_W).height(Length::Fill).into()
 }
 

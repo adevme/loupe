@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::instrument::{Instrument, Note};
-use crate::model::{Clip, ClipId, Frames, Project, Track, TrackId};
+use crate::model::{Clip, ClipId, Frames, MeterPoint, Project, Track, TrackId, METER_POINTS};
+
+pub type TrackPeaks = [f32; METER_POINTS];
 
 pub struct Job<'a> {
     pub track: TrackId,
@@ -590,7 +592,7 @@ pub fn mix_tracks_metered(
     pos: Frames,
     out: &mut [[f32; 2]],
     only: Option<ClipId>,
-    peaks: Option<&mut [f32]>,
+    peaks: Option<&mut [TrackPeaks]>,
     scratch: &mut Mixdown,
     mut chains: Option<&mut (dyn Chains + '_)>,
 ) {
@@ -650,7 +652,7 @@ fn run(
     at: i64,
     out: &mut [[f32; 2]],
     only: Option<ClipId>,
-    mut peaks: Option<&mut [f32]>,
+    mut peaks: Option<&mut [TrackPeaks]>,
     scratch: &mut Mixdown,
     mut chains: Option<&mut (dyn Chains + '_)>,
 ) {
@@ -672,6 +674,7 @@ fn run(
     for wave in 0..scratch.waves.len() {
         let (wave_from, wave_to) = scratch.waves[wave];
         if in_waves {
+            note_peaks_at(MeterPoint::PreFx, peaks.as_deref_mut(), scratch, wave_from, wave_to, len);
             if let Some(racks) = chains.as_deref_mut() {
                 run_a_wave(project, scratch, racks, wave_from, wave_to, len);
             }
@@ -683,6 +686,7 @@ fn run(
             }
             let track = &project.tracks[index];
             if !in_waves {
+                note_peaks_at(MeterPoint::PreFx, peaks.as_deref_mut(), scratch, step, step + 1, len);
                 if let Some(racks) = chains.as_deref_mut() {
                     if !track.fx.is_empty() {
                         let (mains, sides) = (&mut scratch.buffers, &scratch.sides);
@@ -690,6 +694,7 @@ fn run(
                     }
                 }
             }
+            note_peaks_at(MeterPoint::PostFx, peaks.as_deref_mut(), scratch, step, step + 1, len);
             let silent = track.muted && only.is_none();
             let keep_pre = track.sends.iter().any(|send| send.pre_fader);
             if keep_pre {
@@ -699,21 +704,15 @@ fn run(
             let opens = automated(project, target, pos, track.gain);
             let closes = automated(project, target, pos + len as Frames, track.gain);
             let (opens, closes) = if silent { (0.0, 0.0) } else { (opens, closes) };
-            let step = (closes - opens) / len.max(1) as f32;
+            let ramp = (closes - opens) / len.max(1) as f32;
             let written_pan = automated(project, crate::envelope::Target::TrackPan(track.id), pos, track.pan);
             let (left, right) = pan_gains(written_pan);
             for (i, frame) in scratch.buffers[index][..len].iter_mut().enumerate() {
-                let gain = opens + step * (i + 1) as f32;
+                let gain = opens + ramp * (i + 1) as f32;
                 frame[0] *= gain * left;
                 frame[1] *= gain * right;
             }
-            if let Some(slot) = peaks.as_deref_mut().and_then(|p| p.get_mut(index)) {
-                let mut top = 0.0f32;
-                for frame in &scratch.buffers[index][..len] {
-                    top = top.max(frame[0].abs()).max(frame[1].abs());
-                }
-                *slot = top;
-            }
+            note_peaks_at(MeterPoint::PostFader, peaks.as_deref_mut(), scratch, step, step + 1, len);
             let first = scratch.feed[index];
             for (which, send) in track.sends.iter().enumerate() {
                 let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
@@ -758,6 +757,23 @@ fn run(
             }
         }
     }
+}
+
+fn note_peaks_at(point: MeterPoint, peaks: Option<&mut [TrackPeaks]>, scratch: &Mixdown, from: usize, to: usize, len: usize) {
+    let Some(peaks) = peaks else {
+        return;
+    };
+    for step in from..to {
+        let index = scratch.index[step];
+        let Some(slot) = peaks.get_mut(index) else {
+            continue;
+        };
+        slot[point.index()] = loudest(&scratch.buffers[index][..len]);
+    }
+}
+
+pub(crate) fn loudest(frames: &[[f32; 2]]) -> f32 {
+    frames.iter().fold(0.0f32, |top, frame| top.max(frame[0].abs()).max(frame[1].abs()))
 }
 
 fn run_a_wave(
@@ -964,6 +980,43 @@ mod tests {
         match p.apply(Command::AddTrack { name: "T".into() }) {
             Ok(Outcome::Track(id)) => id,
             other => panic!("{other:?}"),
+        }
+    }
+
+    struct Doubles {
+        in_waves: bool,
+    }
+
+    impl Chains for Doubles {
+        fn process(&mut self, _track: TrackId, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                frame[0] *= 2.0;
+                frame[1] *= 2.0;
+            }
+        }
+
+        fn whole_waves_at_once(&self) -> bool {
+            self.in_waves
+        }
+    }
+
+    #[test]
+    fn each_meter_point_reads_its_own_place_in_the_track() {
+        for in_waves in [false, true] {
+            let mut p = Project::new(48_000);
+            let one = track(&mut p);
+            clip(&mut p, one, Arc::new(Source::from_frames("steady", vec![[0.25, -0.25]; 4_000])), 0);
+            let fx = crate::model::Fx { mix: 1.0, path: std::path::PathBuf::from("x.vst3"), index: 0, name: "x".into(), bypassed: false, state: Vec::new(), record: false };
+            p.apply(Command::AddFx { track: one, fx }).unwrap();
+            p.apply(Command::SetTrackGain { track: one, gain: 0.25 }).unwrap();
+            let mut peaks = [[0.0f32; METER_POINTS]; 2];
+            let mut out = vec![[0.0; 2]; 256];
+            mix_tracks_metered(&p, 0, &mut out, None, Some(&mut peaks), &mut Mixdown::default(), Some(&mut Doubles { in_waves }));
+            let read = |point: MeterPoint| peaks[0][point.index()];
+            assert!((read(MeterPoint::PreFx) - 0.25).abs() < 1e-6, "pre-FX read {} (waves {in_waves})", read(MeterPoint::PreFx));
+            assert!((read(MeterPoint::PostFx) - 0.5).abs() < 1e-6, "post-FX read {} (waves {in_waves})", read(MeterPoint::PostFx));
+            assert!((read(MeterPoint::PostFader) - 0.125).abs() < 1e-6, "post-fader read {} (waves {in_waves})", read(MeterPoint::PostFader));
+            assert!((out[100][0] - 0.125).abs() < 1e-6, "the sound changed: {:?}", out[100]);
         }
     }
 

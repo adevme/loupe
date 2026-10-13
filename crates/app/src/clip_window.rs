@@ -153,6 +153,7 @@ impl App {
         self.playhead = start;
         self.engine.play();
         self.playing = true;
+        self.start_meters_afresh();
     }
 
     pub(crate) fn stop_preview(&mut self) {

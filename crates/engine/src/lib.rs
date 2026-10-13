@@ -25,10 +25,10 @@ pub use input::{input_count, input_devices, Input, InputChoice, Take, MOST_INPUT
 pub use midi_in::{KeyEvent, KeySender, MidiKeys};
 pub use instrument::{drum_name, hertz, key_name, Instrument, Note, Sampler, Synth, Wave, HIGHEST_KEY, LOWEST_KEY};
 pub use model::{
-    Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Fx, InputChannels, Outcome, Project, Send, Track, TrackId,
+    Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Fx, InputChannels, MeterPoint, Outcome, METER_POINTS, Project, Send, Track, TrackId,
 };
 pub use envelope::{Envelope, Mode, Point, Shape, Target, Writer};
-pub use render::{mix_tracks, monitor_latency, render, render_through, scale, Chains, Job, Mixdown, PluginSpending, Saved, Song, Touched};
+pub use render::{mix_tracks, TrackPeaks, monitor_latency, render, render_through, scale, Chains, Job, Mixdown, PluginSpending, Saved, Song, Touched};
 pub use loupe_stretch::{LONGEST as LONGEST_STRETCH, SHORTEST as SHORTEST_STRETCH};
 pub use source::Source;
 pub use wav::{repair_takes, write_frames};

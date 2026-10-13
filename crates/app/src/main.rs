@@ -16,6 +16,7 @@ mod home;
 mod icons;
 mod knob;
 mod menus;
+mod metering;
 mod mixer;
 mod piano_roll;
 mod pointer;
@@ -80,9 +81,6 @@ const LOOK_IN_EVERY: u8 = 12;
 pub const MASTER_OWNER: u64 = u64::MAX;
 pub const MONITOR_OWNER: u64 = u64::MAX - 1;
 const SETTLES_IN: std::time::Duration = std::time::Duration::from_millis(180);
-const METER_FALL_PER_TICK: f32 = 0.86;
-const READOUT_HOLD_TICKS: u32 = 25;
-const READOUT_FALL_PER_TICK: f32 = 0.97;
 const FADER_STEP_DB: f32 = 0.5;
 const MASTER_STEP_PERCENT: f32 = 1.0;
 const SYSTEM_INPUT: &str = "System default";
@@ -193,6 +191,12 @@ pub enum Message {
     TrackMenu { track: TrackId, at: Point },
     MixerMenu { at: Point },
     StopExport,
+    MeterMenu { track: TrackId, at: Option<Point> },
+    MeterPointChosen { track: TrackId, point: loupe_engine::MeterPoint },
+    ResetMaxPeak(mixer::Level),
+    MeterSettingDragged(metering::MeterSetting, f32),
+    MeterSettingsKept,
+    MeterSettingsReset,
     OpenChain(stockwin::Spot),
     SetFxMix(stockwin::Spot, usize, f32),
     ChainGrab(stockwin::Spot, usize),
@@ -481,6 +485,7 @@ pub enum Overlay {
     TrackMenu { track: TrackId, at: Point },
     Exported(PathBuf, Option<String>),
     MixerMenu { at: Point },
+    MeterMenu { track: TrackId, at: Point },
     Rename { track: TrackId, at: Point },
     Colour { track: TrackId, at: Point },
     Inputs { track: TrackId, at: Point, inputs: u16 },
@@ -529,6 +534,7 @@ impl Overlay {
                 | Overlay::ScriptsMenu
                 | Overlay::TrackMenu { .. }
                 | Overlay::MixerMenu { .. }
+                | Overlay::MeterMenu { .. }
         )
     }
 }
@@ -557,13 +563,13 @@ struct App {
     armed: HashSet<TrackId>,
     recording: Option<recording::Recording>,
     input: Option<Input>,
-    input_levels: Vec<f32>,
+    input_peaks: Vec<f32>,
     taking_shape: Vec<f32>,
     chosen_tracks: std::collections::HashSet<loupe_engine::TrackId>,
-    track_levels: [f32; loupe_engine::METERS],
-    track_readouts: [(f32, u32); loupe_engine::METERS],
-    master_readout: (f32, u32),
-    master_level: f32,
+    track_meters: [metering::Meter; loupe_engine::METERS],
+    master_meter: metering::Meter,
+    meter_settings: metering::MeterSettings,
+    meters_sampled_at: Option<Instant>,
     input_name: Option<String>,
     theme_name: Option<String>,
     theme_names: Vec<String>,
@@ -631,6 +637,7 @@ struct App {
     entry: String,
     clip_name: String,
     pointer: Point,
+    mixer_pointer: Point,
     pixels_per_point: f32,
     canvas_at: std::cell::Cell<Rectangle>,
     aim: Option<Aim>,
@@ -738,13 +745,13 @@ impl App {
             armed: HashSet::new(),
             recording: None,
             input: None,
-            input_levels: Vec::new(),
+            input_peaks: Vec::new(),
             taking_shape: Vec::new(),
             chosen_tracks: std::collections::HashSet::new(),
-            track_levels: [0.0; loupe_engine::METERS],
-            track_readouts: [(0.0, 0); loupe_engine::METERS],
-            master_readout: (0.0, 0),
-            master_level: 0.0,
+            track_meters: [metering::Meter::default(); loupe_engine::METERS],
+            master_meter: metering::Meter::default(),
+            meter_settings: settings.meters,
+            meters_sampled_at: None,
             input_name: settings.input.clone(),
             theme_name: settings.theme.clone(),
             theme_names: Vec::new(),
@@ -788,6 +795,7 @@ impl App {
             chain_drag: None,
             name_clicked: None,
             pointer: Point::ORIGIN,
+            mixer_pointer: Point::ORIGIN,
             pixels_per_point: 1.0,
             canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
             aim: None,
@@ -947,13 +955,13 @@ impl App {
             armed: HashSet::new(),
             recording: None,
             input: None,
-            input_levels: Vec::new(),
+            input_peaks: Vec::new(),
             taking_shape: Vec::new(),
             chosen_tracks: std::collections::HashSet::new(),
-            track_levels: [0.0; loupe_engine::METERS],
-            track_readouts: [(0.0, 0); loupe_engine::METERS],
-            master_readout: (0.0, 0),
-            master_level: 0.0,
+            track_meters: [metering::Meter::default(); loupe_engine::METERS],
+            master_meter: metering::Meter::default(),
+            meter_settings: metering::MeterSettings::default(),
+            meters_sampled_at: None,
             input_name: None,
             theme_name: None,
             theme_names: Vec::new(),
@@ -997,6 +1005,7 @@ impl App {
             chain_drag: None,
             name_clicked: None,
             pointer: Point::ORIGIN,
+            mixer_pointer: Point::ORIGIN,
             pixels_per_point: 1.0,
             canvas_at: std::cell::Cell::new(Rectangle::new(Point::ORIGIN, Size::ZERO)),
             aim: None,
@@ -1232,6 +1241,7 @@ impl App {
                     }
                     self.engine.play();
                     self.playing = true;
+                    self.start_meters_afresh();
                 }
             }
             Message::ToStart => self.seek(0),
@@ -1272,25 +1282,12 @@ impl App {
                     self.copied = None;
                 }
                 if let Some(input) = &self.input {
-                    let peaks = input.take_peaks();
-                    self.input_levels.resize(peaks.len(), 0.0);
-                    for (shown, now) in self.input_levels.iter_mut().zip(peaks) {
-                        *shown = now.max(*shown * METER_FALL_PER_TICK);
-                    }
                     self.taking_shape = match self.recording.is_some() {
                         true => input.shape(),
                         false => Vec::new(),
                     };
                 }
-                let (tracks, master) = self.engine.levels();
-                for (shown, now) in self.track_levels.iter_mut().zip(tracks) {
-                    *shown = now.max(*shown * METER_FALL_PER_TICK);
-                }
-                self.master_level = master.max(self.master_level * METER_FALL_PER_TICK);
-                for (held, now) in self.track_readouts.iter_mut().zip(self.track_levels) {
-                    *held = readout_held(*held, now);
-                }
-                self.master_readout = readout_held(self.master_readout, self.master_level);
+                self.sample_meters_when_due(Instant::now());
                 self.engine.collect();
                 self.settle = self.settle.saturating_sub(1);
                 let position = self.engine.position();
@@ -1681,6 +1678,24 @@ impl App {
             Message::DeleteClip(clip) => self.delete_clips(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
+            Message::MeterMenu { track, at } => {
+                let at = at.unwrap_or(if self.mixer_window.is_some() { self.mixer_pointer } else { self.pointer });
+                self.overlay = Overlay::MeterMenu { track, at };
+            }
+            Message::MeterPointChosen { track, point } => {
+                self.overlay = Overlay::None;
+                if self.project.track(track).is_some_and(|found| found.meter != point) {
+                    self.edit(None, Command::SetTrackMeter { track, point });
+                    self.forget_track_meter(track);
+                }
+            }
+            Message::ResetMaxPeak(level) => self.reset_max_peak(level),
+            Message::MeterSettingDragged(which, value) => self.meter_settings = which.set(self.meter_settings, value),
+            Message::MeterSettingsKept => self.keep_meter_settings(),
+            Message::MeterSettingsReset => {
+                self.meter_settings = metering::MeterSettings::default();
+                self.keep_meter_settings();
+            }
             Message::StopExport => self.stop_export.store(true, Ordering::Relaxed),
             Message::ClickedAway => {
                 let settled = self.overlay_since.is_none_or(|at| at.elapsed() > SETTLES_IN);
@@ -1727,6 +1742,8 @@ impl App {
                 if window == self.main_window {
                     self.pointer = at;
                     self.pixels_per_point = pointer::pixels_per_point(self.scale);
+                } else if self.mixer_window == Some(window) {
+                    self.mixer_pointer = at;
                 }
             }
             Message::MixerNameClicked(track) => {
@@ -2750,7 +2767,7 @@ impl App {
             || self.stock.is_some()
             || self.plugins_opening
             || self.crash_sheet_due
-            || self.master_level > 0.0005;
+            || self.meters_moving();
         let ticks = if self.playing || self.settle > 0 || watching {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
@@ -3215,7 +3232,7 @@ impl App {
             self.engine.hear_on(&[]);
             self.engine.stop_hearing();
             self.input = None;
-            self.input_levels.clear();
+            self.input_peaks.clear();
             return;
         }
         let rolling = self.recording.is_some();
@@ -3521,7 +3538,7 @@ impl App {
             recording_from: self.recording.as_ref().map(|recording| recording.from),
             taking_shape: &self.taking_shape,
             chosen_tracks: &self.chosen_tracks,
-            input_levels: &self.input_levels,
+            track_meters: &self.track_meters,
             opening: self.opening.is_some(),
             width: self.canvas_width(),
             cache: &self.cache,
@@ -3885,7 +3902,7 @@ impl App {
         }))
         .spacing(4);
         let page = match current {
-            SettingsTab::Display => column![self.theme_picker(), rule(palette), scale, rule(palette), follow].spacing(16),
+            SettingsTab::Display => column![self.theme_picker(), rule(palette), scale, rule(palette), follow, rule(palette), self.meter_settings_section()].spacing(16),
             SettingsTab::File => column![folder, rule(palette), self.autosave_settings()].spacing(16),
             SettingsTab::Recording => recording,
             SettingsTab::Audio => column![self.audio_settings()],
@@ -4426,32 +4443,5 @@ mod overlay_window_tests {
         let _ = app.update(Message::ResizedTo(mixer, Size::new(700.0, 300.0)));
         assert_eq!(app.mixer_size, Size::new(700.0, 300.0));
         assert_eq!(app.window, Size::new(1280.0, 760.0), "the mixer window resized the main window");
-    }
-}
-
-fn readout_held((value, hold): (f32, u32), now: f32) -> (f32, u32) {
-    if now >= value {
-        return (now, READOUT_HOLD_TICKS);
-    }
-    if hold > 0 {
-        return (value, hold - 1);
-    }
-    ((value * READOUT_FALL_PER_TICK).max(now), 0)
-}
-
-#[cfg(test)]
-mod readout_tests {
-    use super::*;
-
-    #[test]
-    fn the_peak_readout_holds_then_falls_gently() {
-        let mut held = readout_held((0.0, 0), 0.5);
-        for _ in 0..READOUT_HOLD_TICKS {
-            held = readout_held(held, 0.01);
-            assert_eq!(held.0, 0.5, "the readout dropped before its hold ran out");
-        }
-        held = readout_held(held, 0.01);
-        assert!(held.0 < 0.5 && held.0 > 0.4, "after the hold it falls by a small step, got {}", held.0);
-        assert_eq!(readout_held(held, 0.9).0, 0.9, "a louder peak shows straight away");
     }
 }

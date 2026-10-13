@@ -12,8 +12,8 @@ use crate::input::MOST_INPUTS;
 use crate::devices::{self, Device, Failure, Running};
 use crate::instrument::Note;
 use crate::midi_in::{KeyEvent, KeySender};
-use crate::model::{ClipId, Frames, Project, TrackId};
-use crate::render::{mix_tracks_metered, pan_gains, scale, shape_of, Chains, Mixdown, Round, Shape};
+use crate::model::{ClipId, Frames, MeterPoint, Project, TrackId, METER_POINTS};
+use crate::render::{loudest, mix_tracks_metered, TrackPeaks, pan_gains, scale, shape_of, Chains, Mixdown, Round, Shape};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -83,7 +83,7 @@ enum Msg {
 impl Default for Shared {
     fn default() -> Self {
         Self {
-            levels: std::array::from_fn(|_| AtomicU32::new(0)),
+            levels: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU32::new(0))),
             master_level: AtomicU32::new(0),
             pos: AtomicU64::new(0),
             playing: AtomicBool::new(false),
@@ -99,7 +99,7 @@ impl Default for Shared {
 }
 
 struct Shared {
-    levels: [AtomicU32; METERS],
+    levels: [[AtomicU32; METER_POINTS]; METERS],
     master_level: AtomicU32,
     pos: AtomicU64,
     playing: AtomicBool,
@@ -152,11 +152,17 @@ fn roll_ahead(mut asked: Consumer<Rolled>, mut done: Producer<Rolled>, wanted: A
     }
 }
 
-fn hush(shared: &Shared) {
-    for slot in shared.levels.iter() {
-        slot.store(0f32.to_bits(), Ordering::Relaxed);
+impl Shared {
+    fn take_levels(&self) -> ([TrackPeaks; METERS], f32) {
+        let take = |slot: &AtomicU32| f32::from_bits(slot.swap(0f32.to_bits(), Ordering::Relaxed));
+        (std::array::from_fn(|i| std::array::from_fn(|point| take(&self.levels[i][point]))), take(&self.master_level))
     }
-    shared.master_level.store(0f32.to_bits(), Ordering::Relaxed);
+
+    fn note_track(&self, index: usize, point: MeterPoint, level: f32) {
+        if let Some(points) = self.levels.get(index) {
+            points[point.index()].fetch_max(level.to_bits(), Ordering::Relaxed);
+        }
+    }
 }
 
 struct Rt {
@@ -164,7 +170,7 @@ struct Rt {
     load: f32,
     load_peak: f32,
     chains: Option<Box<dyn Chains>>,
-    peaks: [f32; METERS],
+    peaks: [TrackPeaks; METERS],
     project: Arc<Project>,
     inbox: Consumer<Msg>,
     retired: Producer<Arc<Project>>,
@@ -449,7 +455,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         done_feeds: done_in,
         scratch,
         chains: None,
-        peaks: [0.0; METERS],
+        peaks: [[0.0; METER_POINTS]; METERS],
         project: Arc::new(Project::new(rate)),
         inbox,
         retired: retired_tx,
@@ -586,7 +592,6 @@ impl Rt {
                 }
                 if !self.playing && self.roll != Roll::Out {
                     out[done..].fill([0.0; 2]);
-                    hush(&self.shared);
                     break;
                 }
             }
@@ -608,7 +613,6 @@ impl Rt {
             }
             if self.roll == Roll::Out {
                 out[done..].fill([0.0; 2]);
-                hush(&self.shared);
                 break;
             }
             let rising = self.playing && self.seek.is_none() && self.roll == Roll::No;
@@ -625,7 +629,7 @@ impl Rt {
                 part = part.min((stop_at - self.pos) as usize);
             }
             let chunk = &mut out[done..done + part];
-            self.peaks = [0.0; METERS];
+            self.peaks = [[0.0; METER_POINTS]; METERS];
             mix_tracks_metered(&self.project, self.pos, chunk, self.audition, Some(&mut self.peaks), &mut self.scratch, self.chains.as_deref_mut());
             let target = if self.project.master_muted { 0.0 } else { self.project.master };
             scale(chunk, self.master, target);
@@ -634,10 +638,12 @@ impl Rt {
             for frame in chunk.iter() {
                 top = top.max(frame[0].abs()).max(frame[1].abs());
             }
-            for (slot, peak) in self.shared.levels.iter().zip(self.peaks) {
-                slot.store(peak.to_bits(), Ordering::Relaxed);
+            for (index, peaks) in self.peaks.iter().enumerate() {
+                for point in MeterPoint::ALL {
+                    self.shared.note_track(index, point, peaks[point.index()]);
+                }
             }
-            self.shared.master_level.store(top.to_bits(), Ordering::Relaxed);
+            self.shared.master_level.fetch_max(top.to_bits(), Ordering::Relaxed);
             if self.metronome && self.audition.is_none() {
                 add_clicks(chunk, self.pos as f64, beat, rate);
             }
@@ -839,9 +845,11 @@ impl Rt {
             for (frame, heard) in sound.iter_mut().zip(ear.voice.chunks_exact(width)) {
                 *frame = track.input.heard(heard);
             }
+            self.shared.note_track(index, MeterPoint::PreFx, loudest(sound));
             if let Some(racks) = self.chains.as_deref_mut() {
                 racks.process_takes(*id, sound);
             }
+            self.shared.note_track(index, MeterPoint::PostFx, loudest(&ear.track[..frames]));
             let gain = if track.muted { 0.0 } else { track.gain * master };
             let (left, right) = pan_gains(track.pan);
             let mut top = 0.0f32;
@@ -851,9 +859,7 @@ impl Rt {
                 out[0] += heard[0];
                 out[1] += heard[1];
             }
-            if let Some(level) = self.shared.levels.get(index) {
-                level.fetch_max(top.to_bits(), Ordering::Relaxed);
-            }
+            self.shared.note_track(index, MeterPoint::PostFader, top);
         }
     }
 
@@ -879,11 +885,13 @@ impl Rt {
                 }
                 let track = &project.tracks[index];
                 let armed = ear.on.iter().flatten().any(|id| *id == track.id);
+                let mut arriving = loudest(&ear.mix[index][..frames]);
                 if armed {
                     let sound = &mut ear.track[..frames];
                     for (frame, heard) in sound.iter_mut().zip(ear.voice.chunks_exact(width)) {
                         *frame = track.input.heard(heard);
                     }
+                    arriving = arriving.max(loudest(&ear.track[..frames]));
                     if let Some(racks) = self.chains.as_deref_mut() {
                         racks.process_takes(track.id, &mut ear.track[..frames]);
                     }
@@ -897,6 +905,8 @@ impl Rt {
                         racks.hear_with(track.id, &mut mix[index][..frames], &sides[index][..frames]);
                     }
                 }
+                self.shared.note_track(index, MeterPoint::PreFx, arriving);
+                self.shared.note_track(index, MeterPoint::PostFx, loudest(&ear.mix[index][..frames]));
                 if track.sends.iter().any(|send| send.pre_fader) {
                     ear.pre[..frames].copy_from_slice(&ear.mix[index][..frames]);
                 }
@@ -908,9 +918,7 @@ impl Rt {
                     frame[1] *= gain * right;
                     top = top.max(frame[0].abs()).max(frame[1].abs());
                 }
-                if let Some(meter) = self.shared.levels.get(index) {
-                    meter.fetch_max(top.to_bits(), Ordering::Relaxed);
-                }
+                self.shared.note_track(index, MeterPoint::PostFader, top);
                 for send in &track.sends {
                     let Some(to) = project.tracks.iter().position(|t| t.id == send.to) else { continue };
                     if ear.depth[to] == NOT_HEARD {
@@ -1120,10 +1128,8 @@ impl Engine {
         }
     }
 
-    pub fn levels(&self) -> ([f32; METERS], f32) {
-        let shared = &self.remote.shared;
-        let tracks = std::array::from_fn(|i| f32::from_bits(shared.levels[i].load(Ordering::Relaxed)));
-        (tracks, f32::from_bits(shared.master_level.load(Ordering::Relaxed)))
+    pub fn take_levels(&self) -> ([TrackPeaks; METERS], f32) {
+        self.remote.shared.take_levels()
     }
 
     pub fn set_metronome(&mut self, on: bool) {
@@ -1477,8 +1483,10 @@ mod tests {
         thread::sleep(Duration::from_millis(150));
         engine.stop();
         thread::sleep(Duration::from_millis(150));
-        let (tracks, master) = engine.levels();
-        assert_eq!(tracks[0], 0.0, "track level stayed at {}", tracks[0]);
+        let _ = engine.take_levels();
+        thread::sleep(Duration::from_millis(50));
+        let (tracks, master) = engine.take_levels();
+        assert_eq!(tracks[0][MeterPoint::PostFader.index()], 0.0, "track level stayed at {}", tracks[0][MeterPoint::PostFader.index()]);
         assert_eq!(master, 0.0, "master level stayed at {master}");
     }
 
@@ -1488,8 +1496,8 @@ mod tests {
         engine.set_project(&steady(SILENT_RATE as usize * 5));
         engine.play();
         thread::sleep(Duration::from_millis(200));
-        let (tracks, master) = engine.levels();
-        assert!(tracks[0] > 0.0, "track level stayed at {}", tracks[0]);
+        let (tracks, master) = engine.take_levels();
+        assert!(tracks[0][MeterPoint::PostFader.index()] > 0.0, "track level stayed at {}", tracks[0][MeterPoint::PostFader.index()]);
         assert!(master > 0.0, "master level stayed at {master}");
     }
 
@@ -1497,15 +1505,38 @@ mod tests {
     fn a_playing_track_reports_a_level() {
         let project = steady(256);
         let mut out = vec![[0.0f32; 2]; 64];
-        let mut peaks = [0.0f32; METERS];
+        let mut peaks = [[0.0f32; METER_POINTS]; METERS];
         crate::render::mix_tracks_metered(&project, 0, &mut out, None, Some(&mut peaks), &mut crate::render::Mixdown::default(), None);
-        assert!(peaks[0] > 0.0, "track 0 should report a level, got {}", peaks[0]);
+        assert!(peaks[0][MeterPoint::PostFader.index()] > 0.0, "track 0 should report a level, got {:?}", peaks[0]);
     }
 
     fn rig(len: usize) -> (Rt, Remote) {
         let (rt, mut remote) = pair(RATE);
         remote.outbox.push(Msg::Project(Arc::new(steady(len)))).ok().unwrap();
         (rt, remote)
+    }
+
+    #[test]
+    fn a_loud_block_is_still_reported_after_quieter_blocks_before_the_read() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "T".into() }) else { panic!() };
+        let mut frames = vec![[0.9f32, 0.9]; 256];
+        frames.extend(vec![[0.1f32, 0.1]; RATE as usize]);
+        project.apply(Command::AddClip { track, source: Arc::new(Source::from_frames("burst", frames)), start: 0 }).unwrap();
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        for _ in 0..4 {
+            rt.process(256);
+        }
+        assert!(remote.shared.pos.load(Ordering::Relaxed) >= 1024, "the song did not play past the loud block");
+        let (tracks, master) = remote.shared.take_levels();
+        assert!((tracks[0][MeterPoint::PostFader.index()] - 0.9).abs() < 1e-3, "the track read {} after a 0.9 block", tracks[0][MeterPoint::PostFader.index()]);
+        assert!((master - 0.9).abs() < 1e-3, "the master read {master} after a 0.9 block");
+        rt.process(256);
+        let (tracks, master) = remote.shared.take_levels();
+        assert!((tracks[0][MeterPoint::PostFader.index()] - 0.1).abs() < 1e-3, "the read did not clear, the track read {}", tracks[0][MeterPoint::PostFader.index()]);
+        assert!((master - 0.1).abs() < 1e-3, "the read did not clear, the master read {master}");
     }
 
     #[test]

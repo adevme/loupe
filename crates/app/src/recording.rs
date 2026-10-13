@@ -91,6 +91,7 @@ impl App {
             }
             self.engine.play();
             self.playing = true;
+            self.start_meters_afresh();
         }
         self.recording = Some(Recording { from: self.playhead, tracks, note_tracks, taped: Vec::new(), counted_in, looping, began: None, punch });
         self.engine.now_recording(true);

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::instrument::{Instrument, Note, Sampler, Synth, Wave};
-use crate::model::{Clip, ClipId, Command, Edge, Fade, Frames, InputChannels, Outcome, Project, TrackId};
+use crate::model::{Clip, ClipId, Command, Edge, Fade, Frames, InputChannels, MeterPoint, Outcome, Project, TrackId};
 use crate::source::Source;
 
 const HEADER: &str = "loupe project 1";
@@ -57,6 +57,7 @@ pub struct SavedTrack {
     pub print_takes: bool,
     pub takes_open: bool,
     pub input: InputChannels,
+    pub meter: MeterPoint,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -173,6 +174,7 @@ impl SavedProject {
                     sample: track.sample.as_ref().and_then(|sample| project.sources.iter().position(|kept| Arc::ptr_eq(kept, sample))),
                     print_takes: track.print_takes,
                     takes_open: track.takes_open,
+                    meter: track.meter,
                     fx_on: track.fx_on,
                     input: track.input,
                     sends: track
@@ -253,8 +255,8 @@ impl SavedProject {
             let parent = track.parent.map_or("-".to_string(), |p| p.to_string());
             let sample = track.sample.map_or("-".to_string(), |s| s.to_string());
             out.push_str(&format!(
-                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} hidden={} instrument={} sample={sample} print={} takesopen={} input={} fxon={} name={}\n",
-                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, track.hidden as u8, instrument_text(&track.instrument), track.print_takes as u8, track.takes_open as u8, track.input.text(), track.fx_on as u8, track.name
+                "track gain={} muted={} pan={} solo={} keys={} colour={colour} height={height} parent={parent} collapsed={} hidden={} instrument={} sample={sample} print={} takesopen={} input={} fxon={} meter={} name={}\n",
+                track.gain, track.muted as u8, track.pan, track.solo as u8, track.records_notes as u8, track.collapsed as u8, track.hidden as u8, instrument_text(&track.instrument), track.print_takes as u8, track.takes_open as u8, track.input.text(), track.fx_on as u8, track.meter.key(), track.name
             ));
             for (to, gain, pre, side) in &track.sends {
                 out.push_str(&format!("send to={to} gain={gain} pre={} side={}\n", *pre as u8, *side as u8));
@@ -365,6 +367,7 @@ impl SavedProject {
                         takes_open: fields.get("takesopen") == Some(&"1"),
                         fx_on: fields.get("fxon") != Some(&"0"),
                         input: fields.get("input").and_then(|text| InputChannels::from_text(text)).unwrap_or_default(),
+                        meter: fields.get("meter").and_then(|key| MeterPoint::from_key(key)).unwrap_or_default(),
                     });
                 }
                 "send" => {
@@ -534,6 +537,7 @@ impl SavedProject {
             let _ = project.apply(Command::SetPrintTakes { track, on: saved.print_takes });
             let _ = project.apply(Command::SetTakesOpen { track, open: saved.takes_open });
             let _ = project.apply(Command::SetTrackInput { track, input: saved.input });
+            let _ = project.apply(Command::SetTrackMeter { track, point: saved.meter });
             let _ = project.apply(Command::SetTrackColour { track, colour: saved.colour });
             let _ = project.apply(Command::SetInstrument { track, instrument: saved.instrument });
             if let Some(sample) = saved.sample.and_then(|index| sources.get(index)) {
@@ -946,6 +950,26 @@ mod routing_round_trip {
         let (ancient, _) = SavedProject::parse(ancient).unwrap().build(&[], 48_000);
         assert_eq!(ancient.tracks.len(), 1);
         assert!(!ancient.tracks[0].takes_open);
+    }
+
+    #[test]
+    fn each_tracks_meter_point_comes_back_and_old_songs_meter_after_the_fader() {
+        let mut p = Project::new(48_000);
+        for (name, point) in [("Vox", MeterPoint::PreFx), ("Hook", MeterPoint::PostFx), ("Bass", MeterPoint::PostFader)] {
+            let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: name.into() }) else { panic!() };
+            assert_eq!(p.tracks.last().unwrap().meter, MeterPoint::PostFader, "a new track meters after its fader");
+            p.apply(Command::SetTrackMeter { track, point }).unwrap();
+        }
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&[], 48_000);
+        assert_eq!(back.tracks.iter().map(|track| track.meter).collect::<Vec<_>>(), [MeterPoint::PreFx, MeterPoint::PostFx, MeterPoint::PostFader]);
+        let older = text.replace(" meter=prefx", "").replace(" meter=postfx", "").replace(" meter=fader", "");
+        assert!(!older.contains("meter="));
+        let (old, _) = SavedProject::parse(&older).unwrap().build(&[], 48_000);
+        assert!(old.tracks.iter().all(|track| track.meter == MeterPoint::PostFader), "songs from before meter after the fader");
+        let odd = text.replace(" meter=prefx", " meter=sideways");
+        let (odd, _) = SavedProject::parse(&odd).unwrap().build(&[], 48_000);
+        assert_eq!(odd.tracks[0].meter, MeterPoint::PostFader);
     }
 
     #[test]
