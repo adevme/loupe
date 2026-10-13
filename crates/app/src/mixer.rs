@@ -427,7 +427,7 @@ fn strip_title(palette: crate::theme::Palette, number: &str, name: String, hidde
         None => label.into(),
     };
     let line = hrow![
-        text(number.to_string()).size(10).font(palette.mono).color(palette.text_faint),
+        text(number.to_string()).size(10).font(palette.mono).color(palette.text_dim),
         named,
         mark,
     ]
