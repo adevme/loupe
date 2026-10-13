@@ -27,6 +27,20 @@ fi
 
 cargo build --release --target "$target" -p loupe -p loupe-host -p loupe-launcher --features asio --manifest-path "$root/Cargo.toml"
 
+# A build that loses ASIO looks exactly like one that has it, and the only sign
+# is the delay you hear while tracking. So prove it is in there before going on.
+has_asio_in_it() {
+  LC_ALL=C grep -a -q -E 'host/asio/stream\.rs|can be returned by any ASIO function|ASIOSTFloat32LSB' "$1"
+}
+
+if ! has_asio_in_it "$built/loupe.exe"; then
+  echo "loupe.exe came out with no ASIO host in it, so it would run on WASAPI" >&2
+  echo "shared mode and ignore the buffer size the interface is set to." >&2
+  echo "Check that CPAL_ASIO_DIR points at a whole SDK and that the build above" >&2
+  echo "really compiled asio-sys, then build again." >&2
+  exit 1
+fi
+
 stage="$here/build"
 rm -rf "$stage"
 mkdir -p "$stage" "$here/output"

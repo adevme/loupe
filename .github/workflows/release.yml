@@ -15,6 +15,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
+        # No ASIO here. Steinberg's SDK cannot be passed on, so the installer
+        # published from a tag is WASAPI only, and WASAPI shared mode decides
+        # the buffer size itself. installer/build-windows.sh makes a copy with
+        # ASIO in it for whoever needs the buffer size they asked for.
         run: cargo build --release -p loupe -p loupe-host -p loupe-launcher
       - name: Gather
         shell: bash
