@@ -32,8 +32,24 @@ own licence beside it.
 
 ### ASIO
 
-Loupe does not ship with ASIO. Steinberg's ASIO SDK is not free software, and a
-build that links it cannot be passed on under this licence. On Windows, pick the
-WASAPI driver in Settings for low latency. If you have agreed to Steinberg's
-terms you can build your own copy with `cargo build --features asio`, but please
-keep that build to yourself.
+Loupe does not ship with ASIO, and the SDK is not vendored here. Steinberg's
+ASIO SDK is offered either under Steinberg's own licence, which forbids passing
+the SDK on without a signed agreement, or under the GPL version 3; and parts of
+it (`common/combase.*`, `common/wxdebug.h`) are old Microsoft code carrying no
+redistribution grant at all. So the SDK stays off this repository and the
+downloads stay free of it.
+
+On Windows, ASIO is the only way Loupe can honour the buffer size your interface
+is set to. WASAPI shared mode decides the buffer itself, which on a 128-frame
+interface still came out at 1056 frames, so monitoring your own voice while
+recording is not usable without ASIO.
+
+To build a copy with ASIO for your own use:
+
+1. Download the SDK from <https://www.steinberg.net/asiosdk> and unpack it.
+2. Point `CPAL_ASIO_DIR` at the folder holding `common/`, `host/` and `driver/`.
+3. `cargo build --release --features asio`, or `installer/build-windows.sh` for
+   the whole installer.
+
+Cross-building that from Linux works: `--target x86_64-pc-windows-gnu` with
+`x86_64-w64-mingw32-g++` and `clang` installed. Keep the build to yourself.

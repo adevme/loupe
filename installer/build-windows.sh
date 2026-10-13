@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Makes the Windows installer. Releases are built by GitHub Actions
-# (.github/workflows/release.yml); this is for trying one out by hand.
+# Makes the Windows installer, with ASIO in it. The tagged releases built by
+# GitHub Actions (.github/workflows/release.yml) have no ASIO, because Loupe
+# cannot pass Steinberg's SDK on; this script is how you make a copy for
+# yourself that does.
 #
-# It needs Inno Setup's ISCC.exe, which is a Windows program. It will use,
-# in order: a local ISCC (through wine if it is not a native one), or a
-# Windows machine named by LOUPE_BUILD_PC.
+# It needs Steinberg's ASIO SDK in CPAL_ASIO_DIR, and Inno Setup's ISCC.exe,
+# which is a Windows program. For ISCC it will use, in order: a local ISCC
+# (through wine if it is not a native one), or a Windows machine named by
+# LOUPE_BUILD_PC.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -13,7 +16,16 @@ version="$(grep -m1 '^version' "$root/Cargo.toml" | cut -d'"' -f2)"
 target=x86_64-pc-windows-gnu
 built="$root/target/$target/release"
 
-cargo build --release --target "$target" -p loupe -p loupe-host -p loupe-launcher --manifest-path "$root/Cargo.toml"
+if [ -z "${CPAL_ASIO_DIR:-}" ] || [ ! -f "$CPAL_ASIO_DIR/common/asio.h" ]; then
+  echo "This build needs Steinberg's ASIO SDK, which Loupe does not ship." >&2
+  echo "Download it from https://www.steinberg.net/asiosdk, unpack it, and set" >&2
+  echo "CPAL_ASIO_DIR to the folder holding common/, host/ and driver/." >&2
+  echo "Windows without ASIO means WASAPI shared mode, which ignores the buffer" >&2
+  echo "size your interface is set to, so this is not optional for tracking." >&2
+  exit 1
+fi
+
+cargo build --release --target "$target" -p loupe -p loupe-host -p loupe-launcher --features asio --manifest-path "$root/Cargo.toml"
 
 stage="$here/build"
 rm -rf "$stage"
