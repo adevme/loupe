@@ -1,17 +1,37 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, slider, text, Space};
-use iced::{Alignment, Element, Length};
+use iced::{window, Alignment, Element, Length, Size, Task};
 
 use loupe_engine::Fx;
 
 use crate::stockwin::Spot;
 use crate::{icon, App, Message};
 
-const WINDOW_WIDTH: f32 = 560.0;
-const LIST_HEIGHT: f32 = 320.0;
+pub const FX_WINDOW_WIDTH: f32 = 560.0;
+const NARROWEST_FX_WINDOW: f32 = 440.0;
+const SHORTEST_FX_WINDOW: f32 = 280.0;
+const EDGE: f32 = 16.0;
+const GAP: f32 = 12.0;
+const HEADER: f32 = 30.0;
+const DRY_NOTE: f32 = 28.0;
+const SLOT_HEIGHT: f32 = 32.0;
+const SLOT_GAP: f32 = 4.0;
+const LIST_PADDING: f32 = 8.0;
+const EMPTY_LIST: f32 = 56.0;
+const ADD_BUTTON: f32 = 32.0;
+const CHAINS: f32 = 84.0;
+pub const SLOTS_ID: &str = "fx-window-slots";
+pub const PINNED_ID: &str = "fx-window-pinned";
 const MIX_WIDTH: f32 = 120.0;
 const READING_WIDTH: f32 = 44.0;
 const DOT: f32 = 11.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FxWindow {
+    pub id: window::Id,
+    pub spot: Spot,
+    pub home: window::Id,
+}
 
 impl App {
     pub(crate) fn chain_of(&self, spot: Spot) -> Option<&[Fx]> {
@@ -71,18 +91,20 @@ impl App {
         }
     }
 
-    pub(crate) fn chain_sheet(&self, spot: Spot) -> Element<'_, Message> {
-        let palette = self.palette;
-        let Some(chain) = self.chain_of(spot) else {
-            return text("That is gone.").size(13).into();
-        };
+    fn shown_slots(&self, spot: Spot) -> Vec<(usize, &Fx)> {
         let recording = matches!(spot, Spot::Track(track) if self.rec_shown.contains(&track));
-        let shown: Vec<(usize, &Fx)> = chain
+        self.chain_of(spot)
+            .unwrap_or_default()
             .iter()
             .enumerate()
-            .filter(|(_, fx)| matches!(spot, Spot::Track(_)).then_some(fx.record == recording).unwrap_or(true))
-            .collect();
-        let mut rows = column![].spacing(4);
+            .filter(|(_, fx)| !matches!(spot, Spot::Track(_)) || fx.record == recording)
+            .collect()
+    }
+
+    pub(crate) fn fx_window_view(&self, spot: Spot) -> Element<'_, Message> {
+        let palette = self.palette;
+        let shown = self.shown_slots(spot);
+        let mut rows = column![].spacing(SLOT_GAP);
         for (slot, fx) in &shown {
             rows = rows.push(self.chain_row(spot, *slot, fx));
         }
@@ -93,32 +115,104 @@ impl App {
                     .padding(20),
             );
         }
-        let listed = container(scrollable(rows).height(Length::Fixed(LIST_HEIGHT)).direction(Direction::Vertical(Scrollbar::new())))
-            .padding(8)
-            .width(Length::Fill)
-            .style(move |_| palette.readout());
+        let slots = container(
+            scrollable(rows).width(Length::Fill).height(Length::Fill).direction(Direction::Vertical(Scrollbar::new())),
+        )
+        .id(container::Id::new(SLOTS_ID))
+        .padding(LIST_PADDING)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| palette.readout());
         let add = button(row![icon("plus", 13.0), text("Add a plugin").size(13).font(palette.medium)].spacing(7).align_y(Alignment::Center))
             .padding([7, 14])
             .style(move |_, status| palette.solid(status))
             .on_press(self.add_to(spot));
-        let mut body = column![].spacing(12);
-        if !self.project.all_fx_on {
-            body = body.push(text("Every plugin in the song is off while you listen dry.").size(12).color(palette.danger));
-        }
-        match spot {
+        let chains = self.chain_block(spot).unwrap_or_else(|| Space::new(0, 0).into());
+        let pinned = container(column![row![add, Space::with_width(Length::Fill)].align_y(Alignment::Center), chains].spacing(GAP))
+            .id(container::Id::new(PINNED_ID))
+            .width(Length::Fill);
+        let body = column![self.chain_header(spot), slots, pinned].spacing(GAP);
+        container(body)
+            .padding(EDGE)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| container::Style { background: Some(palette.panel.into()), ..Default::default() })
+            .into()
+    }
+
+    pub(crate) fn closing_window_view(&self) -> Element<'_, Message> {
+        let palette = self.palette;
+        container(Space::new(Length::Fill, Length::Fill))
+            .style(move |_| container::Style { background: Some(palette.panel.into()), ..Default::default() })
+            .into()
+    }
+
+    fn chain_header(&self, spot: Spot) -> Element<'_, Message> {
+        let palette = self.palette;
+        let top: Element<'_, Message> = match spot {
             Spot::Track(track) => {
-                body = body.push(row![self.chain_tabs(track, recording), self.chain_switch(spot)].spacing(6).align_y(Alignment::Center));
+                let recording = self.rec_shown.contains(&track);
+                row![self.chain_tabs(track, recording), self.chain_switch(spot)].spacing(6).align_y(Alignment::Center).into()
             }
-            Spot::Master | Spot::Monitor => {
-                body = body.push(row![Space::with_width(Length::Fill), self.chain_switch(spot)].align_y(Alignment::Center));
-            }
-            Spot::Clip(_) => {}
+            Spot::Master | Spot::Monitor => row![Space::with_width(Length::Fill), self.chain_switch(spot)].align_y(Alignment::Center).into(),
+            Spot::Clip(_) => row![Space::with_width(Length::Fill)].into(),
+        };
+        let dry: Element<'_, Message> = match self.project.all_fx_on {
+            true => Space::new(0, 0).into(),
+            false => container(text("Every plugin in the song is off while you listen dry.").size(12).color(palette.danger))
+                .padding(iced::Padding { top: GAP, ..iced::Padding::ZERO })
+                .into(),
+        };
+        column![top, dry].into()
+    }
+
+    fn fx_window_size(&self, spot: Spot) -> Size {
+        let slots = self.shown_slots(spot).len() as f32;
+        let list = match slots > 0.0 {
+            true => slots * SLOT_HEIGHT + (slots - 1.0) * SLOT_GAP,
+            false => EMPTY_LIST,
+        } + LIST_PADDING * 2.0;
+        let dry = if self.project.all_fx_on { 0.0 } else { DRY_NOTE };
+        let wanted = EDGE * 2.0 + HEADER + dry + GAP + list + GAP + ADD_BUTTON + GAP + CHAINS;
+        Size::new(FX_WINDOW_WIDTH, wanted.clamp(SHORTEST_FX_WINDOW, self.tallest_fx_window()))
+    }
+
+    fn tallest_fx_window(&self) -> f32 {
+        let mixer = self.mixer_window.map_or(0.0, |_| self.mixer_size.height);
+        self.window.height.max(mixer).max(SHORTEST_FX_WINDOW)
+    }
+
+    pub(crate) fn fx_window_at(&self, window: window::Id) -> Option<&FxWindow> {
+        self.fx_windows.iter().find(|fx| fx.id == window)
+    }
+
+    pub(crate) fn open_fx_window(&mut self, spot: Spot) -> Task<Message> {
+        if self.chain_of(spot).is_none() {
+            return Task::none();
         }
-        body = body.push(listed).push(row![add, Space::with_width(Length::Fill)].align_y(Alignment::Center));
-        if let Some(chains) = self.chain_block() {
-            body = body.push(chains);
+        if let Some(open) = self.fx_windows.iter().find(|fx| fx.spot == spot) {
+            return window::gain_focus(open.id);
         }
-        self.window(format!("FX — {}", self.chain_name(spot)), body.into(), WINDOW_WIDTH)
+        let home = self.opens_in_front();
+        let (id, opening) = window::open(window::Settings {
+            size: self.fx_window_size(spot),
+            min_size: Some(Size::new(NARROWEST_FX_WINDOW, SHORTEST_FX_WINDOW)),
+            icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
+            exit_on_close_request: false,
+            ..window::Settings::default()
+        });
+        self.fx_windows.push(FxWindow { id, spot, home });
+        opening.map(Message::WindowFocused)
+    }
+
+    pub(crate) fn settle_fx_windows(&mut self) -> Task<Message> {
+        let lost: Vec<window::Id> = self.fx_windows.iter().filter(|fx| self.chain_of(fx.spot).is_none()).map(|fx| fx.id).collect();
+        self.fx_windows.retain(|fx| !lost.contains(&fx.id));
+        self.fx_windows_closing.extend(lost);
+        if self.fx_windows_closing.contains(&self.focused) {
+            self.focused = self.main_window;
+        }
+        Task::batch(self.fx_windows_closing.drain(..).map(window::close))
     }
 
     fn chain_tabs(&self, track: loupe_engine::TrackId, recording: bool) -> Element<'_, Message> {
@@ -433,5 +527,204 @@ mod tests {
         let _ = app.update(Message::BypassAllFx);
         assert!(!app.chain_is_running(Spot::Monitor), "listening dry left the monitoring chain running");
         assert!(app.chain_is_on(Spot::Monitor), "listening dry moved the monitoring switch underneath");
+    }
+
+    fn vox_with(slots: usize) -> (App, TrackId) {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        for slot in 0..slots {
+            app.project.apply(Command::AddFx { track, fx: plugin(&format!("Plugin {slot}")) }).unwrap();
+        }
+        (app, track)
+    }
+
+    fn window_for(app: &App, spot: Spot) -> window::Id {
+        app.fx_windows.iter().find(|fx| fx.spot == spot).map(|fx| fx.id).expect("no window for that chain")
+    }
+
+    #[test]
+    fn opening_the_same_chain_twice_gives_one_window_and_other_chains_get_their_own() {
+        let (mut app, track) = vox_with(2);
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        let first = window_for(&app, Spot::Track(track));
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        assert_eq!(app.fx_windows.len(), 1, "the same chain opened a second window");
+        assert_eq!(window_for(&app, Spot::Track(track)), first, "the chain moved to a new window");
+        let _ = app.update(Message::OpenChain(Spot::Master));
+        let _ = app.update(Message::OpenChain(Spot::Monitor));
+        let _ = app.update(Message::OpenChain(Spot::Master));
+        assert_eq!(app.fx_windows.len(), 3, "different chains did not get a window each");
+        assert_eq!(app.overlay, crate::Overlay::None, "opening a chain still drew something over the song");
+    }
+
+    #[test]
+    fn the_window_is_titled_after_its_chain() {
+        let (mut app, track) = vox_with(1);
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        let _ = app.update(Message::OpenChain(Spot::Master));
+        assert_eq!(app.title_of(window_for(&app, Spot::Track(track))), "FX — Vox");
+        assert_eq!(app.title_of(window_for(&app, Spot::Master)), "FX — Master");
+    }
+
+    #[test]
+    fn deleting_a_track_closes_its_fx_window_and_leaves_the_others() {
+        let (mut app, track) = vox_with(2);
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        let _ = app.update(Message::OpenChain(Spot::Master));
+        let gone = window_for(&app, Spot::Track(track));
+        let _ = app.update(Message::WindowFocused(gone));
+        let _ = app.update(Message::RemoveTrack(track));
+        assert!(app.fx_window_at(gone).is_none(), "the deleted track kept its FX window");
+        assert!(app.fx_windows_closing.is_empty(), "the window was never asked to close");
+        assert_eq!(app.fx_windows.len(), 1, "the master window went with the track");
+        assert_ne!(app.focused, gone, "the keys stayed with a window that is closing");
+        assert_eq!(app.title_of(window_for(&app, Spot::Master)), "FX — Master");
+    }
+
+    #[test]
+    fn a_new_song_closes_every_fx_window() {
+        let (mut app, track) = vox_with(1);
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        let _ = app.update(Message::OpenChain(Spot::Master));
+        app.replace_project(loupe_engine::Project::new(app.project.rate), std::collections::HashMap::new());
+        let _ = app.update(Message::Tick);
+        assert!(app.fx_windows.is_empty(), "FX windows outlived their song");
+        assert!(app.fx_windows_closing.is_empty(), "the windows were never asked to close");
+    }
+
+    #[test]
+    fn closing_the_window_forgets_it_so_the_chain_opens_again() {
+        let (mut app, track) = vox_with(1);
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        let first = window_for(&app, Spot::Track(track));
+        let _ = app.update(Message::WindowClosed(first));
+        assert!(app.fx_windows.is_empty(), "the closed window was kept");
+        assert!(!app.going, "closing an FX window started to quit Loupe");
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        assert_ne!(window_for(&app, Spot::Track(track)), first, "the chain did not open a fresh window");
+    }
+
+    #[test]
+    fn sheets_opened_from_an_fx_window_land_in_the_window_it_came_from() {
+        let (mut app, track) = vox_with(1);
+        let mixer = window::Id::unique();
+        app.mixer_open = true;
+        app.mixer_window = Some(mixer);
+        app.mixer_size = crate::mixer::MIXER_WINDOW;
+        app.focused = mixer;
+        let _ = app.update(Message::OpenChain(Spot::Track(track)));
+        let fx = window_for(&app, Spot::Track(track));
+        let _ = app.update(Message::WindowFocused(fx));
+        let _ = app.update(Message::OpenPlugins(track));
+        assert_eq!(app.overlay, crate::Overlay::Plugins(track));
+        assert!(app.overlay_is_in(mixer), "the plugin picker did not open in the mixer the chain came from");
+        let _ = app.update(Message::CloseOverlay);
+        let _ = app.update(Message::WindowFocused(app.main_window));
+        let _ = app.update(Message::OpenChain(Spot::Master));
+        let master = window_for(&app, Spot::Master);
+        let _ = app.update(Message::WindowFocused(master));
+        let _ = app.update(Message::OpenMasterPlugins);
+        assert!(app.overlay_is_in(app.main_window), "the master picker did not open in the main window it came from");
+    }
+
+    #[test]
+    fn each_chain_keeps_its_own_name_being_typed() {
+        let (mut app, track) = vox_with(1);
+        let _ = app.update(Message::ChainName(Spot::Track(track), "Vox chain".into()));
+        let _ = app.update(Message::ChainName(Spot::Master, "Bus".into()));
+        assert_eq!(app.chain_names.get(&Spot::Track(track)).map(String::as_str), Some("Vox chain"));
+        assert_eq!(app.chain_names.get(&Spot::Master).map(String::as_str), Some("Bus"));
+    }
+
+    #[derive(Default)]
+    struct Survey {
+        scroll_next: bool,
+        scrolling: usize,
+        found: Vec<(String, iced::Rectangle, bool)>,
+        scrolls: Vec<(iced::Rectangle, iced::Rectangle)>,
+    }
+
+    impl iced::advanced::widget::Operation for Survey {
+        fn container(
+            &mut self,
+            id: Option<&iced::advanced::widget::Id>,
+            bounds: iced::Rectangle,
+            operate_on_children: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<()>),
+        ) {
+            let scroll = std::mem::take(&mut self.scroll_next);
+            for name in [SLOTS_ID, PINNED_ID] {
+                if id == Some(&iced::advanced::widget::Id::new(name)) {
+                    self.found.push((name.to_string(), bounds, self.scrolling > 0));
+                }
+            }
+            self.scrolling += usize::from(scroll);
+            operate_on_children(self);
+            self.scrolling -= usize::from(scroll);
+        }
+
+        fn scrollable(
+            &mut self,
+            _state: &mut dyn iced::advanced::widget::operation::Scrollable,
+            _id: Option<&iced::advanced::widget::Id>,
+            bounds: iced::Rectangle,
+            content_bounds: iced::Rectangle,
+            _translation: iced::Vector,
+        ) {
+            self.scroll_next = true;
+            self.scrolls.push((bounds, content_bounds));
+        }
+    }
+
+    fn survey(app: &App, spot: Spot, size: Size) -> Survey {
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0)));
+        let mut ui = iced_runtime::UserInterface::build(app.fx_window_view(spot), size, iced_runtime::user_interface::Cache::default(), &mut renderer);
+        let mut seen = Survey::default();
+        ui.operate(&renderer, &mut seen);
+        seen
+    }
+
+    fn part<'a>(seen: &'a Survey, name: &str) -> &'a (String, iced::Rectangle, bool) {
+        seen.found.iter().find(|(found, _, _)| found == name).unwrap_or_else(|| panic!("{name} is missing from the window"))
+    }
+
+    #[test]
+    fn a_long_chain_scrolls_while_add_and_chains_stay_pinned_in_view() {
+        let (app, track) = vox_with(40);
+        let size = Size::new(FX_WINDOW_WIDTH, 360.0);
+        let seen = survey(&app, Spot::Track(track), size);
+        let (_, slots, slots_scroll) = part(&seen, SLOTS_ID);
+        let (_, pinned, pinned_scroll) = part(&seen, PINNED_ID);
+        assert!(!slots_scroll, "the slot list sits inside another scroller");
+        assert!(!pinned_scroll, "Add a plugin and Chains are inside the scrolling list");
+        assert!(pinned.y >= slots.y + slots.height, "Add a plugin and Chains are not under the list");
+        assert!(pinned.y + pinned.height <= size.height, "Add a plugin and Chains are cut off at the bottom");
+        assert!(pinned.height > 0.0, "Add a plugin and Chains have no room");
+        let (viewport, content) = seen.scrolls.first().copied().expect("the list does not scroll");
+        assert!(content.height > viewport.height, "forty plugins fit without scrolling, so this proves nothing");
+        assert!(viewport.y + viewport.height <= pinned.y, "the list runs under the pinned part");
+    }
+
+    #[test]
+    fn a_short_chain_opens_tall_enough_to_show_everything_without_scrolling() {
+        for slots in [0, 1, 4, 8] {
+            let (app, track) = vox_with(slots);
+            let size = app.fx_window_size(Spot::Track(track));
+            let seen = survey(&app, Spot::Track(track), size);
+            let (_, pinned, _) = part(&seen, PINNED_ID);
+            let (viewport, content) = seen.scrolls.first().copied().expect("no list");
+            assert!(content.height <= viewport.height + 0.5, "{slots} plugins did not fit: {} of {}", content.height, viewport.height);
+            assert!(pinned.y + pinned.height <= size.height, "with {slots} plugins the bottom was cut off");
+        }
+    }
+
+    #[test]
+    fn a_huge_chain_opens_no_taller_than_the_tallest_loupe_window() {
+        let (app, track) = vox_with(80);
+        let size = app.fx_window_size(Spot::Track(track));
+        assert!(size.height <= app.window.height, "the window opened taller than the screen Loupe is on");
+        assert!(size.height >= SHORTEST_FX_WINDOW);
+        let seen = survey(&app, Spot::Track(track), size);
+        let (_, pinned, _) = part(&seen, PINNED_ID);
+        assert!(pinned.y + pinned.height <= size.height, "the bottom was cut off");
     }
 }

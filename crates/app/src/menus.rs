@@ -43,7 +43,6 @@ impl App {
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::MixerMenu { at } => self.floating(*at, self.mixer_menu()),
-            Overlay::Chain(spot) => self.centred(self.chain_sheet(*spot)),
             Overlay::Exported(folder, note) => self.centred(self.exported_sheet(folder, note.as_deref())),
             Overlay::Rename { at, .. } if *at == Point::ORIGIN => self.centred(self.rename_sheet()),
             Overlay::Rename { at, .. } => self.floating(*at, self.rename_sheet()),

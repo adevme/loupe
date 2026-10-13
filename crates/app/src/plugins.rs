@@ -85,7 +85,7 @@ impl App {
                 .style(move |_| palette.menu())
                 .into()
         };
-        let chains = self.chain_block();
+        let chains = self.picking_for().and_then(|spot| self.chain_block(spot));
         self.window(heading, column![search, body].push_maybe(chains).spacing(10).into(), 460.0)
     }
 }

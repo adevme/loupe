@@ -2367,6 +2367,7 @@ dependencies = [
  "chrono",
  "iced",
  "iced_runtime",
+ "iced_tiny_skia",
  "loupe-engine",
  "loupe-plugins",
  "loupe-stock",
