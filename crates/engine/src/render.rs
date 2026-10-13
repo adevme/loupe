@@ -87,6 +87,10 @@ pub trait Chains: Send {
         let _ = (track, audio);
     }
 
+    fn hear_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+        self.process_with(track, audio, side);
+    }
+
     fn process_monitor(&mut self, audio: &mut [[f32; 2]]) {
         let _ = audio;
     }
@@ -195,6 +199,14 @@ pub trait Chains: Send {
     fn takes_latency(&self, track: TrackId) -> usize {
         let _ = track;
         0
+    }
+
+    fn heard_latency(&self, track: TrackId) -> usize {
+        self.latency(track)
+    }
+
+    fn heard_takes_latency(&self, track: TrackId) -> usize {
+        self.takes_latency(track)
     }
 
     fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
@@ -2358,12 +2370,19 @@ mod routing {
     }
 }
 
+fn heard_lag(track: &Track, racks: &dyn Chains) -> usize {
+    match track.fx.is_empty() {
+        true => 0,
+        false => racks.heard_latency(track.id),
+    }
+}
+
 fn lag_to_master(project: &Project, track: TrackId, racks: &dyn Chains, depth: usize) -> usize {
     if depth > project.tracks.len() {
         return 0;
     }
     let Some(found) = project.tracks.iter().find(|t| t.id == track) else { return 0 };
-    own_lag(found, Some(racks)) + below(project, found, racks, depth)
+    heard_lag(found, racks) + below(project, found, racks, depth)
 }
 
 fn below(project: &Project, track: &Track, racks: &dyn Chains, depth: usize) -> usize {
@@ -2379,7 +2398,7 @@ fn below(project: &Project, track: &Track, racks: &dyn Chains, depth: usize) -> 
 
 pub fn monitor_latency(project: &Project, track: TrackId, racks: &dyn Chains) -> usize {
     let Some(found) = project.tracks.iter().find(|t| t.id == track) else { return 0 };
-    racks.takes_latency(track) + below(project, found, racks, 0) + racks.monitor_chain_latency()
+    racks.heard_takes_latency(track) + below(project, found, racks, 0) + racks.monitor_chain_latency()
 }
 
 fn automated(project: &Project, target: crate::envelope::Target, at: Frames, fallback: f32) -> f32 {

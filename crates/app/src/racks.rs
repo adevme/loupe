@@ -181,7 +181,27 @@ pub struct Racks {
     tracks_in_waves: AtomicU64,
 }
 
+type RunRack = fn(&mut Rack, &mut Vec<[f32; 2]>, &[[f32; 2]]);
+
 impl Racks {
+    fn through_track(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]], run: RunRack) {
+        let Self { chains, scratch, falls, spent_in_plugins, .. } = self;
+        let Some(rack) = chains.get_mut(&track) else { return };
+        if rack.is_empty() {
+            return;
+        }
+        let began = std::time::Instant::now();
+        scratch.clear();
+        scratch.extend_from_slice(audio);
+        run(rack, scratch, side);
+        note_plugin_time(spent_in_plugins, began);
+        if rack.has_fallen() {
+            tell_falls(falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
+        }
+        let shared = scratch.len().min(audio.len());
+        audio[..shared].copy_from_slice(&scratch[..shared]);
+    }
+
     pub fn new(rate: u32, block: usize, peeks: Peeks, off: PluginsOff, falls: Falls) -> Self {
         Self {
             host: host_beside_us(),
@@ -648,6 +668,14 @@ impl Chains for Racks {
         self.chains.get(&track).map(|rack| rack.takes_latency()).unwrap_or(0)
     }
 
+    fn heard_latency(&self, track: TrackId) -> usize {
+        self.chains.get(&track).map(Rack::heard_latency).unwrap_or(0)
+    }
+
+    fn heard_takes_latency(&self, track: TrackId) -> usize {
+        self.chains.get(&track).map(Rack::heard_takes_latency).unwrap_or(0)
+    }
+
     fn process_clip(&mut self, clip: ClipId, audio: &mut [[f32; 2]]) {
         let Self { clips, scratch, falls, spent_in_plugins, .. } = self;
         let Some(rack) = clips.get_mut(&clip) else { return };
@@ -766,21 +794,11 @@ impl Chains for Racks {
     }
 
     fn process_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
-        let Self { chains, scratch, falls, spent_in_plugins, .. } = self;
-        let Some(rack) = chains.get_mut(&track) else { return };
-        if rack.is_empty() {
-            return;
-        }
-        let began = std::time::Instant::now();
-        scratch.clear();
-        scratch.extend_from_slice(audio);
-        rack.process_with(scratch, side);
-        note_plugin_time(spent_in_plugins, began);
-        if rack.has_fallen() {
-            tell_falls(falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
-        }
-        let shared = scratch.len().min(audio.len());
-        audio[..shared].copy_from_slice(&scratch[..shared]);
+        self.through_track(track, audio, side, Rack::process_with);
+    }
+
+    fn hear_with(&mut self, track: TrackId, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
+        self.through_track(track, audio, side, Rack::hear_with);
     }
 
     fn whole_waves_at_once(&self) -> bool {
@@ -817,7 +835,7 @@ impl Chains for Racks {
         let began = std::time::Instant::now();
         scratch.clear();
         scratch.extend_from_slice(audio);
-        rack.process_takes(scratch);
+        rack.hear_takes(scratch);
         note_plugin_time(spent_in_plugins, began);
         if rack.has_fallen() {
             tell_falls(falls, rack.take_fallen(), |slot| Spot::Track(track, slot));
@@ -835,7 +853,7 @@ impl Chains for Racks {
         let began = std::time::Instant::now();
         scratch.clear();
         scratch.extend_from_slice(audio);
-        rack.process(scratch);
+        rack.hear_with(scratch, &[]);
         note_plugin_time(spent_in_plugins, began);
         if rack.has_fallen() {
             tell_falls(falls, rack.take_fallen(), Spot::Monitor);
@@ -859,7 +877,7 @@ impl Chains for Racks {
     }
 
     fn monitor_chain_latency(&self) -> usize {
-        self.monitor.as_ref().map(|rack| rack.latency()).unwrap_or(0)
+        self.monitor.as_ref().map(Rack::heard_latency).unwrap_or(0)
     }
 
     fn process_master(&mut self, audio: &mut [[f32; 2]]) {
@@ -1069,6 +1087,59 @@ mod tests {
         assert_eq!(held[CLICK + lag], [0.8, 0.8], "the mix did not come through dry");
     }
 
+
+    fn a_singer_in_a_folder_with_every_kind_of_chain() -> (Project, TrackId, TrackId) {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(bus)) = project.apply(Command::AddTrack { name: "Vox Bus".into() }) else { panic!() };
+        let Ok(Outcome::Track(vox)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        project.apply(Command::SetTrackParent { track: vox, parent: Some(bus) }).unwrap();
+        let rec = Fx { record: true, ..fx(loupe_plugins::BUILT_IN, LIMITER, &[]) };
+        project.apply(Command::AddFx { track: vox, fx: rec }).unwrap();
+        project.apply(Command::AddFx { track: bus, fx: fx(loupe_plugins::BUILT_IN, LIMITER, &[]) }).unwrap();
+        project.apply(Command::AddMonitorFx(fx(loupe_plugins::BUILT_IN, LIMITER, &[]))).unwrap();
+        (project, vox, bus)
+    }
+
+    fn sung_into(racks: &mut Racks, vox: TrackId, bus: TrackId) -> Vec<[f32; 2]> {
+        let mut song = vec![[0.0f32; 2]; 512 * 16];
+        song[512] = [0.5, 0.5];
+        let mut heard = Vec::new();
+        for block in song.chunks(512) {
+            let mut block = block.to_vec();
+            racks.process_takes(vox, &mut block);
+            racks.hear_with(bus, &mut block, &[]);
+            racks.process_monitor(&mut block);
+            heard.extend_from_slice(&block);
+        }
+        heard
+    }
+
+    #[test]
+    fn listening_dry_puts_no_delay_between_the_singer_and_their_headphones() {
+        let (mut project, vox, bus) = a_singer_in_a_folder_with_every_kind_of_chain();
+        let mut on = racks(false);
+        on.follow(&project);
+        let lag = on.latency(bus);
+        assert!(lag > 0, "the limiter reported no latency, so this proves nothing");
+        assert_eq!(loupe_engine::monitor_latency(&project, vox, &on), 3 * lag, "the Rec, folder and monitoring limiters are all heard");
+        assert_eq!(loud_frames(&sung_into(&mut on, vox, bus)), vec![512 + 3 * lag]);
+        project.apply(Command::BypassAllFx { bypassed: true }).unwrap();
+        let mut off = racks(false);
+        off.follow(&project);
+        assert_eq!(off.latency(bus), lag, "the mix must still hold the place of the folder's chain");
+        let mut held = racks(false);
+        held.follow(&project);
+        let mut song = vec![[0.0f32; 2]; 512 * 16];
+        song[512] = [0.5, 0.5];
+        for block in song.chunks_mut(512) {
+            held.process_with(bus, block, &[]);
+        }
+        assert_eq!(loud_frames(&song), vec![512 + lag], "the mix stopped holding the place of a folder chain that is off");
+        let heard = sung_into(&mut off, vox, bus);
+        assert_eq!(loud_frames(&heard), vec![512], "with every chain off the singer still heard the chains' delay");
+        assert_eq!(heard[512], [0.5, 0.5], "with every chain off the voice still went through a plugin");
+        assert_eq!(loupe_engine::monitor_latency(&project, vox, &off), 0, "the lag shown to the singer counts chains that are off");
+    }
     #[test]
     fn a_master_chain_that_is_off_leaves_the_mix_dry_and_in_time() {
         let mut project = Project::new(48_000);

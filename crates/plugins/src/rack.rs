@@ -616,6 +616,32 @@ impl Rack {
         self.slots.iter().filter(|slot| slot.record && !slot.bypassed && slot.trouble.is_none()).map(|slot| slot.latency).sum()
     }
 
+    pub fn heard_takes_latency(&self) -> usize {
+        match self.off {
+            true => 0,
+            false => self.takes_latency(),
+        }
+    }
+
+    pub fn heard_latency(&self) -> usize {
+        match self.off {
+            true => 0,
+            false => self.latency(),
+        }
+    }
+
+    pub fn hear_takes(&mut self, audio: &mut Vec<[f32; 2]>) {
+        if !self.off {
+            self.run(audio, &[], true, None);
+        }
+    }
+
+    pub fn hear_with(&mut self, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]]) {
+        if !self.off {
+            self.run(audio, side, false, None);
+        }
+    }
+
     pub fn has_takes(&self) -> bool {
         self.slots.iter().any(|slot| slot.record)
     }
@@ -1282,6 +1308,65 @@ mod dozing_tests {
             out.extend_from_slice(&block);
         }
         assert_eq!(first_loud_frame(&out), Some(BLOCK + latency), "the take moved when the chain went off");
+    }
+
+    fn heard_live(rack: &mut Rack, song: &[[f32; 2]], takes: bool) -> Vec<[f32; 2]> {
+        let mut out = Vec::with_capacity(song.len());
+        for mut block in blocks_of(song) {
+            match takes {
+                true => rack.hear_takes(&mut block),
+                false => rack.hear_with(&mut block, &[]),
+            }
+            out.extend_from_slice(&block);
+        }
+        out
+    }
+
+    #[test]
+    fn a_chain_that_is_off_is_heard_live_with_no_delay_at_all() {
+        let song = a_click(BLOCK * 8, BLOCK);
+        let mut on = rack_of(&[LIMITER]);
+        let latency = on.latency();
+        assert!(latency > 0, "the limiter reported no latency, so this proves nothing");
+        assert_eq!(on.heard_latency(), latency);
+        assert_eq!(first_loud_frame(&heard_live(&mut on, &song, false)), Some(BLOCK + latency), "a working limiter is heard after its own delay");
+        let mut off = rack_of(&[LIMITER]);
+        off.bypass_chain(true);
+        assert_eq!(off.heard_latency(), 0, "a chain that is off still claims to delay the singer");
+        let heard = heard_live(&mut off, &song, false);
+        assert_eq!(heard, song, "a chain that is off held the live input back or changed it");
+        assert_eq!(off.latency(), latency, "the mix must still hold the place of a chain that is off");
+    }
+
+    #[test]
+    fn a_rec_chain_that_is_off_is_heard_live_with_no_delay_at_all() {
+        let want = vec![Wanted {
+            mix: 1.0,
+            path: PathBuf::from(crate::BUILT_IN),
+            index: LIMITER,
+            name: loupe_stock::NAMES[LIMITER].into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: true,
+        }];
+        let mut rack = Rack::new(PathBuf::from("no-host-here"), RATE, BLOCK);
+        assert!(rack.reconcile(&want).is_empty());
+        let latency = rack.takes_latency();
+        assert!(latency > 0, "the limiter reported no latency on the Rec chain");
+        rack.bypass_chain(true);
+        assert_eq!(rack.heard_takes_latency(), 0);
+        let song = a_click(BLOCK * 8, BLOCK);
+        assert_eq!(heard_live(&mut rack, &song, true), song, "the singer heard the Rec chain's delay with the chain off");
+    }
+
+    #[test]
+    fn a_bypassed_plugin_adds_nothing_to_what_is_heard_live() {
+        let mut rack = rack_of(&[LIMITER]);
+        assert!(rack.latency() > 0);
+        rack.bypass(0, true);
+        assert_eq!(rack.heard_latency(), 0);
+        let song = a_click(BLOCK * 8, BLOCK);
+        assert_eq!(heard_live(&mut rack, &song, false), song, "a bypassed plugin still held the live input back");
     }
 
     #[test]

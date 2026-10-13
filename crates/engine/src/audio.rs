@@ -33,6 +33,13 @@ pub struct Load {
     pub overloads: u64,
 }
 const MOST_HEARD: usize = 8;
+const EAR_SPARE_SECONDS: f64 = 0.002;
+const EAR_MOST_SPARE_SECONDS: f64 = 0.01;
+const EAR_LOOKS_OVER_SECONDS: f64 = 0.25;
+const EAR_FAR_BEHIND_SECONDS: f64 = 0.02;
+const EAR_NEVER_BEHIND_SECONDS: f64 = 0.05;
+const EAR_MOST_NUDGE: f64 = 0.005;
+const EAR_DRY_AGAIN_SECONDS: f64 = 2.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TapedKey {
@@ -204,6 +211,11 @@ struct Ear {
     on: [Option<TrackId>; MOST_HEARD],
     filling: bool,
     phase: f64,
+    spare: usize,
+    lowest: usize,
+    looked: f64,
+    nudge: f64,
+    since_dry: f64,
     was: [f32; MOST_INPUTS],
     next: [f32; MOST_INPUTS],
     voice: Vec<f32>,
@@ -227,6 +239,11 @@ impl Default for Ear {
             on: [None; MOST_HEARD],
             filling: false,
             phase: 0.0,
+            spare: 0,
+            lowest: usize::MAX,
+            looked: 0.0,
+            nudge: 0.0,
+            since_dry: f64::INFINITY,
             was: [0.0; MOST_INPUTS],
             next: [0.0; MOST_INPUTS],
             voice: Vec::new(),
@@ -240,6 +257,71 @@ impl Default for Ear {
             shape: Vec::new(),
             armed: [None; MOST_HEARD],
         }
+    }
+}
+
+impl Ear {
+    fn frames_in(&self, seconds: f64) -> usize {
+        (self.rate as f64 * seconds).round() as usize
+    }
+
+    fn waiting(&self) -> usize {
+        self.feed.as_ref().map_or(0, |feed| feed.slots() / self.width)
+    }
+
+    fn let_go(&mut self, frames: usize) {
+        let width = self.width;
+        let Some(feed) = self.feed.as_mut() else { return };
+        if let Ok(old) = feed.read_chunk(frames.min(feed.slots() / width) * width) {
+            old.commit_all();
+        }
+    }
+
+    fn start_looking(&mut self) {
+        self.lowest = usize::MAX;
+        self.looked = 0.0;
+    }
+
+    fn ready_for(&mut self, frames: usize, step: f64) -> bool {
+        let wanted = (frames as f64 * step).ceil() as usize;
+        let waiting = self.waiting();
+        let keep = wanted + self.spare;
+        if self.filling {
+            if waiting < wanted {
+                return false;
+            }
+            self.filling = false;
+            self.start_looking();
+        }
+        if waiting > keep + self.frames_in(EAR_NEVER_BEHIND_SECONDS) {
+            self.let_go(waiting - keep);
+            self.start_looking();
+        }
+        true
+    }
+
+    fn ran_dry(&mut self) {
+        self.filling = true;
+        if self.since_dry < self.rate as f64 * EAR_DRY_AGAIN_SECONDS {
+            self.spare = (self.spare + self.frames_in(EAR_SPARE_SECONDS / 2.0)).min(self.frames_in(EAR_MOST_SPARE_SECONDS));
+        }
+        self.since_dry = 0.0;
+    }
+
+    fn keep_close(&mut self, read: f64) {
+        self.since_dry += read;
+        self.lowest = self.lowest.min(self.waiting());
+        self.looked += read;
+        if self.looked < self.rate as f64 * EAR_LOOKS_OVER_SECONDS {
+            return;
+        }
+        let over = self.lowest as f64 - self.spare as f64;
+        if over > self.frames_in(EAR_FAR_BEHIND_SECONDS) as f64 {
+            self.let_go(over as usize);
+        } else {
+            self.nudge = (over / self.looked).clamp(-EAR_MOST_NUDGE, EAR_MOST_NUDGE);
+        }
+        self.start_looking();
     }
 }
 
@@ -428,6 +510,9 @@ impl Rt {
                     self.ear.rate = rate;
                     self.ear.width = width;
                     self.ear.filling = true;
+                    self.ear.spare = self.ear.frames_in(EAR_SPARE_SECONDS);
+                    self.ear.nudge = 0.0;
+                    self.ear.since_dry = f64::INFINITY;
                 }
                 Msg::HearOn(on) => self.ear.on = on,
                 Msg::HearThroughChain(on) => self.hear_through_chain = on,
@@ -666,28 +751,22 @@ impl Rt {
     fn hear_input(&mut self, frames: usize) {
         self.note_monitor_lag();
         let ear = &mut self.ear;
-        let Some(feed) = ear.feed.as_mut() else { return };
-        let width = ear.width;
+        if ear.feed.is_none() {
+            return;
+        }
         let step = ear.rate as f64 / self.project.rate.max(1) as f64;
-        let wanted = (frames as f64 * step).ceil() as usize + 2;
-        let waiting = feed.slots() / width;
         if ear.on.iter().all(Option::is_none) {
-            if let Ok(old) = feed.read_chunk(waiting * width) {
-                old.commit_all();
-            }
+            ear.let_go(ear.waiting());
             ear.filling = true;
             return;
         }
-        if ear.filling {
-            if waiting < wanted {
-                return;
-            }
-            ear.filling = false;
-        } else if waiting > wanted * 2 {
-            if let Ok(old) = feed.read_chunk((waiting - wanted) * width) {
-                old.commit_all();
-            }
+        if !ear.ready_for(frames, step) {
+            return;
         }
+        let width = ear.width;
+        let pace = step * (1.0 + ear.nudge);
+        let Some(feed) = ear.feed.as_mut() else { return };
+        let mut ran_dry = false;
         for at in 0..frames {
             while ear.phase >= 1.0 {
                 ear.was = ear.next;
@@ -701,7 +780,7 @@ impl Rt {
                     }
                     Err(_) => {
                         ear.next[..width].fill(0.0);
-                        ear.filling = true;
+                        ran_dry = true;
                     }
                 }
                 ear.phase -= 1.0;
@@ -710,7 +789,11 @@ impl Rt {
             for ((sample, was), next) in voice.iter_mut().zip(&ear.was).zip(&ear.next) {
                 *sample = was + (next - was) * ear.phase as f32;
             }
-            ear.phase += step;
+            ear.phase += pace;
+        }
+        match ran_dry {
+            true => ear.ran_dry(),
+            false => ear.keep_close(frames as f64 * pace),
         }
         if self.ear.out.len() < frames {
             self.ear.out.resize(frames, [0.0; 2]);
@@ -803,7 +886,7 @@ impl Rt {
                 } else if !track.fx.is_empty() {
                     if let Some(racks) = self.chains.as_deref_mut() {
                         let Ear { mix, sides, .. } = ear;
-                        racks.process_with(track.id, &mut mix[index][..frames], &sides[index][..frames]);
+                        racks.hear_with(track.id, &mut mix[index][..frames], &sides[index][..frames]);
                     }
                 }
                 if track.sends.iter().any(|send| send.pre_fader) {
@@ -1610,6 +1693,9 @@ mod tests {
             mic.push(0.8).unwrap();
         }
         rt.process(256);
+        for _ in 0..256 {
+            mic.push(0.8).unwrap();
+        }
         let heard = rt.process(256).to_vec();
         let (left, _) = pan_gains(0.0);
         for frame in heard {
@@ -1723,6 +1809,9 @@ mod tests {
             mic.push(0.8).unwrap();
         }
         rt.process(256);
+        for _ in 0..256 {
+            mic.push(0.8).unwrap();
+        }
         let heard = rt.process(256).to_vec();
         let (left, _) = pan_gains(0.0);
         for frame in heard {
@@ -1756,6 +1845,9 @@ mod tests {
             mic.push(0.8).unwrap();
         }
         rt.process(256);
+        for _ in 0..256 {
+            mic.push(0.8).unwrap();
+        }
         let heard = rt.process(256).to_vec();
         let (left, _) = pan_gains(0.0);
         for frame in heard {
@@ -2388,5 +2480,255 @@ mod tests {
         }
         assert!(back.is_some(), "the racks never came back");
         assert!(counted.load(Ordering::Relaxed) < 198_648 / 2, "the pre-roll ran on after the app asked for the racks");
+    }
+}
+
+#[cfg(test)]
+mod monitor_delay_tests {
+    use super::*;
+    use crate::model::{Command, Outcome};
+
+    const RATE: u32 = 48_000;
+    const RING: usize = 1 << 14;
+
+    struct Wire {
+        packet: usize,
+        block: usize,
+        input_runs_fast_by: f64,
+        late_every: usize,
+        backlog: usize,
+    }
+
+    struct Heard {
+        delays: Vec<(f64, f64)>,
+        skips: usize,
+        repeats: usize,
+    }
+
+    impl Heard {
+        fn worst_after(&self, settled: f64) -> f64 {
+            self.delays.iter().filter(|(at, _)| *at >= settled).map(|(_, delay)| *delay).fold(0.0, f64::max)
+        }
+
+        fn last(&self) -> f64 {
+            self.delays.last().map(|(_, delay)| *delay).unwrap_or(f64::INFINITY)
+        }
+    }
+
+    fn singing(rt: &mut Rt, remote: &mut Remote, folder: Option<Folder>) -> (TrackId, Producer<f32>) {
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        project.apply(Command::SetTrackPan { track: vocal, pan: 0.0 }).unwrap();
+        let chains: Option<Box<dyn Chains>> = match folder {
+            Some(folder) => {
+                let Ok(Outcome::Track(bus)) = project.apply(Command::AddTrack { name: "Vox Bus".into() }) else { panic!() };
+                project.apply(Command::SetTrackPan { track: bus, pan: 0.0 }).unwrap();
+                project.apply(Command::SetTrackParent { track: vocal, parent: Some(bus) }).unwrap();
+                let fx = crate::model::Fx { mix: 1.0, path: "late.vst3".into(), index: 0, name: "late".into(), bypassed: false, state: Vec::new(), record: false };
+                project.apply(Command::AddFx { track: bus, fx }).unwrap();
+                Some(Box::new(folder))
+            }
+            None => None,
+        };
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(chains)).ok().unwrap();
+        let (mic, feed) = RingBuffer::new(RING);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE, 1)))).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        rt.process(16);
+        (vocal, mic)
+    }
+
+    fn sing_over(wire: &Wire, seconds: f64) -> Heard {
+        sing_through(wire, seconds, None).0
+    }
+
+    fn sing_through(wire: &Wire, seconds: f64, folder: Option<Folder>) -> (Heard, Frames) {
+        let (mut rt, mut remote) = pair(RATE);
+        let (_, mut mic) = singing(&mut rt, &mut remote, folder);
+        let input_rate = RATE as f64 * (1.0 + wire.input_runs_fast_by);
+        let mut sung: u64 = 0;
+        let sing = |mic: &mut Producer<f32>, frames: usize, sung: &mut u64| {
+            for _ in 0..frames {
+                if mic.slots() > 0 {
+                    let _ = mic.push((*sung + 1) as f32);
+                }
+                *sung += 1;
+            }
+        };
+        sing(&mut mic, wire.backlog, &mut sung);
+        let began = wire.backlog as f64 / input_rate;
+        let mut next_in = began + wire.packet as f64 / input_rate;
+        let mut next_out = began + wire.block as f64 / RATE as f64;
+        let mut calls = 0usize;
+        let mut owed = 0usize;
+        let mut last_heard: Option<u64> = None;
+        let mut was_heard = false;
+        let mut heard = Heard { delays: Vec::new(), skips: 0, repeats: 0 };
+        while next_out < seconds {
+            if next_in <= next_out {
+                sing(&mut mic, wire.packet, &mut sung);
+                next_in += wire.packet as f64 / input_rate;
+                continue;
+            }
+            calls += 1;
+            owed += wire.block;
+            let now = next_out;
+            next_out += wire.block as f64 / RATE as f64;
+            if wire.late_every > 0 && calls.is_multiple_of(wire.late_every) {
+                continue;
+            }
+            let frames = std::mem::take(&mut owed);
+            let out = rt.process(frames).to_vec();
+            let played_from = now - (frames - wire.block) as f64 / RATE as f64;
+            for (at, frame) in out.iter().enumerate() {
+                let index = frame[0].round() as u64;
+                let clean = std::mem::replace(&mut was_heard, index > 0);
+                if index == 0 || !clean {
+                    continue;
+                }
+                let index = index - 1;
+                if at == 0 || heard.delays.last().is_none_or(|(when, _)| *when < played_from) {
+                    let captured = index as f64 / input_rate;
+                    let plays = played_from + at as f64 / RATE as f64;
+                    heard.delays.push((plays, (plays - captured) * 1000.0));
+                }
+                match last_heard {
+                    Some(was) if index > was + 2 => heard.skips += 1,
+                    Some(was) if index < was => heard.repeats += 1,
+                    _ => {}
+                }
+                last_heard = Some(index);
+            }
+        }
+        let lag = remote.shared.monitor_lag.load(Ordering::Relaxed);
+        (heard, lag)
+    }
+
+    fn report(name: &str, wire: &Wire, heard: &Heard) {
+        eprintln!(
+            "{name}: packet {} block {} drift {:+.0} ppm late every {} backlog {}: worst after 1 s {:.1} ms, last {:.1} ms, skips {}, repeats {}",
+            wire.packet,
+            wire.block,
+            wire.input_runs_fast_by * 1e6,
+            wire.late_every,
+            wire.backlog,
+            heard.worst_after(1.0),
+            heard.last(),
+            heard.skips,
+            heard.repeats
+        );
+    }
+
+    fn ms(frames: usize) -> f64 {
+        frames as f64 * 1000.0 / RATE as f64
+    }
+
+    #[test]
+    fn an_input_that_runs_fast_never_piles_up_behind_the_output() {
+        let wire = Wire { packet: 480, block: 480, input_runs_fast_by: 300e-6, late_every: 0, backlog: 0 };
+        let heard = sing_over(&wire, 180.0);
+        report("fast input", &wire, &heard);
+        assert_eq!(heard.skips + heard.repeats, 0, "drift was corrected by jumping instead of by pace");
+        let bound = ms(wire.packet + wire.block) + 5.0;
+        assert!(heard.worst_after(1.0) <= bound, "the monitor fell {:.1} ms behind, more than {bound:.1} ms", heard.worst_after(1.0));
+        assert!(heard.last() <= bound, "after three minutes the monitor was {:.1} ms behind", heard.last());
+    }
+
+    #[test]
+    fn an_input_that_runs_slow_stays_close_behind_the_output() {
+        let wire = Wire { packet: 480, block: 480, input_runs_fast_by: -300e-6, late_every: 0, backlog: 0 };
+        let heard = sing_over(&wire, 180.0);
+        report("slow input", &wire, &heard);
+        let wraps = (180.0 * 300e-6 * RATE as f64 / wire.packet as f64).ceil() as usize;
+        assert!(heard.skips <= wraps, "{} gaps in three minutes, the clocks only slipped a packet {wraps} times", heard.skips);
+        let bound = ms(wire.packet + wire.block) + 5.0;
+        assert!(heard.worst_after(1.0) <= bound, "the monitor fell {:.1} ms behind, more than {bound:.1} ms", heard.worst_after(1.0));
+    }
+
+    #[test]
+    fn late_output_callbacks_do_not_leave_the_monitor_behind() {
+        let wire = Wire { packet: 480, block: 480, input_runs_fast_by: 100e-6, late_every: 37, backlog: 0 };
+        let heard = sing_over(&wire, 60.0);
+        report("late callbacks", &wire, &heard);
+        let bound = ms(wire.packet + 2 * wire.block) + 5.0;
+        assert!(heard.worst_after(1.0) <= bound, "the monitor fell {:.1} ms behind, more than {bound:.1} ms", heard.worst_after(1.0));
+        assert!(heard.last() <= ms(wire.packet + wire.block) + 5.0, "the monitor never caught up: {:.1} ms", heard.last());
+    }
+
+    #[test]
+    fn input_that_waited_before_monitoring_began_is_never_heard() {
+        let wire = Wire { packet: 480, block: 480, input_runs_fast_by: 0.0, late_every: 0, backlog: RING - 1 };
+        let heard = sing_over(&wire, 5.0);
+        report("backlog", &wire, &heard);
+        let first = heard.delays.first().map(|(_, delay)| *delay).unwrap_or(f64::INFINITY);
+        assert!(first <= ms(wire.packet + wire.block) + 5.0, "the first thing heard was {first:.1} ms old");
+    }
+
+    #[test]
+    fn small_output_blocks_under_big_input_packets_play_every_sample() {
+        let wire = Wire { packet: 480, block: 128, input_runs_fast_by: 50e-6, late_every: 0, backlog: 0 };
+        let heard = sing_over(&wire, 30.0);
+        report("small blocks", &wire, &heard);
+        assert!(heard.worst_after(1.0) <= ms(wire.packet + wire.block) + 5.0, "the monitor fell {:.1} ms behind", heard.worst_after(1.0));
+        assert_eq!(heard.skips + heard.repeats, 0, "{} jumps in thirty seconds of singing", heard.skips + heard.repeats);
+    }
+
+    struct Folder {
+        off: bool,
+        latency: usize,
+        line: std::collections::VecDeque<[f32; 2]>,
+    }
+
+    impl Folder {
+        fn of(latency: usize, off: bool) -> Self {
+            Self { off, latency, line: std::iter::repeat_n([0.0; 2], latency).collect() }
+        }
+
+        fn delay(&mut self, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                self.line.push_back(*frame);
+                *frame = self.line.pop_front().unwrap_or([0.0; 2]);
+            }
+        }
+    }
+
+    impl Chains for Folder {
+        fn process_with(&mut self, _: TrackId, audio: &mut [[f32; 2]], _: &[[f32; 2]]) {
+            self.delay(audio);
+        }
+
+        fn hear_with(&mut self, _: TrackId, audio: &mut [[f32; 2]], _: &[[f32; 2]]) {
+            if !self.off {
+                self.delay(audio);
+            }
+        }
+
+        fn latency(&self, _: TrackId) -> usize {
+            self.latency
+        }
+
+        fn heard_latency(&self, _: TrackId) -> usize {
+            match self.off {
+                true => 0,
+                false => self.latency,
+            }
+        }
+    }
+
+    #[test]
+    fn a_folder_chain_that_is_off_adds_nothing_to_the_monitor() {
+        const LATE: usize = 4_800;
+        let wire = Wire { packet: 480, block: 480, input_runs_fast_by: 0.0, late_every: 0, backlog: 0 };
+        let straight = sing_over(&wire, 10.0).last();
+        let (off, lag_off) = sing_through(&wire, 10.0, Some(Folder::of(LATE, true)));
+        report("folder chain off", &wire, &off);
+        assert!((off.last() - straight).abs() < 0.1, "a folder chain that is off held the singer back {:.1} ms against {straight:.1} ms", off.last());
+        assert!(off.worst_after(1.0) <= ms(wire.packet + wire.block) + 5.0);
+        assert_eq!(lag_off, 0, "the lag shown counts a chain that is off");
+        let (on, lag_on) = sing_through(&wire, 10.0, Some(Folder::of(LATE, false)));
+        report("folder chain on", &wire, &on);
+        assert!((on.last() - straight - ms(LATE)).abs() < 0.1, "a working folder chain should add exactly its own {:.1} ms, got {:.1}", ms(LATE), on.last() - straight);
+        assert_eq!(lag_on, LATE as Frames);
     }
 }
