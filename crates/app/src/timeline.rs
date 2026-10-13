@@ -71,7 +71,6 @@ const GAIN_FIGURE_INSET: f32 = 6.0;
 const GAIN_FIGURE_LIFT: f32 = 7.0;
 const GAIN_PLATE_HEIGHT: f32 = 14.0;
 pub const MIN_GAIN_DB: f32 = -24.0;
-const TAKE_LANE_HEIGHT: f32 = 40.0;
 const TAKE_LANE_INSET: f32 = 3.0;
 const BADGE_LETTER: f32 = 6.2;
 const BADGE_PAD: f32 = 6.0;
@@ -230,6 +229,7 @@ enum Hit<'a> {
     Clip(&'a Clip),
     Take(&'a Clip, usize),
     Folder(&'a Track),
+    TakeHeader(&'a Track, usize),
     Envelope(loupe_engine::Target, Option<usize>, Frames, f32),
     Lane,
     Nothing,
@@ -335,7 +335,11 @@ impl Timeline<'_> {
     }
 
     fn takes_height(&self, track: &Track) -> f32 {
-        self.take_lanes(track) as f32 * TAKE_LANE_HEIGHT
+        self.take_lanes(track) as f32 * self.take_tall(track)
+    }
+
+    fn take_tall(&self, track: &Track) -> f32 {
+        self.clips_height(track)
     }
 
     fn header_height(&self, track: &Track) -> f32 {
@@ -772,13 +776,57 @@ impl Timeline<'_> {
     }
 
     fn take_lane_top(&self, index: usize, take: usize) -> f32 {
-        self.track_top(index) + self.clips_height(&self.project.tracks[index]) + take as f32 * TAKE_LANE_HEIGHT
+        let track = &self.project.tracks[index];
+        self.track_top(index) + self.clips_height(track) + take as f32 * self.take_tall(track)
+    }
+
+    fn take_row_at(&self, index: usize, y: f32) -> Option<usize> {
+        let track = &self.project.tracks[index];
+        let lanes = self.take_lanes(track);
+        let row = (y - self.take_lane_top(index, 0)) / self.take_tall(track);
+        (lanes > 0 && row >= 0.0 && row < lanes as f32).then_some(row as usize)
+    }
+
+    fn draw_take_headers(&self, frame: &mut Frame, size: Size) {
+        let p = self.palette;
+        for (i, track) in self.project.tracks.iter().enumerate() {
+            let lanes = self.take_lanes(track);
+            if lanes == 0 {
+                continue;
+            }
+            let tall = self.take_tall(track);
+            let colour = self.colour_of(i);
+            let indent = self.project.depth_of(track.id).min(4) as f32 * INDENT_W + COLOUR_EDGE + 10.0;
+            for take in 0..lanes {
+                let top = self.take_lane_top(i, take) - self.lanes_top();
+                if top > size.height || top + tall < 0.0 {
+                    continue;
+                }
+                let used = track.clips.iter().any(|clip| clip.takes.len() > take && clip.take == take);
+                let row = Point::new(indent, top);
+                let row_size = Size::new((size.width - indent).max(0.0), tall - 1.0);
+                frame.fill_rectangle(row, row_size, theme::mix(p.panel, colour, if used { 0.32 } else { 0.16 }));
+                frame.fill_rectangle(Point::new(indent, top + tall - 1.0), Size::new(row_size.width, 1.0), p.line);
+                frame.fill_rectangle(Point::new(indent, top), Size::new(3.0, tall - 1.0), if used { colour } else { theme::alpha(colour, 0.35) });
+                let middle = top + (tall / 2.0).min(20.0);
+                frame.fill(&Path::circle(Point::new(indent + 16.0, middle), 4.5), if used { p.accent } else { theme::alpha(p.text_dim, 0.4) });
+                frame.fill_text(Text {
+                    content: format!("Take {}", take + 1),
+                    position: Point::new(indent + 28.0, middle),
+                    color: if used { p.text } else { p.text_dim },
+                    size: p.track_title_size.into(),
+                    font: p.medium,
+                    vertical_alignment: alignment::Vertical::Center,
+                    ..Text::default()
+                });
+            }
+        }
     }
 
     fn take_lane_at(&self, index: usize, p: Point) -> Option<Hit<'_>> {
         let track = &self.project.tracks[index];
         let lanes = self.take_lanes(track);
-        let row = (p.y - self.take_lane_top(index, 0)) / TAKE_LANE_HEIGHT;
+        let row = (p.y - self.take_lane_top(index, 0)) / self.take_tall(track);
         if lanes == 0 || row < 0.0 || row >= lanes as f32 {
             return None;
         }
@@ -852,6 +900,9 @@ impl Timeline<'_> {
         if self.in_header(p.x) {
             if let Some(i) = self.track_at(p.y) {
                 let track = &self.project.tracks[i];
+                if let Some(take) = self.take_row_at(i, p.y) {
+                    return Hit::TakeHeader(track, take);
+                }
                 if self.mute_button(i).contains(p) {
                     return Hit::Mute(track);
                 }
@@ -1046,7 +1097,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let Some(index) = self.project.tracks.iter().position(|t| t.clips.iter().any(|c| c.id == clip.id)) else {
                             return (Captured, None);
                         };
-                        let band = (self.take_lane_top(index, take), TAKE_LANE_HEIGHT);
+                        let band = (self.take_lane_top(index, take), self.take_tall(&self.project.tracks[index]));
                         let at = self.snap(self.frames_at(p.x), free);
                         state.drag = Some(Drag::Comp { clip: clip.id, track: self.project.tracks[index].id, take, from: at, to: at, band });
                         Some(Message::Refresh)
@@ -1120,6 +1171,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     (_, Hit::Remove(track)) => Some(Message::RemoveTrack(track.id)),
                     (_, Hit::Collapse(track)) => Some(Message::ToggleCollapsed(track.id)),
                     (_, Hit::Folder(track)) => Some(Message::ToggleTakes(track.id)),
+                    (_, Hit::TakeHeader(track, take)) => Some(Message::UseTakeOnTrack(track.id, take)),
                     (_, Hit::Take(..)) => None,
                     (_, Hit::AddTrack) => Some(Message::AddTrack),
                     (_, Hit::Grip(clip, grip)) => {
@@ -1434,7 +1486,10 @@ impl canvas::Program<Message> for Timeline<'_> {
             frame.with_clip(ruler, |frame| self.draw_ruler(frame, ruler.size()));
             let headers =
                 Rectangle::new(Point::new(self.header_left(), self.lanes_top()), Size::new(p.header_width, lanes.height));
-            frame.with_clip(headers, |frame| self.draw_headers(frame, headers.size()));
+            frame.with_clip(headers, |frame| {
+                self.draw_headers(frame, headers.size());
+                self.draw_take_headers(frame, headers.size());
+            });
 
             frame.fill_rectangle(Point::new(self.header_left(), 0.0), Size::new(p.header_width, self.lanes_top()), p.panel);
             for (i, tool) in Tool::ALL.into_iter().enumerate() {
@@ -2018,15 +2073,16 @@ impl Timeline<'_> {
 
     fn draw_take_lanes(&self, frame: &mut Frame, size: Size, track: &Track, lanes_top: f32, track_colour: Color) {
         let p = self.palette;
+        let tall = self.take_tall(track);
         for take in 0..self.take_lanes(track) {
-            let top = lanes_top + take as f32 * TAKE_LANE_HEIGHT;
-            if top > size.height || top + TAKE_LANE_HEIGHT < 0.0 {
+            let top = lanes_top + take as f32 * tall;
+            if top > size.height || top + tall < 0.0 {
                 continue;
             }
-            frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, TAKE_LANE_HEIGHT), theme::mix(p.background, p.panel, 0.5));
-            frame.fill_rectangle(Point::new(0.0, top + TAKE_LANE_HEIGHT - 1.0), Size::new(size.width, 1.0), p.line);
+            frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, tall), theme::mix(p.background, p.panel, 0.5));
+            frame.fill_rectangle(Point::new(0.0, top + tall - 1.0), Size::new(size.width, 1.0), p.line);
             let box_top = top + TAKE_LANE_INSET;
-            let box_height = TAKE_LANE_HEIGHT - TAKE_LANE_INSET * 2.0;
+            let box_height = tall - TAKE_LANE_INSET * 2.0;
             for clip in track.clips.iter().filter(|clip| clip.takes.len() > take && !clip.is_notes()) {
                 let left = self.x_of(clip.start as f64) - self.lanes_left();
                 let right = self.x_of(clip.end() as f64) - self.lanes_left();
@@ -2046,14 +2102,6 @@ impl Timeline<'_> {
                     self.draw_waveform(frame, clip, offset, left, from_x, to_x, box_top + 1.0, box_height - 2.0, tone);
                 }
             }
-            frame.fill_text(Text {
-                content: format!("Take {}", take + 1),
-                position: Point::new(6.0, top + 4.0),
-                color: p.text_dim,
-                size: 10.5.into(),
-                font: p.medium,
-                ..Text::default()
-            });
         }
     }
 
@@ -2856,7 +2904,8 @@ impl crate::App {
                 .filter(|shape| shape.lane_open && (shape.target.on_track() == Some(track.id) || shape.target.on_clip().is_some_and(|clip| track.clips.iter().any(|kept| kept.id == clip))))
                 .map(|shape| shape.lane_height.unwrap_or(LANE_HEIGHT))
                 .sum::<f32>();
-            let tall = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height) + open_take_lanes(track) as f32 * TAKE_LANE_HEIGHT + lanes;
+            let main = self.heights.get(&track.id).copied().unwrap_or(self.palette.track_height);
+            let tall = main + open_take_lanes(track) as f32 * main + lanes;
             if at.y >= y && at.y < y + tall {
                 let seconds = (at.x - left) as f64 / self.view.zoom + self.view.scroll;
                 let start = (seconds * self.project.rate as f64).max(0.0) as Frames;
@@ -3097,17 +3146,19 @@ mod take_folders {
     fn an_open_folder_gives_every_take_a_readable_lane_under_the_comp() {
         let (mut app, vox, drums) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
-        let below = TOP + TALL + PASSES as f32 * TAKE_LANE_HEIGHT + TALL / 2.0;
+        let below = TOP + TALL + PASSES as f32 * TALL + TALL / 2.0;
         let timeline = timeline_of(&app);
         let track = app.project.track(vox).unwrap();
-        assert_eq!(timeline.height_of(track), TALL + PASSES as f32 * TAKE_LANE_HEIGHT);
+        assert_eq!(timeline.height_of(track), TALL + PASSES as f32 * TALL);
         for take in [0, 6, PASSES - 1] {
-            let y = TOP + TALL + take as f32 * TAKE_LANE_HEIGHT + TAKE_LANE_HEIGHT / 2.0;
+            let y = TOP + TALL + take as f32 * TALL + TALL / 2.0;
             assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, y)), Hit::Take(_, found) if found == take), "lane {take} did not answer as take {take}");
         }
         assert_eq!(timeline.track_at(below), Some(1));
         assert_eq!(app.dropped_onto(Point::new(LEFT + 10.0, TOP + TALL + 10.0)).map(|(track, _)| track), Some(vox), "a drop on the take lanes went to another track");
-        assert_eq!(app.dropped_onto(Point::new(LEFT + 10.0, below)).map(|(track, _)| track), Some(drums));
+        let scrolled = below - CANVAS.height / 2.0;
+        app.view.scroll_y = scrolled;
+        assert_eq!(app.dropped_onto(Point::new(LEFT + 10.0, below - scrolled)).map(|(track, _)| track), Some(drums), "a drop under the last take lane missed the next track");
     }
 
     #[test]
@@ -3117,7 +3168,7 @@ mod take_folders {
         app.tool = Tool::Pencil;
         let timeline = timeline_of(&app);
         let mut state = Interaction::default();
-        let y = TOP + TALL + 3.0 * TAKE_LANE_HEIGHT + TAKE_LANE_HEIGHT / 2.0;
+        let y = TOP + TALL + 3.0 * TALL + TALL / 2.0;
         let cursor = |x: f32| mouse::Cursor::Available(Point::new(CANVAS.x + x, CANVAS.y + y));
         let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
         let moved = canvas::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(LEFT + 150.0, y) });
