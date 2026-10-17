@@ -230,6 +230,7 @@ enum Hit<'a> {
     Take(&'a Clip, usize),
     Folder(&'a Track),
     TakeHeader(&'a Track, usize),
+    RemoveTake(&'a Track, usize),
     Envelope(loupe_engine::Target, Option<usize>, Frames, f32),
     Lane,
     Nothing,
@@ -612,6 +613,11 @@ impl Timeline<'_> {
         Rectangle::new(Point::new(depth * INDENT_W, self.track_top(index) + 8.0), Size::new(22.0, 24.0))
     }
 
+    /// The cross on a take's own row, in the same place as a track's.
+    fn take_remove_button(&self, index: usize, take: usize) -> Rectangle {
+        Rectangle::new(Point::new(self.header_right() - 34.0, self.take_lane_top(index, take) + 8.0), Size::new(24.0, 24.0))
+    }
+
     fn remove_button(&self, index: usize) -> Rectangle {
         Rectangle::new(Point::new(self.header_right() - 34.0, self.track_top(index) + 8.0), Size::new(24.0, 24.0))
     }
@@ -799,7 +805,11 @@ impl Timeline<'_> {
             }
             let tall = self.take_tall(track);
             let colour = self.colour_of(i);
-            let indent = self.project.depth_of(track.id).min(4) as f32 * INDENT_W + COLOUR_EDGE + 10.0;
+            // A take row reads as a track nested under its own: full width from the
+            // colour edge, its name stepped in one level.
+            let depth = self.project.depth_of(track.id).min(4) as f32;
+            let indent = COLOUR_EDGE;
+            let name_left = indent + (depth + 1.0) * INDENT_W + 6.0;
             for take in 0..lanes {
                 let top = self.take_lane_top(i, take) - self.lanes_top();
                 if top > size.height || top + tall < 0.0 {
@@ -812,10 +822,22 @@ impl Timeline<'_> {
                 frame.fill_rectangle(Point::new(indent, top + tall - 1.0), Size::new(row_size.width, 1.0), p.line);
                 frame.fill_rectangle(Point::new(indent, top), Size::new(3.0, tall - 1.0), if used { colour } else { theme::alpha(colour, 0.35) });
                 let middle = top + (tall / 2.0).min(20.0);
-                frame.fill(&Path::circle(Point::new(indent + 16.0, middle), 4.5), if used { p.accent } else { theme::alpha(p.text_dim, 0.4) });
+                frame.fill(&Path::circle(Point::new(name_left, middle), 4.5), if used { p.accent } else { theme::alpha(p.text_dim, 0.4) });
+                let remove = self.take_remove_button(i, take);
+                frame.fill_text(Text {
+                    content: icons::glyph("x").to_string(),
+                    position: Point::new(remove.center_x() - self.header_left(), remove.center_y() - self.lanes_top()),
+                    color: p.text_dim,
+                    size: 14.0.into(),
+                    font: icons::font("x"),
+                    horizontal_alignment: alignment::Horizontal::Center,
+                    vertical_alignment: alignment::Vertical::Center,
+                    shaping: iced::widget::text::Shaping::Advanced,
+                    ..Text::default()
+                });
                 frame.fill_text(Text {
                     content: format!("Take {}", take + 1),
-                    position: Point::new(indent + 28.0, middle),
+                    position: Point::new(name_left + 12.0, middle),
                     color: if used { p.text } else { p.text_dim },
                     size: p.track_title_size.into(),
                     font: p.medium,
@@ -904,6 +926,9 @@ impl Timeline<'_> {
             if let Some(i) = self.track_at(p.y) {
                 let track = &self.project.tracks[i];
                 if let Some(take) = self.take_row_at(i, p.y) {
+                    if self.take_remove_button(i, take).contains(p) {
+                        return Hit::RemoveTake(track, take);
+                    }
                     return Hit::TakeHeader(track, take);
                 }
                 if self.mute_button(i).contains(p) {
@@ -1175,6 +1200,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     (_, Hit::Collapse(track)) => Some(Message::ToggleCollapsed(track.id)),
                     (_, Hit::Folder(track)) => Some(Message::ToggleTakes(track.id)),
                     (_, Hit::TakeHeader(track, take)) => Some(Message::UseTakeOnTrack(track.id, take)),
+                    (_, Hit::RemoveTake(track, take)) => Some(Message::DeleteTake(track.id, take)),
                     (_, Hit::Take(..)) => None,
                     (_, Hit::AddTrack) => Some(Message::AddTrack),
                     (_, Hit::Grip(clip, grip)) => {
@@ -3101,6 +3127,25 @@ mod take_folders {
         let offsets = (0..PASSES).map(|at| at as i64 * pass as i64).collect();
         app.project.apply(Command::SetTakes { clip, offsets, active: 0 }).unwrap();
         (app, vox, drums)
+    }
+
+    #[test]
+    fn deleting_a_take_drops_it_from_the_folder_and_undo_brings_it_back() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::UseTakeOnTrack(vox, 4));
+        let clip = |app: &App| app.project.track(vox).unwrap().clips[0].clone();
+        let heard = clip(&app).offset;
+        let _ = app.update(crate::Message::DeleteTake(vox, 2));
+        assert_eq!(clip(&app).takes.len(), PASSES - 1, "the take was not removed");
+        assert_eq!(clip(&app).take, 3, "the playing take lost its place after an earlier one went");
+        assert_eq!(clip(&app).offset, heard, "the clip now plays different audio");
+        let _ = app.update(crate::Message::DeleteTake(vox, 3));
+        assert_eq!(clip(&app).takes.len(), PASSES - 2);
+        assert_eq!(clip(&app).take, 2, "deleting the playing take should fall back to the one before");
+        let _ = app.update(crate::Message::Undo);
+        let _ = app.update(crate::Message::Undo);
+        assert_eq!(clip(&app).takes.len(), PASSES);
+        assert_eq!(clip(&app).take, 4);
     }
 
     fn timeline_of(app: &App) -> Timeline<'_> {

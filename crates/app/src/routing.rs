@@ -176,90 +176,10 @@ impl App {
     }
 }
 
-const CELL: f32 = 30.0;
-const NAME_COL: f32 = 130.0;
+
 const SEND_NAME: f32 = 150.0;
 const SEND_LEVEL: f32 = 56.0;
 
-impl App {
-    pub(crate) fn matrix_sheet(&self) -> Element<'_, Message> {
-        let palette = self.palette;
-        if self.project.tracks.is_empty() {
-            return container(text("Add a track first.").size(13).color(palette.text_dim))
-                .padding(16)
-                .style(move |_| palette.sheet())
-                .into();
-        }
-        let short = |name: &str| name.chars().take(10).collect::<String>();
-        let mut head = row![container(text("Sends down, into across").size(11).color(palette.text_faint)).width(NAME_COL)]
-            .spacing(2)
-            .align_y(Alignment::Center);
-        for target in &self.project.tracks {
-            head = head.push(
-                container(text(short(&target.name)).size(10).color(palette.text_dim))
-                    .width(CELL)
-                    .center_x(CELL)
-                    .clip(true),
-            );
-        }
-        let mut grid = column![head].spacing(2);
-        for source in &self.project.tracks {
-            let from = source.id;
-            let depth = self.project.depth_of(from).min(4) as f32;
-            let mut line = row![container(
-                row![
-                    iced::widget::Space::new(depth * 10.0, 0),
-                    text(short(&source.name)).size(12).color(palette.text),
-                ]
-                .align_y(Alignment::Center)
-            )
-            .width(NAME_COL)
-            .clip(true)]
-            .spacing(2)
-            .align_y(Alignment::Center);
-            for target in &self.project.tracks {
-                let to = target.id;
-                let sending = source.sends.iter().any(|send| send.to == to);
-                let blocked = from == to || self.project.descends_from(to, from);
-                let label = if from == to {
-                    "·"
-                } else if sending {
-                    "●"
-                } else {
-                    ""
-                };
-                let press = if blocked {
-                    None
-                } else if sending {
-                    Some(Message::RemoveSend { from, to })
-                } else {
-                    Some(Message::AddSend { from, to })
-                };
-                line = line.push(
-                    button(container(text(label).size(13).color(palette.accent)).center_x(Length::Fill))
-                        .width(CELL)
-                        .height(CELL)
-                        .padding(0)
-                        .style(move |_, status| palette.outlined(status))
-                        .on_press_maybe(press),
-                );
-            }
-            grid = grid.push(line);
-        }
-        container(
-            column![
-                text("Routing matrix").size(14).font(palette.semibold),
-                text("A dot is a send. Click a square to make or break one.").size(12).color(palette.text_dim),
-                rule(palette),
-                scrollable(grid).height(Length::Shrink),
-            ]
-            .spacing(12),
-        )
-        .padding(16)
-        .style(move |_| palette.sheet())
-        .into()
-    }
-}
 
 #[cfg(test)]
 mod tests {

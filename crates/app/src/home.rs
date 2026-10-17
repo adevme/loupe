@@ -6,10 +6,10 @@ use iced::{Alignment, Element, Length};
 use crate::{icon_button, rule, App, Message};
 
 const START_WIDTH: f32 = 290.0;
-const PAGE_WIDTH: f32 = 860.0;
+pub(crate) const PAGE_WIDTH: f32 = 860.0;
 const LOGO_HEIGHT: f32 = 56.0;
 const PAGE_TOP: f32 = 26.0;
-const PAGE_SIDE: f32 = 32.0;
+pub(crate) const PAGE_SIDE: f32 = 32.0;
 
 impl App {
     pub(crate) fn home(&self) -> Element<'_, Message> {
@@ -81,12 +81,12 @@ impl App {
         ]
         .spacing(40);
 
-        let mut page = column![title, rule(palette), lists].spacing(20);
-        if let Some(status) = self.status() {
-            page = page.push(status);
-        }
-        let bar = container(row![self.file_button(), self.view_button(), self.help_button()].spacing(8).align_y(Alignment::Center))
-            .padding([0, 16])
+        let page = column![title, rule(palette), lists].spacing(20);
+        // The menus line up with the page under them rather than the window edge.
+        let menus = row![self.file_button(), self.view_button(), self.help_button()].spacing(8).align_y(Alignment::Center);
+        let bar = container(container(menus).width(Length::Fill).max_width(PAGE_WIDTH))
+            .center_x(Length::Fill)
+            .padding([0.0, PAGE_SIDE])
             .height(palette.top_bar_height)
             .align_y(Alignment::Center)
             .width(Length::Fill)
@@ -100,7 +100,12 @@ impl App {
         if let Some(banner) = self.audio_banner() {
             whole = whole.push(banner).push(rule(palette));
         }
-        whole.push(page).into()
+        whole = whole.push(page);
+        // Status sits flush along the bottom, as it does with a song open.
+        if let Some(status) = self.status() {
+            whole = whole.push(status);
+        }
+        whole.into()
     }
 }
 

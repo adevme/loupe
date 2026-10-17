@@ -197,7 +197,7 @@ pub const NEUTRAL: Palette = Palette {
         BarItem::History,
         BarItem::Mixer,
         BarItem::Settings,
-        BarItem::Import,
+        BarItem::End,
         BarItem::End,
         BarItem::End,
         BarItem::End,

@@ -18,6 +18,8 @@ const HELP_MENU_LEFT: f32 = 208.0;
 const HOME_VIEW_MENU_LEFT: f32 = 76.0;
 const HOME_HELP_MENU_LEFT: f32 = 136.0;
 const MENU_OVERLAPS_BAR: f32 = 8.0;
+/// Left padding the menu positions were measured with on the start screen.
+const HOME_BAR_PAD: f32 = 16.0;
 pub const ENTRY_ID: &str = "overlay-entry";
 
 impl App {
@@ -59,7 +61,6 @@ impl App {
             Overlay::RenameFx(..) => self.centred(self.rename_fx_sheet()),
             Overlay::Automation(target) => self.centred(self.automation_sheet(*target)),
             Overlay::Stock => self.centred(self.stock_sheet()),
-            Overlay::Matrix => self.centred(self.matrix_sheet()),
             Overlay::Recover => self.recover_layer(),
             Overlay::CrashReport => self.crash_report_layer(),
             Overlay::PluginFell => self.fallen_layer(),
@@ -76,7 +77,15 @@ impl App {
     }
 
     fn under_the_bar(&self, left: f32) -> Point {
-        Point::new(left, self.palette.top_bar_height - MENU_OVERLAPS_BAR)
+        // On the start screen the menus sit over the centred page, not at the edge.
+        let shift = match self.screen {
+            Screen::Home => {
+                let width = self.room_for_the_overlay().width;
+                ((width - crate::home::PAGE_WIDTH) / 2.0).max(crate::home::PAGE_SIDE) - HOME_BAR_PAD
+            }
+            _ => 0.0,
+        };
+        Point::new(left + shift, self.palette.top_bar_height - MENU_OVERLAPS_BAR)
     }
 
     fn view_menu_left(&self) -> f32 {
@@ -92,13 +101,8 @@ impl App {
         if self.screen != Screen::Home {
             let mixer = if self.mixer_open { "Mixer ✓" } else { "Mixer" };
             items.push(self.item(mixer, "F6", Some(Message::ToggleMixer)));
-            if !self.project.tracks.is_empty() {
-                items.push(self.item("Routing matrix", "F7", Some(Message::OpenMatrix)));
-            }
             let audio = if self.pool_open { "All audio ✓" } else { "All audio" };
             items.push(self.item(audio, "", Some(Message::TogglePool)));
-            let dry = if self.project.all_fx_on { "Hear it dry, no plugins" } else { "Hear it dry, no plugins ✓" };
-            items.push(self.item(dry, "Ctrl+B", Some(Message::BypassAllFx)));
             let out_of_sight = self.project.tracks.iter().filter(|track| track.hidden).count();
             if out_of_sight > 0 {
                 let how_many = match out_of_sight {
@@ -195,6 +199,7 @@ impl App {
         items.push(self.item("Save", "Ctrl+S", Some(Message::Save)));
         items.push(self.item("Save as…", "Ctrl+Shift+S", Some(Message::SaveAs)));
         items.push(self.item("Save as template…", "", Some(Message::SaveAsTemplate)));
+        items.push(self.item("Import audio…", "Ctrl+I", Some(Message::Import)));
         if has_song {
             items.push(self.item("Export…", "Ctrl+E", Some(Message::OpenExport)));
         }

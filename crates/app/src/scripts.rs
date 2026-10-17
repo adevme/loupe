@@ -110,12 +110,14 @@ impl App {
     }
 
     pub(crate) fn scripts_menu(&self) -> Element<'_, Message> {
-        let mut items: Vec<Element<'_, Message>> = self
+        // Says what the entries are: picking one runs it on the song straight away.
+        let mut items: Vec<Element<'_, Message>> = vec![self.item("Picking a script runs it now. Ctrl+Z undoes it.", "", None)];
+        items.extend(self
             .scripts
             .iter()
             .map(|script| self.item(&script.name, script.shortcut.as_deref().unwrap_or(""), Some(Message::RunScript(script.path.clone()))))
-            .collect();
-        if items.is_empty() {
+            .collect::<Vec<_>>());
+        if items.len() == 1 {
             items.push(self.item("No scripts yet", "", None));
         }
         items.push(crate::rule(self.palette));
@@ -203,9 +205,10 @@ impl App {
             self.cache.clear();
         }
         let printed = wishes.printed.iter().rev().take(MOST_PRINTED).rev().cloned().collect::<Vec<_>>().join("  ·  ");
-        self.notice = Some(match printed.is_empty() {
-            true => format!("{name} finished in {} ms.", ran.took.as_millis()),
-            false => printed,
+        self.notice = Some(match (printed.is_empty(), ran.changed) {
+            (true, true) => format!("Ran the script \"{name}\": it changed your song. Ctrl+Z undoes it."),
+            (true, false) => format!("Ran the script \"{name}\": nothing in the song changed."),
+            (false, _) => printed,
         });
         let playing = match wishes.play {
             Some(play) if play != self.playing => self.handle(Message::TogglePlay),

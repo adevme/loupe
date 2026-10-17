@@ -283,7 +283,6 @@ pub enum Message {
     FxDrop,
     StockTurned(loupe_stock_ui::Change),
     StockTold(loupe_stock_ui::EqMessage),
-    OpenMatrix,
     AddSend { from: TrackId, to: TrackId },
     RemoveSend { from: TrackId, to: TrackId },
     SendGain { from: TrackId, to: TrackId, gain: f32 },
@@ -315,6 +314,7 @@ pub enum Message {
     UseInput(TrackId, InputChannels),
     UseTake(ClipId, usize),
     UseTakeOnTrack(TrackId, usize),
+    DeleteTake(TrackId, usize),
     Comp { track: TrackId, take: usize, from: Frames, to: Frames },
     ToggleTakes(TrackId),
     DeleteUnusedTakes(TrackId),
@@ -508,7 +508,6 @@ pub enum Overlay {
     MasterPlugins,
     MonitorPlugins,
     Stock,
-    Matrix,
     Recover,
     CrashReport,
     PluginFell,
@@ -1557,6 +1556,41 @@ impl App {
                     self.edit(None, Command::UseTake { clip, take });
                 }
             }
+            Message::DeleteTake(track, take) => {
+                // Every clip on the track drops that take. A clip playing it moves to
+                // the take before (or the next one); a clip left with one take becomes
+                // an ordinary clip. One undo step.
+                let changes: Vec<(ClipId, Vec<i64>, usize)> = self
+                    .project
+                    .track(track)
+                    .map(|found| {
+                        found
+                            .clips
+                            .iter()
+                            .filter(|clip| clip.takes.len() > take)
+                            .map(|clip| {
+                                let mut offsets: Vec<i64> = clip.takes.iter().map(|shift| clip.offset as i64 + shift).collect();
+                                offsets.remove(take);
+                                let active = match clip.take {
+                                    t if t == take => take.saturating_sub(1).min(offsets.len().saturating_sub(1)),
+                                    t if t > take => t - 1,
+                                    t => t,
+                                };
+                                (clip.id, offsets, active)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !changes.is_empty() {
+                    self.transact(None, |project| {
+                        for (clip, offsets, active) in changes {
+                            project.apply(Command::SetTakes { clip, offsets, active })?;
+                        }
+                        Ok(Outcome::Done)
+                    });
+                    self.notice = Some(format!("Deleted take {}. Ctrl+Z brings it back.", take + 1));
+                }
+            }
             Message::UseTakeOnTrack(track, take) => {
                 let clips: Vec<ClipId> = self
                     .project
@@ -2430,7 +2464,6 @@ impl App {
             Message::BypassAllFx => {
                 self.edit(None, Command::BypassAllFx { bypassed: self.project.all_fx_on });
             }
-            Message::OpenMatrix => self.overlay = Overlay::Matrix,
             Message::AddSend { from, to } => {
                 self.edit(None, Command::AddSend { from, to });
             }
@@ -3997,7 +4030,6 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::NudgeTracks { down: false }),
         keyboard::Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::NudgeTracks { down: true }),
         keyboard::Key::Named(Named::F6) => Some(Message::ToggleMixer),
-        keyboard::Key::Named(Named::F7) => Some(Message::OpenMatrix),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
@@ -4392,12 +4424,12 @@ mod overlay_window_tests {
     #[test]
     fn a_keyboard_shortcut_opens_in_the_window_that_has_the_keys() {
         let (mut app, main, mixer) = torn_off();
-        let _ = app.update(Message::OpenMatrix);
-        assert!(app.overlay_is_in(mixer), "the matrix did not open in the focused mixer window");
+        let _ = app.update(Message::OpenSettings);
+        assert!(app.overlay_is_in(mixer), "settings did not open in the focused mixer window");
         let _ = app.update(Message::CloseOverlay);
         let _ = app.update(Message::WindowFocused(main));
-        let _ = app.update(Message::OpenMatrix);
-        assert!(app.overlay_is_in(main), "the matrix did not open in the focused main window");
+        let _ = app.update(Message::OpenSettings);
+        assert!(app.overlay_is_in(main), "settings did not open in the focused main window");
     }
 
     #[test]
