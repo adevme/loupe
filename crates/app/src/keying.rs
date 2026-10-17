@@ -92,7 +92,6 @@ impl App {
         self.stock_at(window).is_some_and(|open| matches!(open.editor.face, crate::stockwin::Face::Key(_)))
     }
 
-    /// The open Loupe Key, preferring the one in front, so a file read in the background still lands.
     fn key_editor(&mut self) -> Option<&mut KeyEditor> {
         let focused = self.focused;
         let at = self.stocks.iter().position(|open| open.id == focused && matches!(open.editor.face, crate::stockwin::Face::Key(_)))

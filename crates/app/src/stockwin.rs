@@ -178,7 +178,6 @@ impl Window {
     }
 }
 
-/// A stock plugin's editor in its own window, like a third-party plugin gets.
 pub struct Open {
     pub id: window::Id,
     pub editor: Window,
@@ -192,7 +191,6 @@ impl App {
         self.stocks.iter().find(|open| open.id == window)
     }
 
-    /// The editor in the window that has focus, which is the one being used.
     pub(crate) fn stock_mut(&mut self) -> Option<&mut Window> {
         let focused = self.focused;
         self.stocks.iter_mut().find(|open| open.id == focused).map(|open| &mut open.editor)
@@ -202,8 +200,6 @@ impl App {
         self.stock_at(self.focused).map(|open| &open.editor)
     }
 
-    /// Opens a window for each editor asked for, brings an already open one to the front,
-    /// and closes the windows whose plugin is gone.
     pub(crate) fn settle_stock_windows(&mut self) -> Task<Message> {
         let mut tasks = Vec::new();
         for editor in std::mem::take(&mut self.stocks_waiting) {
