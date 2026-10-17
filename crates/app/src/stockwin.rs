@@ -1,4 +1,5 @@
-use iced::Element;
+use iced::widget::container;
+use iced::{window, Element, Length, Size, Task};
 
 use loupe_engine::TrackId;
 use loupe_stock_ui::{
@@ -177,12 +178,120 @@ impl Window {
     }
 }
 
+/// A stock plugin's editor in its own window, like a third-party plugin gets.
+pub struct Open {
+    pub id: window::Id,
+    pub editor: Window,
+}
+
+const STOCK_WINDOW: Size = Size::new(1060.0, 560.0);
+const SMALLEST_STOCK_WINDOW: Size = Size::new(720.0, 420.0);
+
 impl App {
-    pub(crate) fn stock_sheet(&self) -> Element<'_, Message> {
-        let Some(window) = &self.stock else {
-            return iced::widget::text("No plugin is open.").size(13).into();
+    pub(crate) fn stock_at(&self, window: window::Id) -> Option<&Open> {
+        self.stocks.iter().find(|open| open.id == window)
+    }
+
+    /// The editor in the window that has focus, which is the one being used.
+    pub(crate) fn stock_mut(&mut self) -> Option<&mut Window> {
+        let focused = self.focused;
+        self.stocks.iter_mut().find(|open| open.id == focused).map(|open| &mut open.editor)
+    }
+
+    pub(crate) fn stock_ref(&self) -> Option<&Window> {
+        self.stock_at(self.focused).map(|open| &open.editor)
+    }
+
+    /// Opens a window for each editor asked for, brings an already open one to the front,
+    /// and closes the windows whose plugin is gone.
+    pub(crate) fn settle_stock_windows(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
+        for editor in std::mem::take(&mut self.stocks_waiting) {
+            if let Some(open) = self.stocks.iter_mut().find(|open| open.editor.spot == editor.spot && open.editor.slot == editor.slot) {
+                open.editor = editor;
+                tasks.push(window::gain_focus(open.id));
+                continue;
+            }
+            let (id, opening) = window::open(window::Settings {
+                size: STOCK_WINDOW,
+                min_size: Some(SMALLEST_STOCK_WINDOW),
+                icon: window::icon::from_file_data(include_bytes!("../assets/icon.png"), None).ok(),
+                exit_on_close_request: false,
+                ..window::Settings::default()
+            });
+            self.stocks.push(Open { id, editor });
+            tasks.push(opening.map(Message::WindowFocused));
+        }
+        let gone: Vec<window::Id> = self.stocks.iter().filter(|open| !self.still_there(&open.editor)).map(|open| open.id).collect();
+        if !gone.is_empty() {
+            self.stocks.retain(|open| !gone.contains(&open.id));
+            if gone.contains(&self.focused) {
+                self.focused = self.main_window;
+            }
+            tasks.extend(gone.into_iter().map(window::close));
+        }
+        Task::batch(tasks)
+    }
+
+    fn still_there(&self, editor: &Window) -> bool {
+        let fx = match editor.spot {
+            Spot::Track(track) => self.project.track(track).and_then(|found| found.fx.get(editor.slot)),
+            Spot::Clip(clip) => self.project.clip(clip).and_then(|found| found.fx.get(editor.slot)),
+            Spot::Master => self.project.master_fx.get(editor.slot),
+            Spot::Monitor => self.project.monitor_fx.get(editor.slot),
         };
-        let body = iced::widget::container(window.view()).height(iced::Length::Fixed(470.0));
-        self.window(window.name.clone(), body.into(), 1060.0)
+        fx.is_some_and(|fx| loupe_plugins::rack::is_built_in(&fx.path) && fx.name == editor.name)
+    }
+
+    pub(crate) fn stock_window_view<'a>(&'a self, open: &'a Open) -> Element<'a, Message> {
+        let palette = self.palette;
+        let id = open.id;
+        container(open.editor.view().map(move |message| Message::FromStock(id, Box::new(message))))
+            .padding(20)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| container::Style { background: Some(palette.panel.into()), ..Default::default() })
+            .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use loupe_engine::{Command, Fx, Outcome};
+
+    use super::*;
+    use crate::Overlay;
+
+    fn eq_on_vox() -> (App, TrackId) {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        let fx = Fx { mix: 1.0, path: PathBuf::from(loupe_plugins::BUILT_IN), index: 0, name: "Loupe EQ".into(), bypassed: false, state: Vec::new(), record: false };
+        app.project.apply(Command::AddFx { track, fx }).unwrap();
+        (app, track)
+    }
+
+    #[test]
+    fn a_stock_plugin_opens_in_its_own_window_not_over_the_song() {
+        let (mut app, track) = eq_on_vox();
+        let _ = app.update(Message::ShowPlugin(track, 0));
+        assert_eq!(app.stocks.len(), 1, "the EQ did not get a window");
+        assert_eq!(app.overlay, Overlay::None, "the EQ covered the song");
+        let id = app.stocks[0].id;
+        assert_eq!(app.title_of(id), "Loupe EQ");
+        let _ = app.update(Message::ShowPlugin(track, 0));
+        assert_eq!(app.stocks.len(), 1, "opening it again made a second window");
+        let _ = app.update(Message::WindowClosed(id));
+        assert!(app.stocks.is_empty(), "closing the window kept the editor");
+        assert!(!app.going, "closing the EQ started to quit Loupe");
+    }
+
+    #[test]
+    fn removing_the_plugin_closes_its_window() {
+        let (mut app, track) = eq_on_vox();
+        let _ = app.update(Message::ShowPlugin(track, 0));
+        let _ = app.update(Message::RemovePlugin(track, 0));
+        assert!(app.stocks.is_empty(), "the window outlived its plugin");
     }
 }

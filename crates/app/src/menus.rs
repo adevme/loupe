@@ -60,7 +60,6 @@ impl App {
             Overlay::Knobs(spot, slot) => self.centred(self.knob_sheet(*spot, *slot)),
             Overlay::RenameFx(..) => self.centred(self.rename_fx_sheet()),
             Overlay::Automation(target) => self.centred(self.automation_sheet(*target)),
-            Overlay::Stock => self.centred(self.stock_sheet()),
             Overlay::Recover => self.recover_layer(),
             Overlay::CrashReport => self.crash_report_layer(),
             Overlay::PluginFell => self.fallen_layer(),
