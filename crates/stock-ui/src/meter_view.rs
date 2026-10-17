@@ -1,20 +1,19 @@
 use std::sync::Arc;
 
-use iced::widget::canvas::{self, Geometry, Path, Stroke};
-use iced::widget::{button, column, container, row, text, Space};
-use iced::{mouse, Alignment, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+use iced::widget::canvas::{self, Geometry, Stroke};
+use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use loupe_stock::{Meter, Moment, Readings, SILENT_LUFS};
 
-use crate::kit::{dial, graph_frame, knob_row, panel, put_text};
+use crate::compressor_view::{GAP, INSET};
+use crate::kit::*;
 use crate::knobs::{change, Change, Knobs};
-use crate::look::{fade, Look};
+use crate::look::{fade, Look, MEDIUM};
 
 const SHOWN_MOMENTS: usize = 600;
 const LOWEST_LUFS: f32 = -40.0;
 const HIGHEST_LUFS: f32 = 0.0;
-const READOUT_WIDTH: f32 = 210.0;
-const GAP: f32 = 14.0;
-const MARKS: [f32; 5] = [-36.0, -24.0, -14.0, -9.0, -6.0];
+const READOUT_WIDTH: f32 = 200.0;
+const MARKS: [f32; 6] = [-36.0, -30.0, -24.0, -18.0, -12.0, -6.0];
 
 #[derive(Default)]
 struct Shown {
@@ -35,6 +34,7 @@ pub struct MeterEditor {
 
 impl MeterEditor {
     pub fn new(readings: Option<Arc<Readings>>, look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::METER);
         let silent = Shown { momentary: SILENT_LUFS, short_term: SILENT_LUFS, integrated: SILENT_LUFS, range: 0.0, peak: SILENT_LUFS };
         Self { knobs: Knobs::of(&Meter::new()), readings, moments: vec![Moment::default(); SHOWN_MOMENTS], shown: silent, look }
     }
@@ -66,27 +66,14 @@ impl MeterEditor {
         let look = self.look;
         let values = &self.knobs.values;
         let params = self.knobs.params;
-        let target = knob_row(vec![dial(look, params, values, 0, look.accent, change)]);
         let pressed = values[1];
-        let reset = button(text("Reset").size(12.5))
-            .padding([6, 14])
-            .style(move |_, status| {
-                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(if hovered { look.raised } else { look.panel }.into()),
-                    text_color: look.text,
-                    border: iced::Border::default().rounded(6).color(look.grid_strong).width(1.0),
-                    ..Default::default()
-                }
-            })
-            .on_press(Change(1, if pressed > 0.5 { 0.0 } else { 1.0 }));
-        let controls = row![target, Space::with_width(Length::Fill), reset].align_y(Alignment::Center);
-        let graph = canvas::Canvas::new(Loudness { editor: self }).width(Length::Fill).height(Length::Fill);
-        let backdrop = container(container(graph).padding([12, 12])).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            background: Some(look.background.into()),
-            ..Default::default()
-        });
-        column![backdrop, panel(look, controls)].into()
+        shell(look, "Meter", "Loudness meter", move || canvas::Canvas::new(Loudness { editor: self }).width(Length::Fill).height(Length::Fill).into(), move |compact| {
+            let p = Panel::new(look, compact, params, values, change);
+            vec![vec![
+                section(look, "Goal", vec![p.hero(0)]),
+                section(look, "Measurement", vec![push(look, "Reset", Some(Change(1, if pressed > 0.5 { 0.0 } else { 1.0 })))]),
+            ]]
+        })
     }
 }
 
@@ -117,63 +104,77 @@ impl canvas::Program<Change> for Loudness<'_> {
             return Vec::new();
         }
         let mut frame = graph_frame(renderer, size, &look);
-        let graph_w = (size.width - READOUT_WIDTH - GAP).max(1.0);
-        let y_of = |lufs: f32| size.height - (lufs.clamp(LOWEST_LUFS, HIGHEST_LUFS) - LOWEST_LUFS) / (HIGHEST_LUFS - LOWEST_LUFS) * size.height;
-        for mark in MARKS {
-            let y = y_of(mark).round();
-            frame.fill_rectangle(Point::new(0.0, y), Size::new(graph_w, 1.0), look.grid);
-            put_text(&mut frame, &format!("{mark:.0}"), Point::new(graph_w - 4.0, y - 3.0), 11.0, look.text_dim, (1.0, 1.0));
-        }
+        let label_room = 30.0;
+        let graph_w = (size.width - READOUT_WIDTH - GAP - INSET * 2.0 - label_room).max(1.0);
+        let top = INSET + 6.0;
+        let bottom = size.height - INSET - 6.0;
+        let y_of = |lufs: f32| bottom - (lufs.clamp(LOWEST_LUFS, HIGHEST_LUFS) - LOWEST_LUFS) / (HIGHEST_LUFS - LOWEST_LUFS) * (bottom - top);
         let target = editor.knobs.values[0];
-        let target_y = y_of(target).round();
-        frame.fill_rectangle(Point::new(0.0, target_y), Size::new(graph_w, 2.0), fade(look.accent, 0.8));
-        put_text(&mut frame, &format!("Target {target:.0} LUFS"), Point::new(6.0, target_y - 4.0), 11.0, look.accent, (0.0, 1.0));
-        let step = graph_w / editor.moments.len().max(1) as f32;
-        for (i, moment) in editor.moments.iter().enumerate() {
-            if unwritten(moment) || moment.input <= SILENT_LUFS + 0.5 {
-                continue;
+        frame.with_save(|frame| {
+            frame.translate(Vector::new(INSET, 0.0));
+            for mark in MARKS {
+                let y = y_of(mark);
+                guide(frame, Point::new(0.0, y), graph_w, look.grid);
+                axis_text(frame, &format!("{mark:.0}"), Point::new(graph_w + label_room - 2.0, y), &look, (1.0, 0.5));
             }
-            let top = y_of(moment.input);
-            frame.fill_rectangle(Point::new(i as f32 * step, top), Size::new(step.ceil(), size.height - top), fade(look.spectrum, 0.35));
-        }
-        let line = Path::new(|b| {
-            let mut started = false;
+            let target_y = y_of(target);
+            frame.fill_rectangle(Point::new(0.0, target_y - 6.0), Size::new(graph_w, 12.0), fade(look.accent, 0.02));
+            dashed(frame, Point::new(0.0, target_y), graph_w, fade(look.accent, 0.85));
+            put_text_in(frame, &format!("TARGET  {target:.0} LUFS"), Point::new(8.0, target_y - 9.0), 9.5, look.accent, (0.0, 1.0), MEDIUM);
+            let step = graph_w / (editor.moments.len().max(2) - 1) as f32;
+            let mut run: Vec<Point> = Vec::new();
+            let mut runs: Vec<Vec<Point>> = Vec::new();
             for (i, moment) in editor.moments.iter().enumerate() {
-                if unwritten(moment) || moment.output <= SILENT_LUFS + 0.5 {
-                    started = false;
+                if unwritten(moment) || moment.input <= SILENT_LUFS + 0.5 {
+                    if !run.is_empty() {
+                        runs.push(std::mem::take(&mut run));
+                    }
                     continue;
                 }
-                let point = Point::new(i as f32 * step, y_of(moment.output));
-                if started {
-                    b.line_to(point);
-                } else {
-                    b.move_to(point);
-                    started = true;
+                run.push(Point::new(i as f32 * step, y_of(moment.input)));
+            }
+            if !run.is_empty() {
+                runs.push(run);
+            }
+            for run in &runs {
+                fill_under(frame, run, bottom, fade(look.accent, 0.32), fade(look.accent, 0.02));
+            }
+            let mut line: Vec<Point> = Vec::new();
+            let mut lines: Vec<Vec<Point>> = Vec::new();
+            for (i, moment) in editor.moments.iter().enumerate() {
+                if unwritten(moment) || moment.output <= SILENT_LUFS + 0.5 {
+                    if !line.is_empty() {
+                        lines.push(std::mem::take(&mut line));
+                    }
+                    continue;
                 }
+                line.push(Point::new(i as f32 * step, y_of(moment.output)));
+            }
+            if !line.is_empty() {
+                lines.push(line);
+            }
+            for line in &lines {
+                let path = polyline(line);
+                frame.stroke(&path, Stroke::default().with_color(fade(look.text, 0.12)).with_width(5.0));
+                frame.stroke(&path, Stroke::default().with_color(look.text).with_width(1.8));
             }
         });
-        frame.stroke(&line, Stroke::default().with_color(look.text).with_width(2.0));
-
-        let left = graph_w + GAP;
-        frame.fill_rectangle(Point::new(left, 0.0), Size::new(READOUT_WIDTH, size.height), look.panel);
-        let middle = left + READOUT_WIDTH / 2.0;
-        let shown = &editor.shown;
-        let near_target = (shown.integrated - target).abs() <= 1.0;
-        put_text(&mut frame, "Integrated", Point::new(middle, 14.0), 11.5, look.text_dim, (0.5, 0.0));
-        put_text(&mut frame, &lufs_text(shown.integrated), Point::new(middle, 30.0), 34.0, if near_target { look.accent } else { look.text }, (0.5, 0.0));
-        put_text(&mut frame, "LUFS", Point::new(middle, 72.0), 11.5, look.text_dim, (0.5, 0.0));
-        let rows = [
-            ("Short term", lufs_text(shown.short_term), "LUFS"),
-            ("Momentary", lufs_text(shown.momentary), "LUFS"),
-            ("Range", format!("{:.1}", shown.range), "LU"),
-            ("True peak", lufs_text(shown.peak), "dBTP"),
-        ];
-        for (n, (label, value, unit)) in rows.iter().enumerate() {
-            let y = 104.0 + n as f32 * 44.0;
-            put_text(&mut frame, label, Point::new(left + 14.0, y), 11.5, look.text_dim, (0.0, 0.0));
-            let colour = if *label == "True peak" && shown.peak > -1.0 { look.danger } else { look.text };
-            put_text(&mut frame, &format!("{value} {unit}"), Point::new(left + READOUT_WIDTH - 14.0, y + 14.0), 17.0, colour, (1.0, 0.0));
-        }
+        frame.with_save(|frame| {
+            frame.translate(Vector::new(size.width - READOUT_WIDTH - INSET, INSET));
+            let shown = &editor.shown;
+            let near_target = (shown.integrated - target).abs() <= 1.0;
+            let main = Reading::new("Integrated", lufs_text(shown.integrated), "LUFS", if near_target { look.accent } else { look.text });
+            let peak_colour = if shown.peak > -1.0 { look.danger } else { look.text };
+            let rest = [
+                Reading::new("Short term", lufs_text(shown.short_term), "LUFS", look.text),
+                Reading::new("Momentary", lufs_text(shown.momentary), "LUFS", look.text),
+                Reading::new("Range", format!("{:.1}", shown.range), "LU", look.text),
+                Reading::new("True peak", lufs_text(shown.peak), "dBTP", peak_colour),
+            ];
+            let share = (shown.short_term - LOWEST_LUFS) / (HIGHEST_LUFS - LOWEST_LUFS);
+            draw_readouts(frame, Size::new(READOUT_WIDTH, size.height - INSET * 2.0), &look, &main, Some((share, look.accent)), &rest);
+        });
+        seal(&mut frame, size, &look);
         vec![frame.into_geometry()]
     }
 }

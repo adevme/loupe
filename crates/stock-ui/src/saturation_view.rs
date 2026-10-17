@@ -1,15 +1,14 @@
-use iced::widget::canvas::{self, Geometry, Path, Stroke};
-use iced::widget::{column, container, row, Space};
-use iced::{mouse, Alignment, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
+use iced::widget::canvas::{self, Geometry, LineDash, Path, Stroke};
+use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use loupe_stock::{saturation_curve, Saturation};
 
-use crate::kit::{choice, dial, graph_frame, knob_row, panel, put_text, toggle};
+use crate::compressor_view::INSET;
+use crate::kit::*;
 use crate::knobs::{change, Change, Knobs};
-use crate::look::{fade, Look};
+use crate::look::{fade, Look, MEDIUM, SEMIBOLD};
 
 const REACH: f32 = 1.5;
 const STEPS: usize = 240;
-const MARGIN: f32 = 16.0;
 
 pub struct SaturationEditor {
     knobs: Knobs,
@@ -18,6 +17,7 @@ pub struct SaturationEditor {
 
 impl SaturationEditor {
     pub fn new(look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::SATURATION);
         Self { knobs: Knobs::of(&Saturation::new()), look }
     }
 
@@ -35,22 +35,15 @@ impl SaturationEditor {
         let look = self.look;
         let values = &self.knobs.values;
         let params = self.knobs.params;
-        let knob = |index: usize, colour| dial(look, params, values, index, colour, change);
-        let heat = knob_row(vec![knob(0, look.danger), knob(2, look.bands[6])]);
-        let level = knob_row(vec![knob(3, look.accent), knob(4, look.bands[3])]);
         let auto = self.knobs.on(5);
-        let extras = column![
-            choice(params[1], values[1], |value| Change(1, value)),
-            toggle(look, "Auto gain", auto, Change(5, if auto { 0.0 } else { 1.0 })),
-        ]
-        .spacing(10);
-        let controls = row![heat, Space::with_width(18), level, Space::with_width(Length::Fill), extras].align_y(Alignment::Center);
-        let graph = canvas::Canvas::new(Bend { editor: self }).width(Length::Fill).height(Length::Fill);
-        let backdrop = container(container(graph).padding([12, 12])).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            background: Some(look.background.into()),
-            ..Default::default()
-        });
-        column![backdrop, panel(look, controls)].into()
+        shell(look, "Saturation", "Harmonic drive", move || canvas::Canvas::new(Bend { editor: self }).width(Length::Fill).height(Length::Fill).into(), move |compact| {
+            let p = Panel::new(look, compact, params, values, change);
+            vec![vec![
+                section(look, "Character", vec![stack(vec![choice(look, params[1], values[1], |value| Change(1, value)), toggle(look, "Auto gain", auto, Change(5, if auto { 0.0 } else { 1.0 }))])]),
+                section(look, "Heat", vec![p.hero(0), p.knob(2)]),
+                section(look, "Output", vec![p.hero(3), p.knob(4)]),
+            ]]
+        })
     }
 }
 
@@ -68,38 +61,49 @@ impl canvas::Program<Change> for Bend<'_> {
             return Vec::new();
         }
         let mut frame = graph_frame(renderer, size, &look);
-        let side = (size.height - MARGIN * 2.0).min(size.width - MARGIN * 2.0).max(1.0);
+        let side = (size.height - INSET * 2.0).min(size.width - INSET * 2.0).max(1.0);
         let corner = Vector::new((size.width - side) / 2.0, (size.height - side) / 2.0);
         frame.with_save(|frame| {
             frame.translate(corner);
-            frame.fill_rectangle(Point::ORIGIN, Size::new(side, side), look.panel);
+            draw_card(frame, Point::ORIGIN, Size::new(side, side), &look);
+            let pad = 12.0;
+            let inner = side - pad * 2.0;
             let at = |input: f32, output: f32| {
                 let share = |v: f32| (v / REACH + 1.0) / 2.0;
-                Point::new(share(input) * side, side - share(output.clamp(-REACH, REACH)) * side)
+                Point::new(pad + share(input) * inner, pad + inner - share(output.clamp(-REACH, REACH)) * inner)
             };
             for value in [-1.0, -0.5, 0.0, 0.5, 1.0] {
                 let p = at(value, value);
                 let colour = if value == 0.0 { look.grid_strong } else { look.grid };
-                frame.fill_rectangle(Point::new(p.x, 0.0), Size::new(1.0, side), colour);
-                frame.fill_rectangle(Point::new(0.0, p.y), Size::new(side, 1.0), colour);
+                frame.fill_rectangle(Point::new(p.x.round(), pad), Size::new(1.0, inner), colour);
+                frame.fill_rectangle(Point::new(pad, p.y.round()), Size::new(inner, 1.0), colour);
             }
-            frame.stroke(&Path::line(at(-REACH, -REACH), at(REACH, REACH)), Stroke::default().with_color(fade(look.text_dim, 0.35)).with_width(1.0));
+            let diagonal = Path::line(at(-REACH, -REACH), at(REACH, REACH));
+            frame.stroke(&diagonal, Stroke { line_dash: LineDash { segments: &[4.0, 4.0], offset: 0 }, ..Stroke::default().with_color(fade(look.text_dim, 0.4)).with_width(1.0) });
             let values = &self.editor.knobs.values;
-            let line = Path::new(|b| {
-                for step in 0..=STEPS {
+            let points: Vec<Point> = (0..=STEPS)
+                .map(|step| {
                     let input = -REACH + 2.0 * REACH * step as f32 / STEPS as f32;
-                    let point = at(input, saturation_curve(values, input));
-                    if step == 0 {
-                        b.move_to(point);
-                    } else {
-                        b.line_to(point);
-                    }
-                }
-            });
-            frame.stroke(&line, Stroke::default().with_color(look.danger).with_width(2.5));
-            put_text(frame, "In", Point::new(side - 6.0, side - 6.0), 11.0, look.text_dim, (1.0, 1.0));
-            put_text(frame, "Out", Point::new(6.0, 6.0), 11.0, look.text_dim, (0.0, 0.0));
+                    at(input, saturation_curve(values, input))
+                })
+                .collect();
+            let line = polyline(&points);
+            frame.stroke(&line, Stroke::default().with_color(fade(look.accent, 0.18)).with_width(8.0));
+            frame.stroke(&line, Stroke::default().with_color(look.accent).with_width(2.2));
+            axis_text(frame, "IN", Point::new(side - pad - 2.0, side - pad - 2.0), &look, (1.0, 1.0));
+            axis_text(frame, "OUT", Point::new(pad + 2.0, pad + 2.0), &look, (0.0, 0.0));
         });
+        let values = &self.editor.knobs.values;
+        let style = self.editor.knobs.params[1].chosen(values[1]).unwrap_or("").to_uppercase();
+        let room = corner.x;
+        if room > 150.0 {
+            put_text_in(&mut frame, "STYLE", Point::new(room / 2.0, size.height / 2.0 - 30.0), 9.5, look.text_faint, (0.5, 0.5), SEMIBOLD);
+            put_text_in(&mut frame, &style, Point::new(room / 2.0, size.height / 2.0), 26.0, look.text, (0.5, 0.5), MEDIUM);
+            let right = size.width - room / 2.0;
+            put_text_in(&mut frame, "DRIVE", Point::new(right, size.height / 2.0 - 30.0), 9.5, look.text_faint, (0.5, 0.5), SEMIBOLD);
+            put_text_in(&mut frame, &format!("{:+.1} dB", values[0]), Point::new(right, size.height / 2.0), 26.0, look.accent, (0.5, 0.5), MEDIUM);
+        }
+        seal(&mut frame, size, &look);
         vec![frame.into_geometry()]
     }
 }

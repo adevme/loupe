@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use iced::widget::canvas::{self, Geometry, Path, Stroke};
-use iced::widget::{column, container, row, Space};
-use iced::{mouse, Alignment, Element, Length, Point, Rectangle, Renderer, Size, Theme};
+use iced::widget::canvas::{self, Geometry, Stroke};
+use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Theme};
 use loupe_stock::{History, Moment, Transient};
 
-use crate::kit::{dial, graph_frame, knob_row, panel, put_text};
+use crate::compressor_view::INSET;
+use crate::kit::*;
 use crate::knobs::{change, Change, Knobs};
-use crate::look::{fade, Look};
+use crate::look::{fade, Look, MEDIUM};
 
 const SHOWN_MOMENTS: usize = 600;
 const LOWEST_DB: f32 = -48.0;
@@ -22,6 +22,7 @@ pub struct TransientEditor {
 
 impl TransientEditor {
     pub fn new(history: Option<Arc<History>>, look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::TRANSIENT);
         Self { knobs: Knobs::of(&Transient::new()), history, moments: vec![Moment::default(); SHOWN_MOMENTS], look }
     }
 
@@ -45,16 +46,13 @@ impl TransientEditor {
         let look = self.look;
         let values = &self.knobs.values;
         let params = self.knobs.params;
-        let knob = |index: usize, colour| dial(look, params, values, index, colour, change);
-        let shape = knob_row(vec![knob(0, look.accent), knob(1, look.bands[5])]);
-        let level = knob_row(vec![knob(2, look.bands[3]), knob(3, look.bands[3])]);
-        let controls = row![shape, Space::with_width(18), level, Space::with_width(Length::Fill)].align_y(Alignment::Center);
-        let graph = canvas::Canvas::new(Hits { editor: self }).width(Length::Fill).height(Length::Fill);
-        let backdrop = container(container(graph).padding([12, 12])).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            background: Some(look.background.into()),
-            ..Default::default()
-        });
-        column![backdrop, panel(look, controls)].into()
+        shell(look, "Transient", "Transient shaper", move || canvas::Canvas::new(Hits { editor: self }).width(Length::Fill).height(Length::Fill).into(), move |compact| {
+            let p = Panel::new(look, compact, params, values, change);
+            vec![vec![
+                section(look, "Shape", vec![p.hero(0), p.hero(1)]),
+                section(look, "Output", vec![p.knob(2), p.knob(3)]),
+            ]]
+        })
     }
 }
 
@@ -73,36 +71,34 @@ impl canvas::Program<Change> for Hits<'_> {
         }
         let mut frame = graph_frame(renderer, size, &look);
         let moments = &self.editor.moments;
-        let column_w = size.width / moments.len().max(1) as f32;
-        let middle = size.height / 2.0;
-        let level_h = |gain: f32| {
+        let left = INSET;
+        let width = (size.width - INSET * 2.0 - 42.0).max(1.0);
+        let top = INSET + 8.0;
+        let bottom = size.height - INSET - 8.0;
+        let middle = (top + bottom) / 2.0;
+        let half = (bottom - top) / 2.0;
+        let step = width / (moments.len().max(2) - 1) as f32;
+        let level_y = |gain: f32| {
             let db = (20.0 * gain.max(1e-6).log10()).clamp(LOWEST_DB, 0.0);
-            (db - LOWEST_DB) / -LOWEST_DB * size.height
+            bottom - (db - LOWEST_DB) / -LOWEST_DB * (bottom - top)
         };
-        for (i, moment) in moments.iter().enumerate() {
-            let x = i as f32 * column_w;
-            let tall = level_h(moment.input);
-            frame.fill_rectangle(Point::new(x, size.height - tall), Size::new(column_w.ceil(), tall), fade(look.spectrum, 0.2));
-        }
-        frame.fill_rectangle(Point::new(0.0, middle), Size::new(size.width, 1.0), look.grid_strong);
+        let input: Vec<Point> = moments.iter().enumerate().map(|(i, moment)| Point::new(left + i as f32 * step, level_y(moment.input))).collect();
+        frame.stroke(&polyline(&input), Stroke::default().with_color(fade(look.text, 0.16)).with_width(1.0));
         for db in [-WIDEST_CHANGE_DB, -6.0, 6.0, WIDEST_CHANGE_DB] {
-            let y = middle - db / WIDEST_CHANGE_DB * (middle - 8.0);
-            frame.fill_rectangle(Point::new(0.0, y.round()), Size::new(size.width, 1.0), look.grid);
-            put_text(&mut frame, &format!("{db:+.0} dB"), Point::new(size.width - 6.0, y - 3.0), 11.0, look.text_dim, (1.0, 1.0));
+            let y = middle - db / WIDEST_CHANGE_DB * half;
+            guide(&mut frame, Point::new(left, y), width, look.grid);
+            axis_text(&mut frame, &format!("{db:+.0}"), Point::new(size.width - INSET - 2.0, y), &look, (1.0, 0.5));
         }
-        for (i, moment) in moments.iter().enumerate() {
-            let change = moment.reduction.clamp(-WIDEST_CHANGE_DB, WIDEST_CHANGE_DB);
-            if change.abs() < 0.05 {
-                continue;
-            }
-            let x = i as f32 * column_w;
-            let y = middle - change / WIDEST_CHANGE_DB * (middle - 8.0);
-            let colour = fade(if change > 0.0 { look.accent } else { look.danger }, 0.75);
-            frame.fill_rectangle(Point::new(x, y.min(middle)), Size::new(column_w.ceil(), (y - middle).abs()), colour);
-        }
-        frame.stroke(&Path::line(Point::new(0.0, middle), Point::new(size.width, middle)), Stroke::default().with_color(look.grid_strong).with_width(1.0));
-        put_text(&mut frame, "Boost", Point::new(8.0, 6.0), 11.5, look.accent, (0.0, 0.0));
-        put_text(&mut frame, "Cut", Point::new(8.0, size.height - 6.0), 11.5, look.danger, (0.0, 1.0));
+        guide(&mut frame, Point::new(left, middle), width, look.grid_strong);
+        axis_text(&mut frame, "0", Point::new(size.width - INSET - 2.0, middle), &look, (1.0, 0.5));
+        let change_y = |moment: &Moment| middle - moment.reduction.clamp(-WIDEST_CHANGE_DB, WIDEST_CHANGE_DB) / WIDEST_CHANGE_DB * half;
+        let up: Vec<Point> = moments.iter().enumerate().map(|(i, moment)| Point::new(left + i as f32 * step, change_y(moment).min(middle))).collect();
+        let down: Vec<Point> = moments.iter().enumerate().map(|(i, moment)| Point::new(left + i as f32 * step, change_y(moment).max(middle))).collect();
+        fill_under(&mut frame, &up, middle, fade(look.accent, 0.85), fade(look.accent, 0.2));
+        fill_under(&mut frame, &down, middle, fade(look.neutral(), 0.6), fade(look.neutral(), 0.1));
+        put_text_in(&mut frame, "BOOST", Point::new(left + 8.0, top + 4.0), 9.5, look.accent, (0.0, 0.0), MEDIUM);
+        put_text_in(&mut frame, "CUT", Point::new(left + 8.0, bottom - 4.0), 9.5, look.neutral(), (0.0, 1.0), MEDIUM);
+        seal(&mut frame, size, &look);
         vec![frame.into_geometry()]
     }
 }
