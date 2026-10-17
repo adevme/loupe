@@ -1425,7 +1425,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                     | Drag::Paint { .. }
                     | Drag::Trim { .. }
                     | Drag::Stretch { .. }
-                    | Drag::Pan { .. },
+                    | Drag::Pan { .. }
+                    | Drag::LaneResize { .. },
                 ) => {
                     (Captured, Some(Message::DragEnd))
                 }

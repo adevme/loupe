@@ -2343,7 +2343,10 @@ impl App {
             Message::DropPoint { target, which } => {
                 self.edit(None, Command::DropPoint { target, which });
             }
-            Message::PointLetGo => self.reading = None,
+            Message::PointLetGo => {
+                self.reading = None;
+                self.run = None;
+            }
             Message::PluginHighlight(step) => {
                 let count = self.in_the_picker().len();
                 if count > 0 {
@@ -4466,5 +4469,31 @@ mod overlay_window_tests {
         let _ = app.update(Message::ResizedTo(mixer, Size::new(700.0, 300.0)));
         assert_eq!(app.mixer_size, Size::new(700.0, 300.0));
         assert_eq!(app.window, Size::new(1280.0, 760.0), "the mixer window resized the main window");
+    }
+}
+
+#[cfg(test)]
+mod automation_undo {
+    use super::*;
+
+    #[test]
+    fn each_point_edit_is_its_own_undo_step() {
+        let mut app = App::bare();
+        app.project.apply(Command::AddTrack { name: "Vox".into() }).unwrap();
+        let track = app.project.tracks[0].id;
+        let target = loupe_engine::Target::TrackGain(track);
+        let _ = app.update(Message::AddEnvelope(target));
+        let points = |app: &App| app.project.envelope(target).map_or(0, |shape| shape.points.len());
+        let start = points(&app);
+        for (at, value) in [(48_000, 0.5), (96_000, 0.8), (144_000, 0.3)] {
+            let _ = app.update(Message::PutPoint { target, at, value });
+            let _ = app.update(Message::DragPoint { target, which: points(&app) - 1, at, value: value + 0.1 });
+            let _ = app.update(Message::PointLetGo);
+        }
+        assert_eq!(points(&app), start + 3);
+        let _ = app.update(Message::Undo);
+        assert_eq!(points(&app), start + 2, "one undo took back more than the last point");
+        let _ = app.update(Message::Undo);
+        assert_eq!(points(&app), start + 1);
     }
 }
