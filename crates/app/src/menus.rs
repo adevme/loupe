@@ -18,7 +18,6 @@ const HELP_MENU_LEFT: f32 = 208.0;
 const HOME_VIEW_MENU_LEFT: f32 = 76.0;
 const HOME_HELP_MENU_LEFT: f32 = 136.0;
 const MENU_OVERLAPS_BAR: f32 = 8.0;
-/// Left padding the menu positions were measured with on the start screen.
 const HOME_BAR_PAD: f32 = 16.0;
 pub const ENTRY_ID: &str = "overlay-entry";
 
@@ -77,7 +76,6 @@ impl App {
     }
 
     fn under_the_bar(&self, left: f32) -> Point {
-        // On the start screen the menus sit over the centred page, not at the edge.
         let shift = match self.screen {
             Screen::Home => {
                 let width = self.room_for_the_overlay().width;

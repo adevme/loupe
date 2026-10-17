@@ -82,7 +82,6 @@ impl App {
         .spacing(40);
 
         let page = column![title, rule(palette), lists].spacing(20);
-        // The menus line up with the page under them rather than the window edge.
         let menus = row![self.file_button(), self.view_button(), self.help_button()].spacing(8).align_y(Alignment::Center);
         let bar = container(container(menus).width(Length::Fill).max_width(PAGE_WIDTH))
             .center_x(Length::Fill)
@@ -101,7 +100,6 @@ impl App {
             whole = whole.push(banner).push(rule(palette));
         }
         whole = whole.push(page);
-        // Status sits flush along the bottom, as it does with a song open.
         if let Some(status) = self.status() {
             whole = whole.push(status);
         }

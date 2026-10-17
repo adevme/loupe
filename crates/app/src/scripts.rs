@@ -110,7 +110,6 @@ impl App {
     }
 
     pub(crate) fn scripts_menu(&self) -> Element<'_, Message> {
-        // Says what the entries are: picking one runs it on the song straight away.
         let mut items: Vec<Element<'_, Message>> = vec![self.item("Picking a script runs it now. Ctrl+Z undoes it.", "", None)];
         items.extend(self
             .scripts

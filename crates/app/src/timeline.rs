@@ -613,7 +613,6 @@ impl Timeline<'_> {
         Rectangle::new(Point::new(depth * INDENT_W, self.track_top(index) + 8.0), Size::new(22.0, 24.0))
     }
 
-    /// The cross on a take's own row, in the same place as a track's.
     fn take_remove_button(&self, index: usize, take: usize) -> Rectangle {
         Rectangle::new(Point::new(self.header_right() - 34.0, self.take_lane_top(index, take) + 8.0), Size::new(24.0, 24.0))
     }
@@ -805,8 +804,6 @@ impl Timeline<'_> {
             }
             let tall = self.take_tall(track);
             let colour = self.colour_of(i);
-            // A take row reads as a track nested under its own: full width from the
-            // colour edge, its name stepped in one level.
             let depth = self.project.depth_of(track.id).min(4) as f32;
             let indent = COLOUR_EDGE;
             let name_left = indent + (depth + 1.0) * INDENT_W + 6.0;

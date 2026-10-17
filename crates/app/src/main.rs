@@ -1557,9 +1557,6 @@ impl App {
                 }
             }
             Message::DeleteTake(track, take) => {
-                // Every clip on the track drops that take. A clip playing it moves to
-                // the take before (or the next one); a clip left with one take becomes
-                // an ordinary clip. One undo step.
                 let changes: Vec<(ClipId, Vec<i64>, usize)> = self
                     .project
                     .track(track)
