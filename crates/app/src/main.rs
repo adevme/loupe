@@ -283,6 +283,7 @@ pub enum Message {
     FxDrop,
     StockTurned(loupe_stock_ui::Change),
     StockTold(loupe_stock_ui::EqMessage),
+    FromStock(window::Id, Box<Message>),
     AddSend { from: TrackId, to: TrackId },
     RemoveSend { from: TrackId, to: TrackId },
     SendGain { from: TrackId, to: TrackId, gain: f32 },
@@ -507,7 +508,6 @@ pub enum Overlay {
     Automation(loupe_engine::Target),
     MasterPlugins,
     MonitorPlugins,
-    Stock,
     Recover,
     CrashReport,
     PluginFell,
@@ -582,7 +582,8 @@ struct App {
     racks: racks::Lending<Box<dyn Chains>>,
     fx_was: u64,
     peeks: racks::Peeks,
-    stock: Option<stockwin::Window>,
+    stocks: Vec<stockwin::Open>,
+    stocks_waiting: Vec<stockwin::Window>,
     fx_drag: Option<(TrackId, usize, usize)>,
     writing: Option<loupe_engine::Writer>,
     held_back: std::collections::HashSet<(u64, usize, bool)>,
@@ -872,7 +873,8 @@ impl App {
             racks: racks::Lending::default(),
             fx_was: 0,
             peeks: racks::Peeks::default(),
-            stock: None,
+            stocks: Vec::new(),
+            stocks_waiting: Vec::new(),
             fx_drag: None,
             writing: None,
             held_back: std::collections::HashSet::new(),
@@ -1082,7 +1084,8 @@ impl App {
             racks: racks::Lending::default(),
             fx_was: 0,
             peeks: racks::Peeks::default(),
-            stock: None,
+            stocks: Vec::new(),
+            stocks_waiting: Vec::new(),
             fx_drag: None,
             writing: None,
             held_back: std::collections::HashSet::new(),
@@ -1126,7 +1129,7 @@ impl App {
                 task = Task::batch([task, window::gain_focus(self.overlay_window)]);
             }
         }
-        task = Task::batch([task, self.settle_fx_windows()]);
+        task = Task::batch([task, self.settle_fx_windows(), self.settle_stock_windows()]);
         if !self.a_window_of_ours(self.overlay_window) {
             self.overlay_window = self.main_window;
             if self.overlay.is_a_menu() {
@@ -1277,8 +1280,8 @@ impl App {
                 }
                 self.keep_writing();
                 self.take_falls();
-                if let Some(window) = self.stock.as_mut() {
-                    window.tick();
+                for open in &mut self.stocks {
+                    open.editor.tick();
                 }
                 if self.copied.is_some_and(|at| at.elapsed() > COPIED_SHOWN_FOR) {
                     self.copied = None;
@@ -1319,14 +1322,12 @@ impl App {
             }
             Message::KeyTold(message) => self.key_told(message),
             Message::KeyFileHeard(name, result) => self.key_file_heard(name, result),
+            Message::DroppedOn(window, path) if self.key_wants_file(window) => return self.read_key_from(path),
             Message::DroppedOn(window, path) if window == self.main_window => return self.update(Message::Dropped(path)),
             Message::ResizedTo(window, size) if window == self.main_window => return self.update(Message::Resized(size)),
             Message::ResizedTo(window, size) if self.mixer_window == Some(window) => self.mixer_size = size,
             Message::DroppedOn(..) | Message::ResizedTo(..) => {}
             Message::Dropped(path) => {
-                if self.key_wants_file() {
-                    return self.read_key_from(path);
-                }
                 if let Overlay::Sampler(track) = self.overlay {
                     return self.load_sample(track, path);
                 }
@@ -1531,7 +1532,6 @@ impl App {
                 self.theme_problem = None;
                 self.after_saving = None;
                 self.overlay = Overlay::None;
-                self.stock = None;
                 self.editing_level = None;
                 self.editing_send = None;
                 self.stop_preview();
@@ -1922,11 +1922,18 @@ impl App {
                 let _ = settings::save("mixer_alone", "yes");
             }
             Message::WindowFocused(window) => {
-                if self.a_window_of_ours(window) || self.fx_window_at(window).is_some() {
+                if self.a_window_of_ours(window) || self.fx_window_at(window).is_some() || self.stock_at(window).is_some() {
                     self.focused = window;
                 }
             }
             Message::WindowClosed(window) => {
+                if self.stock_at(window).is_some() {
+                    self.stocks.retain(|open| open.id != window);
+                    if self.focused == window {
+                        self.focused = self.main_window;
+                    }
+                    return window::close(window);
+                }
                 if !self.going && self.fx_window_at(window).is_some() {
                     self.fx_windows.retain(|fx| fx.id != window);
                     if self.focused == window {
@@ -2426,12 +2433,16 @@ impl App {
                     }
                 }
             }
+            Message::FromStock(window, inner) => {
+                self.focused = window;
+                return self.handle(*inner);
+            }
             Message::StockTurned(change) => {
-                let changes = self.stock.as_mut().map(|window| window.turned(change)).unwrap_or_default();
+                let changes = self.stock_mut().map(|window| window.turned(change)).unwrap_or_default();
                 self.plugin_changed(changes);
             }
             Message::StockTold(told) => {
-                let changes = self.stock.as_mut().map(|window| window.told(told)).unwrap_or_default();
+                let changes = self.stock_mut().map(|window| window.told(told)).unwrap_or_default();
                 self.plugin_changed(changes);
             }
             Message::BypassPlugin(track, slot) => {
@@ -2818,7 +2829,7 @@ impl App {
             || self.copied.is_some()
             || self.input.is_some()
             || self.opening.is_some()
-            || self.stock.is_some()
+            || !self.stocks.is_empty()
             || self.plugins_opening
             || self.crash_sheet_due
             || self.meters_moving();
@@ -3040,8 +3051,7 @@ impl App {
         let bpm = self.project.bpm as f32;
         match stockwin::Window::open(stockwin::Spot::Track(track), slot, fx.index, &fx.name, &values, peek, rate, bpm) {
             Some(window) => {
-                self.stock = Some(window);
-                self.overlay = Overlay::Stock;
+                self.stocks_waiting.push(window);
             }
             None => self.problem = Some("Loupe has no window for that plugin".into()),
         }
@@ -3083,15 +3093,14 @@ impl App {
         let spot = stockwin::Spot::Clip(clip);
         match stockwin::Window::open(spot, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
             Some(window) => {
-                self.stock = Some(window);
-                self.overlay = Overlay::Stock;
+                self.stocks_waiting.push(window);
             }
             None => self.problem = Some("Loupe has no window for that plugin".into()),
         }
     }
 
     fn plugin_changed(&mut self, changes: Vec<(usize, f32)>) {
-        let Some(window) = self.stock.as_ref() else { return };
+        let Some(window) = self.stock_ref() else { return };
         let (spot, slot) = (window.spot, window.slot);
         if changes.is_empty() {
             return;
@@ -3474,6 +3483,9 @@ impl App {
     }
 
     fn view_of(&self, window: window::Id) -> Element<'_, Message> {
+        if let Some(open) = self.stock_at(window) {
+            return self.stock_window_view(open);
+        }
         if let Some(fx) = self.fx_window_at(window) {
             return self.fx_window_view(fx.spot);
         }
@@ -3490,6 +3502,9 @@ impl App {
     }
 
     fn title_of(&self, window: window::Id) -> String {
+        if let Some(open) = self.stock_at(window) {
+            return open.editor.name.clone();
+        }
         if let Some(fx) = self.fx_window_at(window) {
             return format!("FX — {}", self.chain_name(fx.spot));
         }
@@ -3504,6 +3519,7 @@ impl App {
         self.overlay = Overlay::None;
         let mixer = self.mixer_window.take();
         let mut leaving: Vec<Task<Message>> = self.fx_windows.drain(..).map(|fx| window::close(fx.id)).collect();
+        leaving.extend(self.stocks.drain(..).map(|open| window::close(open.id)));
         leaving.extend(closing::tear_down(self.main_window, mixer).into_iter().map(window::close));
         leaving.push(iced::exit());
         Task::batch(leaving)
@@ -4185,7 +4201,7 @@ impl App {
             let rate = self.engine.rate() as f32;
             let bpm = self.project.bpm as f32;
             if let Some(window) = stockwin::Window::open(stockwin::Spot::Master, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
-                self.stock = Some(window);
+                self.stocks_waiting.push(window);
             }
             return;
         }
@@ -4216,7 +4232,7 @@ impl App {
             let rate = self.engine.rate() as f32;
             let bpm = self.project.bpm as f32;
             if let Some(window) = stockwin::Window::open(stockwin::Spot::Monitor, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
-                self.stock = Some(window);
+                self.stocks_waiting.push(window);
             }
             return;
         }

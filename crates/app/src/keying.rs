@@ -4,9 +4,9 @@ use iced::futures::channel::oneshot;
 use iced::Task;
 use loupe_engine::{Command, Outcome, Project, Source};
 use loupe_stock::{key_name, listen_to, Heard};
-use loupe_stock_ui::KeyMessage;
+use loupe_stock_ui::{KeyEditor, KeyMessage};
 
-use crate::{App, Message, Overlay};
+use crate::{App, Message};
 
 const TUNE: &str = "Loupe Tune";
 const TUNE_KEY: usize = 0;
@@ -66,7 +66,7 @@ pub fn send_to(project: &mut Project, bpm: Option<f32>, key: Option<u8>) -> Resu
 
 impl App {
     pub(crate) fn key_told(&mut self, message: KeyMessage) {
-        let Some(window) = self.stock.as_mut() else { return };
+        let Some(window) = self.stock_mut() else { return };
         let Some((bpm, key)) = window.told_key(message) else { return };
         let mut tuned = 0;
         self.transact(None, |project| {
@@ -88,13 +88,21 @@ impl App {
         self.notice = Some(format!("Set {}.", said.join(", and ")));
     }
 
-    pub(crate) fn key_wants_file(&self) -> bool {
-        matches!(self.overlay, Overlay::Stock) && self.stock.as_ref().is_some_and(|window| matches!(window.face, crate::stockwin::Face::Key(_)))
+    pub(crate) fn key_wants_file(&self, window: iced::window::Id) -> bool {
+        self.stock_at(window).is_some_and(|open| matches!(open.editor.face, crate::stockwin::Face::Key(_)))
+    }
+
+    /// The open Loupe Key, preferring the one in front, so a file read in the background still lands.
+    fn key_editor(&mut self) -> Option<&mut KeyEditor> {
+        let focused = self.focused;
+        let at = self.stocks.iter().position(|open| open.id == focused && matches!(open.editor.face, crate::stockwin::Face::Key(_)))
+            .or_else(|| self.stocks.iter().position(|open| matches!(open.editor.face, crate::stockwin::Face::Key(_))))?;
+        self.stocks[at].editor.key_editor()
     }
 
     pub(crate) fn read_key_from(&mut self, path: PathBuf) -> Task<Message> {
         let name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
-        if let Some(editor) = self.stock.as_mut().and_then(|window| window.key_editor()) {
+        if let Some(editor) = self.key_editor() {
             editor.reading(name.clone());
         }
         let rate = self.project.rate;
@@ -107,7 +115,7 @@ impl App {
     }
 
     pub(crate) fn key_file_heard(&mut self, name: String, result: Result<Heard, String>) {
-        let Some(editor) = self.stock.as_mut().and_then(|window| window.key_editor()) else { return };
+        let Some(editor) = self.key_editor() else { return };
         match result {
             Ok(heard) => editor.file_heard(name, heard),
             Err(why) => {
