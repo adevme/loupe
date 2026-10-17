@@ -1,11 +1,6 @@
 use iced::font::Weight;
 use iced::{Color, Font};
 
-/// The colours every stock plugin window is painted with.
-///
-/// The surfaces step up in light from the recessed display (`background`) through the
-/// faceplate (`deck`) to cards (`panel`) and hovered controls (`raised`), so depth comes
-/// from small, even steps rather than heavy outlines.
 #[derive(Clone, Copy, Debug)]
 pub struct Look {
     pub background: Color,
@@ -87,7 +82,6 @@ pub const MEDIUM: Font = Font { weight: Weight::Medium, ..Font::with_name("Inter
 pub const SEMIBOLD: Font = Font { weight: Weight::Semibold, ..Font::with_name("Inter") };
 
 impl Look {
-    /// The same look with one plugin's own accent colour on knobs, curves and lamps.
     pub fn tinted(self, accent: Color) -> Self {
         Self { accent, curve: accent, ..self }
     }
@@ -116,7 +110,6 @@ pub mod accents {
 }
 
 impl Look {
-    /// The quiet second colour for a second channel or a reference trace.
     pub fn neutral(&self) -> Color {
         Color::from_rgb(0.74, 0.77, 0.84)
     }

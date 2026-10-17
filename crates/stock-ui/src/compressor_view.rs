@@ -146,8 +146,6 @@ pub(crate) fn loupe_stock_db(gain: f32) -> f32 {
     20.0 * gain.max(1e-6).log10()
 }
 
-/// The scrolling level history shared by the dynamics plugins: input as a grey shadow,
-/// output as a blue body, gain reduction hanging from the top in red.
 pub(crate) fn draw_levels(frame: &mut canvas::Frame, size: Size, look: &Look, moments: &[Moment], line_at: Option<f32>, deepest: f32) {
     let top = INSET + 4.0;
     let bottom = size.height - INSET - 4.0;

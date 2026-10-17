@@ -20,20 +20,16 @@ const CARD_RADIUS: f32 = 6.0;
 const CAPS_PX: f32 = 6.3;
 const LABEL_SIZE: f32 = 9.5;
 pub const CHOICE_WIDTH: f32 = 128.0;
-/// Below this window height the hero knobs shrink and the deck keeps to one line.
 pub const COMPACT_BELOW: f32 = 470.0;
 const HEADER_HEIGHT: f32 = 38.0;
 const SECTION_GAP: f32 = 22.0;
 const ITEM_GAP: f32 = 4.0;
 const SECTION_TITLE: f32 = 22.0;
 
-/// How big a knob is drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum KnobSize {
-    /// The two or three controls that matter most in a plugin.
     Hero,
     Regular,
-    /// A small knob with its label and value beside it, for bars and panels.
     Mini,
 }
 
@@ -150,8 +146,6 @@ fn round(colour: Color, thick: f32) -> Stroke<'static> {
     Stroke::default().with_color(colour).with_width(thick).with_line_cap(LineCap::Round)
 }
 
-/// A machined knob cap: a dark body lit from the upper left, a bevelled edge and
-/// fine grip lines that turn with the value.
 pub fn draw_cap(frame: &mut Frame, centre: Point, radius: f32, angle: f32, lit: bool) {
     frame.fill(&Path::circle(Point::new(centre.x, centre.y + radius * 0.12 + 1.5), radius + 2.5), Color::from_rgba(0.0, 0.0, 0.0, 0.45));
     frame.fill(&Path::circle(centre, radius + 1.0), Color::from_rgb(0.035, 0.037, 0.043));
@@ -346,8 +340,6 @@ impl<M> canvas::Program<M> for Dial<M> {
     }
 }
 
-/// A control together with the width it needs, so a deck can lay out and balance
-/// its sections before iced measures anything.
 pub struct Part<'a, M> {
     pub element: Element<'a, M>,
     pub width: f32,
@@ -365,8 +357,6 @@ impl<'a, M: 'a> Part<'a, M> {
     }
 }
 
-/// Builds knobs for one plugin: its look, its parameters and values, and whether
-/// the window is short enough that hero knobs should shrink.
 pub struct Panel<'v, M> {
     pub look: Look,
     pub compact: bool,
@@ -424,7 +414,6 @@ fn ring_room(size: KnobSize) -> f32 {
     size.ring() * 2.0 + 16.0
 }
 
-/// A small upper case caption, the one used over every section and field.
 pub fn caption<'a, M: 'a>(look: Look, words: &str) -> Element<'a, M> {
     text(words.to_uppercase()).size(LABEL_SIZE).font(SEMIBOLD).color(look.text_faint).wrapping(text::Wrapping::None).into()
 }
@@ -455,7 +444,6 @@ fn label_width(label: &str) -> f32 {
     label.chars().count() as f32 * 6.9
 }
 
-/// A latching switch: a raised key with a small lamp that glows while it is on.
 pub fn toggle<'a, M: Clone + 'a>(look: Look, label: impl Into<String>, on: bool, message: M) -> Part<'a, M> {
     let label = label.into();
     let width = label_width(&label) + 46.0;
@@ -464,7 +452,6 @@ pub fn toggle<'a, M: Clone + 'a>(look: Look, label: impl Into<String>, on: bool,
     Part::new(element, width)
 }
 
-/// A plain push key in the same family as [`toggle`].
 pub fn push<'a, M: Clone + 'a>(look: Look, label: impl Into<String>, message: Option<M>) -> Part<'a, M> {
     let label = label.into();
     let width = label_width(&label) + 28.0;
@@ -481,7 +468,6 @@ pub fn push<'a, M: Clone + 'a>(look: Look, label: impl Into<String>, message: Op
     Part::new(element, width)
 }
 
-/// The filled call to action, used once per window at most.
 pub fn primary<'a, M: Clone + 'a>(look: Look, label: &'static str, message: Option<M>) -> Element<'a, M> {
     button(text(label).size(12.5).font(SEMIBOLD).wrapping(text::Wrapping::None))
         .padding([8, 18])
@@ -523,12 +509,10 @@ pub fn menu_style(look: Look) -> impl Fn(&Theme) -> iced::overlay::menu::Style {
     }
 }
 
-/// A pick list for a parameter with named choices, captioned with the parameter's name.
 pub fn choice<'a, M: Clone + 'a>(look: Look, param: Param, value: f32, change: fn(f32) -> M) -> Part<'a, M> {
     Part::new(column![caption(look, param.name), pick(look, param, value, change).element].spacing(6), CHOICE_WIDTH).tall(50.0)
 }
 
-/// The same list without a caption, for a section whose title already names it.
 pub fn pick<'a, M: Clone + 'a>(look: Look, param: Param, value: f32, change: fn(f32) -> M) -> Part<'a, M> {
     let current = param.chosen(value);
     let list = pick_list(param.choices, current, move |picked: &'static str| {
@@ -544,7 +528,6 @@ pub fn pick<'a, M: Clone + 'a>(look: Look, param: Param, value: f32, change: fn(
     Part::new(list, CHOICE_WIDTH)
 }
 
-/// A row of joined keys choosing one of a few values.
 pub fn segments<'a, M: Clone + 'a>(look: Look, options: Vec<(String, M, bool)>) -> Part<'a, M> {
     let count = options.len();
     let width = count as f32 * 34.0;
@@ -575,15 +558,12 @@ pub fn segments<'a, M: Clone + 'a>(look: Look, options: Vec<(String, M, bool)>) 
     Part::new(row(buttons), width)
 }
 
-/// A stack of switches or lists inside one section.
 pub fn stack<'a, M: 'a>(parts: Vec<Part<'a, M>>) -> Part<'a, M> {
     let width = parts.iter().map(|part| part.width).fold(0.0, f32::max);
     let height = parts.iter().map(|part| part.height).sum::<f32>() + 10.0 * parts.len().saturating_sub(1) as f32;
     Part::new(column(parts.into_iter().map(|part| part.element)).spacing(10).align_x(Alignment::Center), width).tall(height)
 }
 
-/// A titled run of controls on the deck. No box: sections are told apart by space,
-/// their caption and a faint divider.
 pub fn section<'a, M: 'a>(look: Look, title: &str, parts: Vec<Part<'a, M>>) -> Part<'a, M> {
     let width = parts.iter().map(|part| part.width).sum::<f32>() + ITEM_GAP * parts.len().saturating_sub(1) as f32;
     let width = width.max(caps_width(title));
@@ -616,8 +596,6 @@ fn divider<'a, M: 'a>(look: Look, tall: f32) -> Element<'a, M> {
         .into()
 }
 
-/// One line of sections. When the width allows, the sections share it in proportion
-/// to what they hold, each centred in its share; otherwise the line scrolls sideways.
 pub fn deck_line<'a, M: 'a>(look: Look, parts: Vec<Part<'a, M>>, room: f32) -> Element<'a, M> {
     let natural: f32 = parts.iter().map(|part| part.width).sum::<f32>() + SECTION_GAP * parts.len().saturating_sub(1) as f32;
     let count = parts.len();
@@ -644,7 +622,6 @@ pub fn deck_line<'a, M: 'a>(look: Look, parts: Vec<Part<'a, M>>, room: f32) -> E
     }
 }
 
-/// A thin, quiet horizontal scroller for a row of controls that does not fit.
 pub fn sideways<'a, M: 'a>(look: Look, content: Element<'a, M>) -> Element<'a, M> {
     use iced::widget::scrollable;
     scrollable(content)
@@ -662,7 +639,6 @@ pub fn sideways<'a, M: 'a>(look: Look, content: Element<'a, M>) -> Element<'a, M
         .into()
 }
 
-/// The faceplate under the display: a softly lit tonal plate holding lines of sections.
 pub fn deck_plate<'a, M: 'a>(look: Look, content: Element<'a, M>) -> Element<'a, M> {
     container(content)
         .padding(iced::Padding { top: 14.0, right: 18.0, bottom: 14.0, left: 18.0 })
@@ -674,7 +650,6 @@ pub fn deck_plate<'a, M: 'a>(look: Look, content: Element<'a, M>) -> Element<'a,
         .into()
 }
 
-/// The strip across the top of every plugin window: an accent mark and the name.
 pub fn header<'a, M: 'a>(look: Look, name: &'static str, kind: &'static str) -> Element<'a, M> {
     let accent = look.accent;
     let mark = container(Space::new(9, 9)).style(move |_| container::Style {
@@ -707,7 +682,6 @@ pub fn header<'a, M: 'a>(look: Look, name: &'static str, kind: &'static str) -> 
 }
 
 
-/// A tonal panel for widget content: lifted from the plate, lit along the top, no outline.
 pub fn card<'a, M: 'a>(look: Look, content: impl Into<Element<'a, M>>) -> container::Container<'a, M> {
     container(content).padding([12, 14]).style(move |_| container::Style {
         background: Some(iced::gradient::Linear::new(iced::Radians(PI)).add_stop(0.0, lift(look.background, 0.03)).add_stop(1.0, look.well_low).into()),
@@ -716,7 +690,6 @@ pub fn card<'a, M: 'a>(look: Look, content: impl Into<Element<'a, M>>) -> contai
         ..Default::default()
     })
 }
-/// The recessed screen holding a plugin's graph.
 pub fn display<'a, M: 'a>(look: Look, content: impl Into<Element<'a, M>>) -> Element<'a, M> {
     container(content)
         .padding(iced::Padding { top: 12.0, right: 12.0, bottom: 0.0, left: 12.0 })
@@ -726,8 +699,6 @@ pub fn display<'a, M: 'a>(look: Look, content: impl Into<Element<'a, M>>) -> Ele
         .into()
 }
 
-/// The whole window: header, display, and the deck. Display and deck are built on
-/// demand so the layout can follow the room the window gives it.
 pub fn shell<'a, M: 'a>(
     look: Look,
     name: &'static str,
@@ -756,7 +727,6 @@ fn well(size: Size) -> Path {
     Path::rounded_rectangle(Point::ORIGIN, size, WELL_RADIUS.into())
 }
 
-/// Starts a graph: the deep, softly lit screen every display draws on.
 pub fn graph_frame(renderer: &Renderer, size: Size, look: &Look) -> Frame {
     let mut frame = Frame::new(renderer, size);
     frame.fill(&well(size), vertical(Point::ORIGIN, Point::new(0.0, size.height), look.background, look.well_low));
@@ -773,8 +743,6 @@ fn edge_shade(frame: &mut Frame, size: Size, from: Point, to: Point, reach: f32,
     frame.fill(&well(size), shade);
 }
 
-/// Finishes a graph: a vignette darkening every edge, a deeper shadow under the top
-/// lip and a fine rim.
 pub fn seal(frame: &mut Frame, size: Size, look: &Look) {
     let (w, h) = (size.width, size.height);
     edge_shade(frame, size, Point::new(0.0, 0.0), Point::new(0.0, h), 22.0, 0.45);
@@ -787,8 +755,6 @@ pub fn seal(frame: &mut Frame, size: Size, look: &Look) {
     frame.stroke(&lip, Stroke::default().with_color(fade(look.text, 0.06)).with_width(1.0));
 }
 
-/// A tonal panel inside a graph, for readouts and side panels: lighter than the
-/// screen, with a lit top edge and no outline.
 pub fn draw_card(frame: &mut Frame, at: Point, size: Size, look: &Look) {
     let body = Path::rounded_rectangle(at, size, CARD_RADIUS.into());
     frame.fill(&Path::rounded_rectangle(Point::new(at.x, at.y + 2.0), size, CARD_RADIUS.into()), Color::from_rgba(0.0, 0.0, 0.0, 0.35));
@@ -797,20 +763,16 @@ pub fn draw_card(frame: &mut Frame, at: Point, size: Size, look: &Look) {
     frame.stroke(&top, Stroke::default().with_color(fade(look.text, 0.07)).with_width(1.0));
 }
 
-/// A horizontal guide line across a graph.
 pub fn guide(frame: &mut Frame, from: Point, length: f32, colour: Color) {
     frame.fill_rectangle(Point::new(from.x, from.y.round()), Size::new(length, 1.0), colour);
 }
 
-/// A dashed horizontal line, used for thresholds and targets.
 pub fn dashed(frame: &mut Frame, from: Point, length: f32, colour: Color) {
     let y = from.y.round() + 0.5;
     let line = Path::line(Point::new(from.x, y), Point::new(from.x + length, y));
     frame.stroke(&line, Stroke { line_dash: LineDash { segments: &[4.0, 4.0], offset: 0 }, ..Stroke::default().with_color(colour).with_width(1.0) });
 }
 
-/// Fills the area between a traced line and a base line with a fade that is
-/// strongest at the line and clear at the base.
 pub fn fill_under(frame: &mut Frame, points: &[Point], base: f32, near_colour: Color, base_colour: Color) {
     if points.len() < 2 {
         return;
@@ -841,7 +803,6 @@ pub fn polyline(points: &[Point]) -> Path {
     })
 }
 
-/// A value shown in a readout panel.
 pub struct Reading {
     pub label: &'static str,
     pub value: String,
@@ -855,8 +816,6 @@ impl Reading {
     }
 }
 
-/// A readout panel: one large reading, an optional bar meter under it, then smaller
-/// rows. The bar follows its share from 0 to 1 smoothly, with no peak flashing.
 pub fn draw_readouts(frame: &mut Frame, size: Size, look: &Look, main: &Reading, bar: Option<(f32, Color)>, rest: &[Reading]) {
     draw_card(frame, Point::ORIGIN, size, look);
     let middle = size.width / 2.0;
@@ -897,7 +856,6 @@ pub fn draw_readouts(frame: &mut Frame, size: Size, look: &Look, main: &Reading,
     }
 }
 
-/// Axis text inside a graph, in small capitals.
 pub fn axis_text(frame: &mut Frame, content: &str, at: Point, look: &Look, anchor: (f32, f32)) {
     put_text_in(frame, &content.to_uppercase(), at, 9.0, look.text_faint, anchor, SEMIBOLD);
 }
