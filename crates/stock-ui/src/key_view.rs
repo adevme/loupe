@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use iced::widget::{button, column, container, row, text, Space};
-use iced::{Alignment, Element, Length};
+use iced::widget::{column, container, row, text, Space};
+use iced::{Alignment, Color, Element, Length};
 use loupe_stock::{key_name, relative_of, Findings, Heard};
 
-use crate::look::{fade, Look};
+use crate::kit::*;
+use crate::look::{Look, MEDIUM};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeyMessage {
@@ -27,6 +28,7 @@ pub struct KeyEditor {
 
 impl KeyEditor {
     pub fn new(findings: Option<Arc<Findings>>, look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::KEY);
         Self { findings, live: Heard::default(), file: None, factor: 1.0, relative: false, look }
     }
 
@@ -87,10 +89,16 @@ impl KeyEditor {
         let look = self.look;
         let heard = self.shown();
         let (bpm, key) = self.chosen();
-        let big = |label: &'static str, value: String, colour| column![text(label).size(12).color(look.text_dim), text(value).size(44).color(colour)].spacing(4).align_x(Alignment::Center).width(Length::Fill);
+        let big = |label: &'static str, value: String, colour| {
+            card(look, column![caption(look, label), text(value).size(56).font(MEDIUM).color(colour)].spacing(6).align_x(Alignment::Center))
+                .padding([18, 20])
+                .width(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+        };
         let key_text = key.map_or("-".to_string(), key_name);
         let bpm_text = bpm.map_or("-".to_string(), |bpm| if bpm.fract() == 0.0 { format!("{bpm:.0}") } else { format!("{bpm:.1}") });
-        let readouts = row![big("Key", key_text, look.accent), big("BPM", bpm_text, look.text)].spacing(20).width(Length::Fill);
+        let readouts = row![big("Key", key_text, look.accent), big("BPM", bpm_text, look.text)].spacing(14).width(Length::Fill).height(Length::Fill);
         let source = match &self.file {
             Some((name, Some(_))) => format!("From the file {name}"),
             Some((name, None)) => format!("Reading {name}…"),
@@ -103,69 +111,45 @@ impl KeyEditor {
             Some(_) => "Not sure yet, let it hear more",
             None => "",
         };
-        let small = |label: String, message: KeyMessage, on: bool| {
-            button(text(label).size(12.5))
-                .padding([5, 12])
-                .style(move |_, status| {
-                    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                    button::Style {
-                        background: Some(if on { look.raised } else if hovered { look.panel } else { look.background }.into()),
-                        text_color: look.text,
-                        border: iced::Border::default().rounded(6).width(1).color(look.grid_strong),
-                        ..Default::default()
-                    }
-                })
-                .on_press(message)
-        };
         let relative = heard.key.map_or("Relative key".to_string(), |key| format!("Use {}", key_name(relative_of(if self.relative { relative_of(key) } else { key }))));
         let tweaks = row![
-            small("BPM × 2".to_string(), KeyMessage::Double, self.factor > 1.0),
-            small("BPM ÷ 2".to_string(), KeyMessage::Half, self.factor < 1.0),
-            small(relative, KeyMessage::Relative, self.relative),
+            toggle(look, "BPM × 2", self.factor > 1.0, KeyMessage::Double).element,
+            toggle(look, "BPM ÷ 2", self.factor < 1.0, KeyMessage::Half).element,
+            toggle(look, relative, self.relative, KeyMessage::Relative).element,
         ]
         .spacing(8);
         let again = match &self.file {
-            Some(_) => small("Back to listening".to_string(), KeyMessage::ForgetFile, false),
-            None => small("Start listening again".to_string(), KeyMessage::ListenAgain, false),
+            Some(_) => push(look, "Back to listening", Some(KeyMessage::ForgetFile)).element,
+            None => push(look, "Start listening again", Some(KeyMessage::ListenAgain)).element,
         };
         let ready = bpm.is_some() || key.is_some();
-        let send = button(text("Send to the song").size(13.5))
-            .padding([8, 18])
-            .style(move |_, status| {
-                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                button::Style {
-                    background: Some(if hovered { fade(look.accent, 0.85) } else { look.accent }.into()),
-                    text_color: look.on_accent,
-                    border: iced::Border::default().rounded(7),
-                    ..Default::default()
-                }
-            })
-            .on_press_maybe(ready.then_some(KeyMessage::Send));
-        let drop = container(text("Drop an audio file here to read its key and BPM").size(12.5).color(look.text_dim))
-            .padding(14)
+        let send = primary(look, "Send to the song", ready.then_some(KeyMessage::Send));
+        let drop = container(text("Drop an audio file here to read its key and BPM").size(12).font(MEDIUM).color(look.text_dim))
+            .padding(16)
             .width(Length::Fill)
             .center_x(Length::Fill)
             .style(move |_| container::Style {
+                background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.18).into()),
                 border: iced::Border::default().rounded(8).width(1).color(look.grid_strong),
                 ..Default::default()
             });
+        let status = column![text(source).size(12.5).color(look.text_dim), text(sure).size(12).font(MEDIUM).color(look.text_faint)].spacing(4).align_x(Alignment::Center);
         let body = column![
             readouts,
-            text(source).size(12.5).color(look.text_dim),
-            text(sure).size(12).color(look.text_dim),
-            Space::with_height(6),
-            tweaks,
-            row![again, Space::with_width(Length::Fill), send].align_y(Alignment::Center),
-            Space::with_height(Length::Fill),
+            status,
+            Space::with_height(4),
+            row![tweaks, Space::with_width(Length::Fill), again].spacing(8).align_y(Alignment::Center),
             drop,
-            text("Send sets the song's BPM, and the key and scale on every Loupe Tune.").size(11.5).color(look.text_dim),
+            row![text("Send sets the song's BPM, and the key and scale on every Loupe Tune.").size(11.5).color(look.text_faint), Space::with_width(Length::Fill), send]
+                .spacing(12)
+                .align_y(Alignment::Center),
         ]
-        .spacing(10)
+        .spacing(12)
         .align_x(Alignment::Center);
-        container(body).padding([24, 28]).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            background: Some(look.background.into()),
+        let body = container(body).padding([18, 20]).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
+            background: Some(iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, crate::look::lift(look.deck, 0.018)).add_stop(1.0, crate::look::lift(look.deck, -0.02)).into()),
             ..Default::default()
-        })
-        .into()
+        });
+        column![header(look, "Key", "Key and tempo finder"), body].into()
     }
 }

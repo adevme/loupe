@@ -1,20 +1,18 @@
 use std::sync::Arc;
 
-use iced::widget::canvas::{self, Geometry};
-use iced::widget::{column, container, row, Space};
-use iced::{mouse, Alignment, Element, Length, Rectangle, Renderer, Size, Theme, Vector};
+use iced::widget::canvas::{self, Geometry, Stroke};
+use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use loupe_stock::{History, Moment, Rider};
 
-use crate::compressor_view::loupe_stock_db;
-use crate::kit::{dial, graph_frame, knob_row, panel, put_text};
+use crate::compressor_view::{loupe_stock_db, GAP, INSET};
+use crate::kit::*;
 use crate::knobs::{change, Change, Knobs};
-use crate::look::Look;
+use crate::look::{fade, Look};
 
 const SHOWN_MOMENTS: usize = 900;
 const WIDEST_RIDE_DB: f32 = 24.0;
 const RECENT_MOMENTS: usize = 60;
 const READOUT_WIDTH: f32 = 150.0;
-const GAP: f32 = 14.0;
 
 pub struct RiderEditor {
     knobs: Knobs,
@@ -25,6 +23,7 @@ pub struct RiderEditor {
 
 impl RiderEditor {
     pub fn new(history: Option<Arc<History>>, look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::RIDER);
         Self { knobs: Knobs::of(&Rider::new()), history, moments: vec![Moment::default(); SHOWN_MOMENTS], look }
     }
 
@@ -48,23 +47,14 @@ impl RiderEditor {
         let look = self.look;
         let values = &self.knobs.values;
         let params = self.knobs.params;
-        let aim = knob_row(vec![
-            dial(look, params, values, 0, look.accent, change),
-            dial(look, params, values, 1, look.bands[5], change),
-            dial(look, params, values, 2, look.bands[6], change),
-        ]);
-        let feel = knob_row(vec![
-            dial(look, params, values, 3, look.bands[3], change),
-            dial(look, params, values, 4, look.bands[3], change),
-            dial(look, params, values, 5, look.bands[2], change),
-            dial(look, params, values, 6, look.bands[1], change),
-        ]);
-        let controls = row![aim, Space::with_width(18), feel, Space::with_width(Length::Fill)].align_y(Alignment::Center);
-        let graph = canvas::Canvas::new(Ride { editor: self }).width(Length::Fill).height(Length::Fill);
-        let backdrop = container(container(graph).padding([12, 12])).width(Length::Fill).height(Length::Fill).style(move |_| {
-            container::Style { background: Some(look.background.into()), ..Default::default() }
-        });
-        column![backdrop, panel(look, controls)].into()
+        shell(look, "Rider", "Vocal level rider", move || canvas::Canvas::new(Ride { editor: self }).width(Length::Fill).height(Length::Fill).into(), move |compact| {
+            let p = Panel::new(look, compact, params, values, change);
+            vec![vec![
+                section(look, "Aim", vec![p.hero(0), p.knob(1), p.knob(2)]),
+                section(look, "Feel", vec![p.knob(3), p.knob(4), p.knob(5)]),
+                section(look, "Output", vec![p.knob(6)]),
+            ]]
+        })
     }
 }
 
@@ -76,60 +66,59 @@ impl canvas::Program<Change> for Ride<'_> {
     type State = ();
 
     fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
-        let look = self.editor.look;
+        let editor = self.editor;
+        let look = editor.look;
         let size = bounds.size();
         if !crate::kit::roomy(size) {
             return Vec::new();
         }
         let mut frame = graph_frame(renderer, size, &look);
-        let rest = Size::new((size.width - READOUT_WIDTH - GAP).max(1.0), size.height);
-        draw_ride(&mut frame, rest, &look, &self.editor.moments);
         frame.with_save(|frame| {
-            frame.translate(Vector::new(rest.width + GAP, 0.0));
-            draw_readout(frame, Size::new(READOUT_WIDTH, size.height), self.editor);
+            frame.translate(Vector::new(INSET, 0.0));
+            let rest = Size::new((size.width - READOUT_WIDTH - GAP - INSET * 2.0).max(1.0), size.height);
+            draw_ride(frame, rest, &look, &editor.moments);
         });
+        frame.with_save(|frame| {
+            frame.translate(Vector::new(size.width - READOUT_WIDTH - INSET, INSET));
+            let recent = &editor.moments[editor.moments.len().saturating_sub(RECENT_MOMENTS)..];
+            let riding = recent.last().map_or(0.0, |moment| moment.reduction);
+            let loudest = recent.iter().map(|moment| moment.output).fold(0.0f32, f32::max);
+            let peak = if loudest > 0.0 { format!("{:.1}", loupe_stock_db(loudest)) } else { "-inf".to_string() };
+            let colour = if riding >= 0.0 { look.accent } else { look.neutral() };
+            let main = Reading::new("Riding", format!("{riding:+.1}"), "dB", colour);
+            let rest = [Reading::new("Going out", peak, "dB", look.text), Reading::new("Target", format!("{:.0}", editor.knobs.values[0]), "dB", look.text_dim)];
+            draw_readouts(frame, Size::new(READOUT_WIDTH, size.height - INSET * 2.0), &look, &main, Some((riding.abs() / WIDEST_RIDE_DB, colour)), &rest);
+        });
+        seal(&mut frame, size, &look);
         vec![frame.into_geometry()]
     }
 }
 
 fn draw_ride(frame: &mut canvas::Frame, size: Size, look: &Look, moments: &[Moment]) {
+    let label_room = 30.0;
+    let width = (size.width - label_room).max(1.0);
     let middle = size.height / 2.0;
-    let per_db = middle / WIDEST_RIDE_DB;
-    frame.fill_rectangle(iced::Point::new(0.0, middle - 0.5), Size::new(size.width, 1.0), look.grid_strong);
-    for step in 1..4 {
+    let per_db = (middle - INSET - 6.0) / WIDEST_RIDE_DB;
+    for step in 1..=4 {
         let away = step as f32 * 6.0 * per_db;
-        for side in [middle - away, middle + away] {
-            frame.fill_rectangle(iced::Point::new(0.0, side), Size::new(size.width, 1.0), look.grid);
+        for (y, db) in [(middle - away, step as f32 * 6.0), (middle + away, -(step as f32) * 6.0)] {
+            guide(frame, Point::new(0.0, y), width, look.grid);
+            if step % 2 == 0 {
+                axis_text(frame, &format!("{db:+.0}"), Point::new(size.width - 2.0, y), look, (1.0, 0.5));
+            }
         }
     }
-    put_text(frame, "+24", iced::Point::new(4.0, 2.0), 10.0, look.text_dim, (0.0, 0.0));
-    put_text(frame, "-24", iced::Point::new(4.0, size.height - 14.0), 10.0, look.text_dim, (0.0, 0.0));
-    let step = size.width / moments.len().max(1) as f32;
-    for (at, moment) in moments.iter().enumerate() {
-        let lift = moment.reduction.clamp(-WIDEST_RIDE_DB, WIDEST_RIDE_DB);
-        if lift.abs() < 0.05 {
-            continue;
-        }
-        let high = middle - lift * per_db;
-        let (top, tall) = if lift > 0.0 { (high, lift * per_db) } else { (middle, -lift * per_db) };
-        let colour = if lift > 0.0 { look.accent } else { look.bands[5] };
-        frame.fill_rectangle(iced::Point::new(at as f32 * step, top), Size::new(step.max(1.0), tall.max(1.0)), colour);
-    }
-}
-
-fn draw_readout(frame: &mut canvas::Frame, size: Size, editor: &RiderEditor) {
-    let look = editor.look;
-    frame.fill_rectangle(iced::Point::ORIGIN, size, look.panel);
-    let recent = &editor.moments[editor.moments.len().saturating_sub(RECENT_MOMENTS)..];
-    let riding = recent.last().map_or(0.0, |moment| moment.reduction);
-    let loudest = recent.iter().map(|moment| moment.output).fold(0.0f32, f32::max);
-    let middle = size.width / 2.0;
-    put_text(frame, "Riding", iced::Point::new(middle, 18.0), 11.5, look.text_dim, (0.5, 0.0));
-    let colour = if riding >= 0.0 { look.accent } else { look.bands[5] };
-    put_text(frame, &format!("{riding:+.1}"), iced::Point::new(middle, 36.0), 30.0, colour, (0.5, 0.0));
-    put_text(frame, "dB", iced::Point::new(middle, 74.0), 11.5, look.text_dim, (0.5, 0.0));
-    put_text(frame, "Going out", iced::Point::new(middle, 110.0), 11.5, look.text_dim, (0.5, 0.0));
-    let peak = if loudest > 0.0 { format!("{:.1}", loupe_stock_db(loudest)) } else { "-inf".to_string() };
-    put_text(frame, &peak, iced::Point::new(middle, 128.0), 24.0, look.text, (0.5, 0.0));
-    put_text(frame, "dB", iced::Point::new(middle, 158.0), 11.5, look.text_dim, (0.5, 0.0));
+    guide(frame, Point::new(0.0, middle), width, look.grid_strong);
+    axis_text(frame, "0", Point::new(size.width - 2.0, middle), look, (1.0, 0.5));
+    let step = width / (moments.len().max(2) - 1) as f32;
+    let points: Vec<Point> = moments
+        .iter()
+        .enumerate()
+        .map(|(at, moment)| Point::new(at as f32 * step, middle - moment.reduction.clamp(-WIDEST_RIDE_DB, WIDEST_RIDE_DB) * per_db))
+        .collect();
+    let above: Vec<Point> = points.iter().map(|p| Point::new(p.x, p.y.min(middle))).collect();
+    let below: Vec<Point> = points.iter().map(|p| Point::new(p.x, p.y.max(middle))).collect();
+    fill_under(frame, &above, middle, fade(look.accent, 0.45), fade(look.accent, 0.08));
+    fill_under(frame, &below, middle, fade(look.neutral(), 0.45), fade(look.neutral(), 0.08));
+    frame.stroke(&polyline(&points), Stroke::default().with_color(fade(look.text, 0.85)).with_width(1.4));
 }

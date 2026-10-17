@@ -2,12 +2,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
-use iced::widget::{button, column, container, horizontal_space, pick_list, row, slider, text};
+use iced::widget::text::Wrapping;
+use iced::widget::{column, container, pick_list, row, text, Space};
 use iced::{keyboard, mouse, Alignment, Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use loupe_stock::{band_design, dynamic_knob, knob, BandShape, Dynamic, Effect, Equalizer, Knob, Param, Scopes, ATTACK_KNOB, BANDS, OUTPUT_KNOB, PLACES, RELEASE_KNOB, SHAPES, SLOPES};
 
-use crate::look::{fade, Look};
-use crate::kit::{hertz, put_text};
+use crate::look::{fade, mix, Look, MEDIUM, SEMIBOLD};
+use crate::kit::*;
 use crate::spectrum::Spectrum;
 
 const LOWEST_HZ: f32 = 10.0;
@@ -15,9 +16,8 @@ const HIGHEST_HZ: f32 = 30_000.0;
 const NODE_RADIUS: f32 = 6.5;
 const NODE_REACH: f32 = 12.0;
 const RANGE_BAR: f32 = 3.0;
-const OUTPUT_SLIDER: f32 = 120.0;
-const DYNAMIC_SLIDER: f32 = 90.0;
-const DYNAMIC_READOUT: f32 = 58.0;
+const RANGE_WIDTH: f32 = 96.0;
+const FIELD_LIST_WIDTH: f32 = 116.0;
 const EDGE_PAD: f32 = 16.0;
 const SPECTRUM_FLOOR_DB: f32 = -84.0;
 const SPECTRUM_CEILING_DB: f32 = 18.0;
@@ -71,6 +71,7 @@ pub struct EqEditor {
 
 impl EqEditor {
     pub fn new(rate: f32, scopes: Option<Arc<Scopes>>, look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::EQ);
         let params = Equalizer::new().params();
         Self {
             params,
@@ -184,136 +185,159 @@ impl EqEditor {
     }
 
     pub fn view(&self) -> Element<'_, EqMessage> {
-        let graph = canvas::Canvas::new(Graph { editor: self }).width(Length::Fill).height(Length::Fill);
         let look = self.look;
-        let bar = container(self.controls()).padding([10, 14]).width(Length::Fill).style(move |_| container::Style {
-            background: Some(look.panel.into()),
-            ..Default::default()
-        });
-        column![graph, bar].into()
+        iced::widget::responsive(move |size| {
+            let compact = size.height < COMPACT_BELOW;
+            let graph = canvas::Canvas::new(Graph { editor: self }).width(Length::Fill).height(Length::Fill);
+            let mut screen = iced::widget::Stack::new().push(graph).width(Length::Fill).height(Length::Fill);
+            if let Some(band) = self.selected.filter(|band| self.in_use(*band)) {
+                let (panel, width) = self.band_panel(band, compact);
+                let graph_width = (size.width - 24.0).max(1.0);
+                let node_x = graph_width * (self.get(band, Knob::Freq) / LOWEST_HZ).ln() / (HIGHEST_HZ / LOWEST_HZ).ln();
+                let left = (node_x - width / 2.0).clamp(10.0, (graph_width - width - 10.0).max(10.0));
+                let placed = container(panel)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_y(iced::alignment::Vertical::Bottom)
+                    .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 12.0, left });
+                screen = screen.push(placed);
+            }
+            column![header(look, "EQ", "Parametric equalizer"), display(look, screen), deck_plate(look, self.bar(compact))].into()
+        })
+        .into()
     }
 
-    fn controls(&self) -> Element<'_, EqMessage> {
+    fn bar(&self, compact: bool) -> Element<'_, EqMessage> {
         let look = self.look;
-        let output = self.values[OUTPUT_KNOB];
-        let range = pick_list(&RANGES[..], Some(RANGES[self.range]), EqMessage::Range).text_size(12).padding([4, 8]);
-        let output_row = row![
-            text("Output").size(12).color(look.text_dim),
-            thin_slider(look, OUTPUT_SLIDER, -36.0..=36.0, output, |db| EqMessage::Set(vec![(OUTPUT_KNOB, (db * 10.0).round() / 10.0)])),
-            text(format!("{output:+.1} dB")).size(12).width(64),
+        let range = pick_list(&RANGES[..], Some(RANGES[self.range]), EqMessage::Range)
+            .text_size(12)
+            .font(MEDIUM)
+            .padding([5, 10])
+            .width(RANGE_WIDTH)
+            .style(field_style(look))
+            .menu_style(menu_style(look));
+        let used = (0..BANDS).filter(|band| self.in_use(*band)).count();
+        let hint = if used == 0 {
+            "Double click the display to add a band".to_string()
+        } else {
+            format!("{used} {} · drag a node to move it · scroll for Q · right click removes", if used == 1 { "band" } else { "bands" })
+        };
+        let p = Panel::new(look, compact, self.params, &self.values, set_one);
+        row![
+            text(hint).size(11.5).font(MEDIUM).color(look.text_faint).wrapping(Wrapping::None),
+            Space::with_width(Length::Fill),
+            caption(look, "Range"),
             range,
+            Space::with_width(18),
+            p.mini(OUTPUT_KNOB, "Output").element,
         ]
         .spacing(10)
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .into()
+    }
 
-        let Some(band) = self.selected.filter(|band| self.in_use(*band)) else {
-            let hint = text("Double click the graph to add a band. Drag a node to move it, scroll on it for Q, right click to remove.")
-                .size(12)
-                .color(look.text_dim);
-            return row![hint, horizontal_space(), output_row].align_y(Alignment::Center).into();
-        };
+    fn band_panel(&self, band: usize, compact: bool) -> (Element<'_, EqMessage>, f32) {
+        let look = self.look;
         let shape = self.shape(band);
-        let dot = container(text("")).width(10).height(10).style(move |_| container::Style {
-            background: Some(look.band(band).into()),
+        let colour = look.band(band);
+        let p = Panel::new(look, compact, self.params, &self.values, set_one);
+        let dot = container(Space::new(9, 9)).style(move |_| container::Style {
+            background: Some(colour.into()),
             border: iced::Border::default().rounded(5),
+            shadow: iced::Shadow { color: fade(colour, 0.7), offset: iced::Vector::ZERO, blur_radius: 7.0 },
             ..Default::default()
         });
-        let choose = |which: Knob, choices: &'static [&'static str]| {
+        let choose = |which: Knob, choices: &'static [&'static str]| -> Element<'_, EqMessage> {
             let current = choices.get(self.get(band, which) as usize).copied();
             pick_list(choices, current, move |picked: &'static str| {
                 let index = choices.iter().position(|choice| *choice == picked).unwrap_or(0);
                 EqMessage::Set(vec![(knob(band, which), index as f32)])
             })
-            .text_size(12)
-            .padding([4, 8])
+            .text_size(11.5)
+            .font(MEDIUM)
+            .padding([4, 9])
+            .width(FIELD_LIST_WIDTH)
+            .style(field_style(look))
+            .menu_style(menu_style(look))
+            .into()
         };
-        fn field<'a>(look: &Look, caption: &'static str, control: Element<'a, EqMessage>) -> Element<'a, EqMessage> {
-            column![control, text(caption).size(9).color(look.text_dim)].spacing(3).align_x(Alignment::Center).into()
-        }
-        let mut band_row = row![dot, text(format!("Band {}", band + 1)).size(12), field(&look, "SHAPE", choose(Knob::Shape, &SHAPES).into())]
-            .spacing(12)
-            .align_y(Alignment::Center);
+        let mut lists = column![row![dot, text(format!("BAND {}", band + 1)).size(10.5).font(SEMIBOLD).color(look.text)].spacing(8).align_y(Alignment::Center), choose(Knob::Shape, &SHAPES)].spacing(7);
         if shape.has_slope() {
-            band_row = band_row.push(field(&look, "SLOPE", choose(Knob::Slope, &SLOPES).into()));
+            lists = lists.push(choose(Knob::Slope, &SLOPES));
         }
-        band_row = band_row.push(field(&look, "STEREO", choose(Knob::Place, &PLACES).into()));
-        let typed_in = |which: Knob, shown: String, wide: f32| {
+        lists = lists.push(choose(Knob::Place, &PLACES));
+        let typed = |which: Knob, label: &'static str, shown: String| -> (Element<'_, EqMessage>, f32) {
             let slot = knob(band, which);
+            let dial = p.sized(slot, KnobSize::Regular, Some(label), false);
             let showing = match &self.typing {
                 Some((at, text)) if *at == slot => text.clone(),
                 _ => shown,
             };
-            iced::widget::text_input("", &showing)
-                .size(12)
-                .padding([2, 6])
-                .width(wide)
+            let input = iced::widget::text_input("", &showing)
+                .size(11.5)
+                .font(MEDIUM)
+                .padding([3, 4])
+                .width(dial.width)
+                .align_x(iced::alignment::Horizontal::Center)
                 .on_input(move |text| EqMessage::Typing { knob: slot, text })
                 .on_submit(EqMessage::Typed(slot))
-                .style(move |_, _| iced::widget::text_input::Style {
-                    background: look.raised.into(),
-                    border: iced::Border::default().rounded(5),
+                .style(move |_, status| iced::widget::text_input::Style {
+                    background: match status {
+                        iced::widget::text_input::Status::Focused => Color::from_rgba(0.0, 0.0, 0.0, 0.4).into(),
+                        iced::widget::text_input::Status::Hovered => Color::from_rgba(0.0, 0.0, 0.0, 0.22).into(),
+                        _ => Color::TRANSPARENT.into(),
+                    },
+                    border: iced::Border { color: if matches!(status, iced::widget::text_input::Status::Focused) { fade(look.accent, 0.5) } else { Color::TRANSPARENT }, width: 1.0, radius: 4.0.into() },
                     icon: look.text_dim,
                     placeholder: look.text_dim,
-                    value: look.text,
-                    selection: look.accent,
-                })
+                    value: mix(look.text_dim, look.text, 0.7),
+                    selection: fade(look.accent, 0.4),
+                });
+            (column![dial.element, input].spacing(0).align_x(Alignment::Center).into(), dial.width)
         };
-        band_row = band_row.push(field(&look, "FREQ", typed_in(Knob::Freq, hertz(self.get(band, Knob::Freq)), 78.0).into()));
+        let mut width = FIELD_LIST_WIDTH + 28.0;
+        let mut typed_knobs = vec![typed(Knob::Freq, "Freq", hertz(self.get(band, Knob::Freq)))];
         if shape.has_gain() {
-            band_row = band_row.push(field(&look, "GAIN", typed_in(Knob::Gain, format!("{:+.1} dB", self.get(band, Knob::Gain)), 68.0).into()));
+            typed_knobs.push(typed(Knob::Gain, "Gain", format!("{:+.1} dB", self.get(band, Knob::Gain))));
         }
-        band_row = band_row.push(field(&look, "Q", typed_in(Knob::Q, format!("{:.2}", self.get(band, Knob::Q)), 56.0).into()));
-        let remove = button(text("Remove").size(12)).padding([4, 10]).on_press(EqMessage::Remove(band));
+        typed_knobs.push(typed(Knob::Q, "Q", format!("{:.2}", self.get(band, Knob::Q))));
+        width += typed_knobs.iter().map(|(_, w)| w + 4.0).sum::<f32>();
+        let knobs = row(typed_knobs.into_iter().map(|(element, _)| element)).spacing(4).align_y(Alignment::End);
+        let dynamic_on = self.dynamic(band);
+        let mut more = row![].spacing(4).align_y(Alignment::End);
+        if dynamic_on {
+            for part in [p.named(dynamic_knob(band, Dynamic::Threshold), "Threshold"), p.named(dynamic_knob(band, Dynamic::Range), "Range"), p.named(ATTACK_KNOB, "Attack"), p.named(RELEASE_KNOB, "Release")] {
+                width += part.width + 4.0;
+                more = more.push(part.element);
+            }
+            width += 24.0;
+        }
+        let mut keys = column![].spacing(8).align_x(Alignment::Center);
+        let mut keys_width: f32 = 0.0;
         if shape.has_gain() {
-            let on = self.dynamic(band);
-            let toggle = button(text("Dynamic").size(12))
-                .padding([4, 10])
-                .style(move |_, _| button::Style {
-                    background: Some(if on { look.curve } else { look.raised }.into()),
-                    text_color: if on { look.background } else { look.text },
-                    border: iced::Border::default().rounded(6),
-                    ..Default::default()
-                })
-                .on_press(EqMessage::Set(vec![(dynamic_knob(band, Dynamic::On), if on { 0.0 } else { 1.0 })]));
-            band_row = band_row.push(toggle);
-            if on {
-                band_row = band_row.push(text(format!("now {:+.1} dB", self.moved_db(band))).size(12).color(look.text_dim).wrapping(iced::widget::text::Wrapping::None));
+            let toggle = toggle(look, "Dynamic", dynamic_on, EqMessage::Set(vec![(dynamic_knob(band, Dynamic::On), if dynamic_on { 0.0 } else { 1.0 })]));
+            keys_width = keys_width.max(toggle.width);
+            keys = keys.push(toggle.element);
+            if dynamic_on {
+                keys = keys.push(text(format!("now {:+.1} dB", self.moved_db(band))).size(11).font(MEDIUM).color(look.text_dim).wrapping(Wrapping::None));
             }
         }
-        let panel = container(row![band_row, horizontal_space(), remove].spacing(16).align_y(Alignment::Center))
-            .padding([8, 12])
-            .width(Length::Fill)
-            .style(move |_| container::Style {
-                background: Some(look.raised.into()),
-                border: iced::Border::default().rounded(8),
-                ..Default::default()
-            });
-        let top = row![panel, output_row].spacing(16).align_y(Alignment::Center);
-        if !self.dynamic(band) {
-            return top.into();
+        let remove = push(look, "Remove", Some(EqMessage::Remove(band)));
+        keys_width = keys_width.max(remove.width);
+        keys = keys.push(remove.element);
+        width += keys_width + 24.0 + 32.0;
+        let mut body = row![lists, panel_rule(look), knobs].spacing(12).align_y(Alignment::Center);
+        if dynamic_on {
+            body = body.push(panel_rule(look)).push(more);
         }
-        let knob_of = |label: &'static str, index: usize, low: f32, high: f32, shown: String| {
-            row![
-                text(label).size(12).color(look.text_dim),
-                thin_slider(look, DYNAMIC_SLIDER, low..=high, self.values[index], move |value| EqMessage::Set(vec![(index, (value * 10.0).round() / 10.0)])),
-                text(shown).size(12).width(DYNAMIC_READOUT).wrapping(iced::widget::text::Wrapping::None),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-        };
-        let threshold = self.values[dynamic_knob(band, Dynamic::Threshold)];
-        let range = self.values[dynamic_knob(band, Dynamic::Range)];
-        let attack = self.values[ATTACK_KNOB];
-        let release = self.values[RELEASE_KNOB];
-        let dynamics = row![
-            knob_of("Threshold", dynamic_knob(band, Dynamic::Threshold), -60.0, 0.0, format!("{threshold:.1} dB")),
-            knob_of("Range", dynamic_knob(band, Dynamic::Range), -30.0, 30.0, format!("{range:+.1} dB")),
-            knob_of("Attack", ATTACK_KNOB, 0.1, 200.0, format!("{attack:.1} ms")),
-            knob_of("Release", RELEASE_KNOB, 5.0, 2000.0, format!("{release:.0} ms")),
-        ]
-        .spacing(14)
-        .align_y(Alignment::Center);
-        column![top, dynamics].spacing(10).into()
+        body = body.push(panel_rule(look)).push(keys);
+        let panel = container(body).padding([10, 14]).style(move |_| container::Style {
+            background: Some(iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI)).add_stop(0.0, Color::from_rgba(0.13, 0.135, 0.155, 0.96)).add_stop(1.0, Color::from_rgba(0.085, 0.09, 0.105, 0.96)).into()),
+            border: iced::Border { color: Color::from_rgba(0.0, 0.0, 0.0, 0.7), width: 1.0, radius: 10.0.into() },
+            shadow: iced::Shadow { color: Color::from_rgba(0.0, 0.0, 0.0, 0.55), offset: iced::Vector::new(0.0, 6.0), blur_radius: 22.0 },
+            ..Default::default()
+        });
+        (panel.into(), width)
     }
 
     fn designs(&self, band: usize) -> ([loupe_stock::Coefficients; 8], usize) {
@@ -517,11 +541,10 @@ impl canvas::Program<EqMessage> for Graph<'_> {
         let editor = self.editor;
         let look = editor.look;
         let size = bounds.size();
-        let mut frame = Frame::new(renderer, size);
         if size.width < 2.0 || size.height < EDGE_PAD * 3.0 {
-            return vec![frame.into_geometry()];
+            return vec![Frame::new(renderer, size).into_geometry()];
         }
-        frame.fill_rectangle(Point::ORIGIN, size, look.background);
+        let mut frame = graph_frame(renderer, size, &look);
 
         for hz in MINOR_HZ {
             let x = self.x_of(size.width, hz).round();
@@ -530,7 +553,7 @@ impl canvas::Program<EqMessage> for Graph<'_> {
         for (hz, label) in MAJOR_HZ {
             let x = self.x_of(size.width, hz).round();
             frame.fill_rectangle(Point::new(x, 0.0), Size::new(1.0, size.height), look.grid_strong);
-            put_text(&mut frame, label, Point::new(x + 4.0, size.height - 6.0), 11.0, look.text_dim, (0.0, 1.0));
+            axis_text(&mut frame, label, Point::new(x + 4.0, size.height - 6.0), &look, (0.0, 1.0));
         }
         let range = self.range_db();
         let step = match editor.range {
@@ -541,31 +564,41 @@ impl canvas::Program<EqMessage> for Graph<'_> {
         let mut db = -range;
         while db <= range + 0.01 {
             let y = self.y_of(size.height, db).round();
-            let colour = if db == 0.0 { look.grid_strong } else { look.grid };
+            let colour = if db == 0.0 { fade(look.text, 0.16) } else { look.grid };
             frame.fill_rectangle(Point::new(0.0, y), Size::new(size.width, 1.0), colour);
-            if db != 0.0 && db.abs() < range + 0.01 {
-                put_text(&mut frame, &format!("{db:+.0}"), Point::new(size.width - 6.0, y - 2.0), 10.5, look.text_dim, (1.0, 1.0));
+            if db.abs() < range + 0.01 {
+                let label = if db == 0.0 { "0".to_string() } else { format!("{db:+.0}") };
+                axis_text(&mut frame, &label, Point::new(size.width - 8.0, y), &look, (1.0, 0.5));
             }
             db += step;
         }
 
         if editor.scopes.is_some() {
-            for (spectrum, colour) in [(&editor.before, look.spectrum_before), (&editor.after, look.spectrum)] {
+            for (spectrum, colour, line) in [(&editor.before, look.spectrum_before, None), (&editor.after, look.spectrum, Some(fade(look.spectrum, 0.55)))] {
+                let mut points = Vec::with_capacity((size.width / COLUMN_PX) as usize + 2);
+                let mut x = 0.0;
+                while x <= size.width {
+                    let from = self.hz_at(size.width, x);
+                    let to = self.hz_at(size.width, x + COLUMN_PX);
+                    let level = spectrum.level_at(from, to);
+                    let share = (SPECTRUM_CEILING_DB - level) / (SPECTRUM_CEILING_DB - SPECTRUM_FLOOR_DB);
+                    points.push(Point::new(x, (share * size.height).clamp(0.0, size.height)));
+                    x += COLUMN_PX;
+                }
                 let shape = Path::new(|b| {
                     b.move_to(Point::new(0.0, size.height));
-                    let mut x = 0.0;
-                    while x <= size.width {
-                        let from = self.hz_at(size.width, x);
-                        let to = self.hz_at(size.width, x + COLUMN_PX);
-                        let level = spectrum.level_at(from, to);
-                        let share = (SPECTRUM_CEILING_DB - level) / (SPECTRUM_CEILING_DB - SPECTRUM_FLOOR_DB);
-                        b.line_to(Point::new(x, (share * size.height).clamp(0.0, size.height)));
-                        x += COLUMN_PX;
+                    for point in &points {
+                        b.line_to(*point);
                     }
                     b.line_to(Point::new(size.width, size.height));
                     b.close();
                 });
-                frame.fill(&shape, colour);
+                let top = points.iter().map(|p| p.y).fold(size.height, f32::min);
+                let fill = canvas::gradient::Linear::new(Point::new(0.0, top), Point::new(0.0, size.height)).add_stop(0.0, colour).add_stop(1.0, fade(colour, colour.a * 0.25));
+                frame.fill(&shape, fill);
+                if let Some(line) = line {
+                    frame.stroke(&polyline(&points), Stroke::default().with_color(line).with_width(1.0));
+                }
             }
         }
 
@@ -584,36 +617,27 @@ impl canvas::Program<EqMessage> for Graph<'_> {
             points
         };
         let zero = self.y_of(size.height, 0.0);
+        let area_to_zero = |points: &[Point]| {
+            Path::new(|b| {
+                b.move_to(Point::new(0.0, zero));
+                for point in points {
+                    b.line_to(*point);
+                }
+                b.line_to(Point::new(size.width + 1.0, zero));
+                b.close();
+            })
+        };
         for (slot, band) in audible.iter().enumerate() {
             let points = curve_of(std::slice::from_ref(&designs[slot]), 0.0);
             let colour = look.band(*band);
             let selected = editor.selected == Some(*band);
-            if selected {
-                let area = Path::new(|b| {
-                    b.move_to(Point::new(0.0, zero));
-                    for point in &points {
-                        b.line_to(*point);
-                    }
-                    b.line_to(Point::new(size.width + 1.0, zero));
-                    b.close();
-                });
-                frame.fill(&area, fade(colour, 0.18));
-            }
-            let line = Path::new(|b| {
-                b.move_to(points[0]);
-                for point in &points[1..] {
-                    b.line_to(*point);
-                }
-            });
-            frame.stroke(&line, Stroke::default().with_color(fade(colour, if selected { 0.9 } else { 0.35 })).with_width(1.0));
+            frame.fill(&area_to_zero(&points), fade(colour, if selected { 0.2 } else { 0.06 }));
+            frame.stroke(&polyline(&points), Stroke::default().with_color(fade(colour, if selected { 0.95 } else { 0.4 })).with_width(if selected { 1.4 } else { 1.0 }));
         }
         let total = curve_of(&designs, editor.values[OUTPUT_KNOB]);
-        let line = Path::new(|b| {
-            b.move_to(total[0]);
-            for point in &total[1..] {
-                b.line_to(*point);
-            }
-        });
+        let line = polyline(&total);
+        frame.stroke(&line, Stroke::default().with_color(fade(look.curve, 0.06)).with_width(8.0));
+        frame.stroke(&line, Stroke::default().with_color(fade(look.curve, 0.13)).with_width(4.0));
         frame.stroke(&line, Stroke::default().with_color(look.curve).with_width(2.0));
 
         let hovered = grip.hover.and_then(|p| self.node_at(size, p));
@@ -627,17 +651,26 @@ impl canvas::Program<EqMessage> for Graph<'_> {
                 let reach = self.range_db();
                 let y_at = |db: f32| self.y_of(size.height, db.clamp(-reach, reach));
                 let end = y_at(gain + editor.values[dynamic_knob(band, Dynamic::Range)]);
-                frame.fill_rectangle(Point::new(at.x - RANGE_BAR / 2.0, at.y.min(end)), Size::new(RANGE_BAR, (end - at.y).abs()), fade(colour, 0.45));
+                let bar = Path::rounded_rectangle(Point::new(at.x - RANGE_BAR / 2.0, at.y.min(end)), Size::new(RANGE_BAR, (end - at.y).abs()), (RANGE_BAR / 2.0).into());
+                frame.fill(&bar, fade(colour, 0.45));
                 frame.stroke(&Path::circle(Point::new(at.x, y_at(gain + editor.moved_db(band))), NODE_RADIUS - 2.0), Stroke::default().with_color(colour).with_width(1.5));
             }
-            let dot = Path::circle(at, radius);
-            frame.fill(&dot, if editor.band_audible(band) { colour } else { fade(colour, 0.45) });
-            if editor.selected == Some(band) {
+            let selected = editor.selected == Some(band);
+            if selected || lit {
+                frame.fill(&Path::circle(at, radius + 7.0), fade(colour, 0.14));
+            }
+            frame.fill(&Path::circle(Point::new(at.x, at.y + 1.5), radius + 1.0), Color::from_rgba(0.0, 0.0, 0.0, 0.5));
+            let body = if editor.band_audible(band) { colour } else { fade(colour, 0.45) };
+            let top = Point::new(at.x, at.y - radius);
+            let bottom = Point::new(at.x, at.y + radius);
+            frame.fill(&Path::circle(at, radius), canvas::gradient::Linear::new(top, bottom).add_stop(0.0, crate::look::lift(body, 0.12)).add_stop(1.0, body));
+            frame.stroke(&Path::circle(at, radius - 0.5), Stroke::default().with_color(Color::from_rgba(0.0, 0.0, 0.0, 0.35)).with_width(1.0));
+            if selected {
                 frame.stroke(&Path::circle(at, radius + 3.0), Stroke::default().with_color(look.text).with_width(1.5));
             }
             let place = editor.get(band, Knob::Place) as usize;
             if place > 0 {
-                put_text(&mut frame, ["", "L", "R", "M", "S"][place.min(4)], at, 9.5, Color::BLACK, (0.5, 0.5));
+                put_text_in(&mut frame, ["", "L", "R", "M", "S"][place.min(4)], at, 9.5, Color::from_rgb(0.08, 0.08, 0.09), (0.5, 0.5), SEMIBOLD);
             }
         }
 
@@ -646,21 +679,24 @@ impl canvas::Program<EqMessage> for Graph<'_> {
             let at = self.node(size, band);
             let mut label = hertz(editor.get(band, Knob::Freq));
             if editor.shape(band).has_gain() {
-                label.push_str(&format!("  {:+.1} dB", editor.get(band, Knob::Gain)));
+                label.push_str(&format!("   {:+.1} dB", editor.get(band, Knob::Gain)));
             }
-            label.push_str(&format!("  Q {:.2}", editor.get(band, Knob::Q)));
-            let width = label.chars().count() as f32 * 6.6 + 16.0;
-            let left = (at.x - width / 2.0).clamp(4.0, size.width - width - 4.0);
-            let top = if at.y > 40.0 { at.y - 34.0 } else { at.y + 16.0 };
-            let pill = Path::rounded_rectangle(Point::new(left, top), Size::new(width, 20.0), 5.0.into());
-            frame.fill(&pill, fade(look.panel, 0.95));
-            put_text(&mut frame, &label, Point::new(left + width / 2.0, top + 10.0), 11.5, look.text, (0.5, 0.5));
+            label.push_str(&format!("   Q {:.2}", editor.get(band, Knob::Q)));
+            let width = label.chars().count() as f32 * 6.4 + 22.0;
+            let left = (at.x - width / 2.0).clamp(6.0, size.width - width - 6.0);
+            let top = if at.y > 44.0 { at.y - 38.0 } else { at.y + 18.0 };
+            let pill = Path::rounded_rectangle(Point::new(left, top), Size::new(width, 22.0), 6.0.into());
+            frame.fill(&Path::rounded_rectangle(Point::new(left, top + 2.0), Size::new(width, 22.0), 6.0.into()), Color::from_rgba(0.0, 0.0, 0.0, 0.35));
+            frame.fill(&pill, fade(look.raised, 0.97));
+            frame.stroke(&pill, Stroke::default().with_color(fade(look.band(band), 0.45)).with_width(1.0));
+            put_text_in(&mut frame, &label, Point::new(left + width / 2.0, top + 11.0), 11.0, look.text, (0.5, 0.5), MEDIUM);
         }
 
         if !(0..BANDS).any(|band| editor.in_use(band)) {
-            let middle = Point::new(size.width / 2.0, size.height / 2.0 - 22.0);
-            put_text(&mut frame, "Double click to add a band", middle, 13.0, look.text_dim, (0.5, 0.5));
+            let middle = Point::new(size.width / 2.0, size.height / 2.0 - 24.0);
+            put_text_in(&mut frame, "Double click to add a band", middle, 13.0, look.text_dim, (0.5, 0.5), MEDIUM);
         }
+        seal(&mut frame, size, &look);
         vec![frame.into_geometry()]
     }
 
@@ -676,18 +712,22 @@ impl canvas::Program<EqMessage> for Graph<'_> {
 }
 
 
-fn thin_slider<'a>(look: Look, width: f32, range: std::ops::RangeInclusive<f32>, value: f32, on_change: impl Fn(f32) -> EqMessage + 'a) -> iced::widget::Slider<'a, f32, EqMessage> {
-    slider(range, value, on_change).step(0.1).width(width).style(move |_, _| slider::Style {
-        rail: slider::Rail {
-            backgrounds: (look.curve.into(), look.grid_strong.into()),
-            width: 3.0,
-            border: iced::Border::default().rounded(2),
-        },
-        handle: slider::Handle {
-            shape: slider::HandleShape::Circle { radius: 6.0 },
-            background: look.text.into(),
-            border_width: 0.0,
-            border_color: Color::TRANSPARENT,
-        },
-    })
+
+fn set_one(index: usize, value: f32) -> EqMessage {
+    EqMessage::Set(vec![(index, value)])
+}
+
+fn panel_rule<'a>(look: Look) -> Element<'a, EqMessage> {
+    container(Space::new(1, 84))
+        .style(move |_| container::Style {
+            background: Some(
+                iced::gradient::Linear::new(iced::Radians(std::f32::consts::PI))
+                    .add_stop(0.0, fade(look.text, 0.0))
+                    .add_stop(0.5, fade(look.text, 0.09))
+                    .add_stop(1.0, fade(look.text, 0.0))
+                    .into(),
+            ),
+            ..Default::default()
+        })
+        .into()
 }

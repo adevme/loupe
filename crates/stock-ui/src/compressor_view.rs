@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use iced::widget::canvas::{self, Geometry, Path, Stroke};
-use iced::widget::{column, container, row, Space};
-use iced::{mouse, Alignment, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
+use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use loupe_stock::{Compressor, History, Moment};
 
-use crate::kit::{choice, dial, graph_frame, knob_row, panel, put_text, toggle};
+use crate::kit::*;
 use crate::knobs::{change, Change, Knobs};
 use crate::look::{fade, Look};
 
@@ -13,8 +12,11 @@ const SHOWN_MOMENTS: usize = 700;
 const LOWEST_DB: f32 = -60.0;
 const HIGHEST_DB: f32 = 6.0;
 const DEEPEST_SHOWN: f32 = 30.0;
-const TRANSFER_SIZE: f32 = 250.0;
-const GAP: f32 = 14.0;
+const TRANSFER_SIZE: f32 = 260.0;
+const READOUT_WIDTH: f32 = 132.0;
+const RECENT_MOMENTS: usize = 30;
+pub(crate) const INSET: f32 = 10.0;
+pub(crate) const GAP: f32 = 10.0;
 
 pub struct CompressorEditor {
     knobs: Knobs,
@@ -25,6 +27,7 @@ pub struct CompressorEditor {
 
 impl CompressorEditor {
     pub fn new(history: Option<Arc<History>>, look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::COMPRESSOR);
         Self { knobs: Knobs::of(&Compressor::new()), history, moments: vec![Moment::default(); SHOWN_MOMENTS], look }
     }
 
@@ -48,67 +51,56 @@ impl CompressorEditor {
         let look = self.look;
         let values = &self.knobs.values;
         let params = self.knobs.params;
-        let knob = |index: usize, colour| dial(look, params, values, index, colour, change);
-        let shape = knob_row(vec![
-            knob(0, look.accent),
-            knob(1, look.accent),
-            knob(4, look.accent),
-            knob(5, look.accent),
-            knob(2, look.bands[4]),
-            knob(3, look.bands[4]),
-        ]);
-        let level = knob_row(vec![knob(6, look.bands[3]), knob(8, look.bands[3]), knob(11, look.bands[3]), knob(10, look.bands[6])]);
-        let extras = column![
-            choice(params[9], values[9], |value| Change(9, value)),
-            toggle(look, "Auto gain", self.knobs.on(7), Change(7, if self.knobs.on(7) { 0.0 } else { 1.0 })),
-        ]
-        .spacing(10);
-        let controls = row![shape, Space::with_width(18), level, Space::with_width(Length::Fill), extras].align_y(Alignment::Center);
-        let graphs = container(canvas::Canvas::new(Scroll { editor: self }).width(Length::Fill).height(Length::Fill)).padding([12, 12]);
-        let backdrop = container(graphs).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            background: Some(look.background.into()),
-            ..Default::default()
-        });
-        column![backdrop, panel(look, controls)].into()
+        let auto = self.knobs.on(7);
+        shell(look, "Compressor", "Dynamics", move || canvas::Canvas::new(Scroll { editor: self }).width(Length::Fill).height(Length::Fill).into(), move |compact| {
+            let p = Panel::new(look, compact, params, values, change);
+            vec![vec![
+                section(look, "Compression", vec![p.hero(0), p.hero(1)]),
+                section(look, "Envelope", vec![p.knob(2), p.knob(3), p.knob(4), p.knob(5)]),
+                section(look, "Character", vec![stack(vec![choice(look, params[9], values[9], |value| Change(9, value)), toggle(look, "Auto gain", auto, Change(7, if auto { 0.0 } else { 1.0 }))])]),
+                section(look, "Output", vec![p.named(10, "SC low cut"), p.knob(6), p.knob(8), p.knob(11)]),
+            ]]
+        })
     }
 }
 
 fn draw_transfer(frame: &mut canvas::Frame, size: Size, editor: &CompressorEditor) {
-        let look = editor.look;
-        frame.fill_rectangle(Point::ORIGIN, size, look.panel);
-        let at = |input: f32, output: f32| {
-            let share = |db: f32| ((db - LOWEST_DB) / -LOWEST_DB).clamp(0.0, 1.0);
-            Point::new(share(input) * size.width, size.height - share(output) * size.height)
-        };
-        for db in [-48.0, -36.0, -24.0, -12.0] {
-            let p = at(db, db);
-            frame.fill_rectangle(Point::new(p.x, 0.0), Size::new(1.0, size.height), look.grid);
-            frame.fill_rectangle(Point::new(0.0, p.y), Size::new(size.width, 1.0), look.grid);
-        }
-        frame.stroke(&Path::line(at(LOWEST_DB, LOWEST_DB), at(0.0, 0.0)), Stroke::default().with_color(look.grid_strong).with_width(1.0));
-        let curve = Compressor::curve_of(&editor.knobs.values);
-        let makeup = editor.knobs.values[6];
-        let line = Path::new(|b| {
-            for step in 0..=120 {
-                let input = LOWEST_DB + -LOWEST_DB * step as f32 / 120.0;
-                let point = at(input, input + curve.reduction(input) + makeup);
-                if step == 0 {
-                    b.move_to(point);
-                } else {
-                    b.line_to(point);
-                }
-            }
-        });
-        frame.stroke(&line, Stroke::default().with_color(look.accent).with_width(2.0));
-        let threshold = at(curve.threshold, curve.threshold);
-        frame.fill_rectangle(Point::new(threshold.x, 0.0), Size::new(1.0, size.height), fade(look.accent, 0.3));
-        if let Some(last) = editor.moments.last().filter(|moment| moment.input > 1e-4) {
-            let input = loupe_stock_db(last.input);
-            let dot = at(input, input + curve.reduction(input) + makeup);
-            frame.fill(&Path::circle(dot, 5.0), look.text);
-        }
-        put_text(frame, "In", Point::new(size.width - 6.0, size.height - 6.0), 11.0, look.text_dim, (1.0, 1.0));
-        put_text(frame, "Out", Point::new(6.0, 6.0), 11.0, look.text_dim, (0.0, 0.0));
+    let look = editor.look;
+    draw_card(frame, Point::ORIGIN, size, &look);
+    let pad = 12.0;
+    let inner = Size::new(size.width - pad * 2.0, size.height - pad * 2.0);
+    let at = |input: f32, output: f32| {
+        let share = |db: f32| ((db - LOWEST_DB) / -LOWEST_DB).clamp(0.0, 1.0);
+        Point::new(pad + share(input) * inner.width, pad + inner.height - share(output) * inner.height)
+    };
+    for db in [-48.0, -36.0, -24.0, -12.0] {
+        let p = at(db, db);
+        frame.fill_rectangle(Point::new(p.x.round(), pad), Size::new(1.0, inner.height), look.grid);
+        frame.fill_rectangle(Point::new(pad, p.y.round()), Size::new(inner.width, 1.0), look.grid);
+    }
+    frame.stroke(&Path::line(at(LOWEST_DB, LOWEST_DB), at(0.0, 0.0)), Stroke::default().with_color(look.grid_strong).with_width(1.0));
+    let curve = Compressor::curve_of(&editor.knobs.values);
+    let makeup = editor.knobs.values[6];
+    let points: Vec<Point> = (0..=120)
+        .map(|step| {
+            let input = LOWEST_DB + -LOWEST_DB * step as f32 / 120.0;
+            at(input, input + curve.reduction(input) + makeup)
+        })
+        .collect();
+    fill_under(frame, &points, pad + inner.height, fade(look.accent, 0.16), fade(look.accent, 0.0));
+    let line = polyline(&points);
+    frame.stroke(&line, Stroke::default().with_color(fade(look.accent, 0.18)).with_width(6.0));
+    frame.stroke(&line, Stroke::default().with_color(look.accent).with_width(2.0));
+    let threshold = at(curve.threshold, curve.threshold);
+    frame.fill_rectangle(Point::new(threshold.x.round(), pad), Size::new(1.0, inner.height), fade(look.accent, 0.3));
+    if let Some(last) = editor.moments.last().filter(|moment| moment.input > 1e-4) {
+        let input = loupe_stock_db(last.input);
+        let dot = at(input, input + curve.reduction(input) + makeup);
+        frame.fill(&Path::circle(dot, 7.0), fade(look.text, 0.15));
+        frame.fill(&Path::circle(dot, 4.0), look.text);
+    }
+    axis_text(frame, "IN", Point::new(size.width - pad - 2.0, size.height - pad - 2.0), &look, (1.0, 1.0));
+    axis_text(frame, "OUT", Point::new(pad + 2.0, pad + 2.0), &look, (0.0, 0.0));
 }
 
 struct Scroll<'a> {
@@ -125,16 +117,27 @@ impl canvas::Program<Change> for Scroll<'_> {
             return Vec::new();
         }
         let mut frame = graph_frame(renderer, size, &look);
-        let side = TRANSFER_SIZE.min(size.height - 24.0).max(0.0);
+        let side = TRANSFER_SIZE.min(size.height - INSET * 2.0).max(0.0);
         frame.with_save(|frame| {
-            frame.translate(Vector::new(0.0, (size.height - side) / 2.0));
+            frame.translate(Vector::new(INSET, INSET));
             draw_transfer(frame, Size::new(side, side), self.editor);
         });
+        let left = INSET + side + GAP;
+        let levels = Size::new((size.width - left - READOUT_WIDTH - GAP - INSET).max(1.0), size.height);
         frame.with_save(|frame| {
-            frame.translate(Vector::new(side + GAP, 0.0));
-            let rest = Size::new((size.width - side - GAP).max(1.0), size.height);
-            draw_levels(frame, rest, &look, &self.editor.moments, Some(self.editor.knobs.values[0]), DEEPEST_SHOWN);
+            frame.translate(Vector::new(left, 0.0));
+            draw_levels(frame, levels, &look, &self.editor.moments, Some(self.editor.knobs.values[0]), DEEPEST_SHOWN);
         });
+        frame.with_save(|frame| {
+            frame.translate(Vector::new(size.width - READOUT_WIDTH - INSET, INSET));
+            let recent = &self.editor.moments[self.editor.moments.len().saturating_sub(RECENT_MOMENTS)..];
+            let deepest = recent.iter().map(|moment| moment.reduction).fold(0.0f32, f32::min);
+            let main = Reading::new("Reduction", format!("{deepest:.1}"), "dB", look.danger);
+            let curve = Compressor::curve_of(&self.editor.knobs.values);
+            let rest = [Reading::new("Threshold", format!("{:.1}", curve.threshold), "dB", look.text)];
+            draw_readouts(frame, Size::new(READOUT_WIDTH, size.height - INSET * 2.0), &look, &main, Some((-deepest / DEEPEST_SHOWN, look.danger)), &rest);
+        });
+        seal(&mut frame, size, &look);
         vec![frame.into_geometry()]
     }
 }
@@ -143,45 +146,37 @@ pub(crate) fn loupe_stock_db(gain: f32) -> f32 {
     20.0 * gain.max(1e-6).log10()
 }
 
+/// The scrolling level history shared by the dynamics plugins: input as a grey shadow,
+/// output as a blue body, gain reduction hanging from the top in red.
 pub(crate) fn draw_levels(frame: &mut canvas::Frame, size: Size, look: &Look, moments: &[Moment], line_at: Option<f32>, deepest: f32) {
+    let top = INSET + 4.0;
+    let bottom = size.height - INSET - 4.0;
+    let tall = (bottom - top).max(1.0);
+    let label_room = 28.0;
+    let width = (size.width - label_room).max(1.0);
     let level_y = |gain: f32| {
         let db = loupe_stock_db(gain).clamp(LOWEST_DB, HIGHEST_DB);
-        size.height - (db - LOWEST_DB) / (HIGHEST_DB - LOWEST_DB) * size.height
+        bottom - (db - LOWEST_DB) / (HIGHEST_DB - LOWEST_DB) * tall
     };
     for db in [0.0, -6.0, -12.0, -24.0, -36.0, -48.0] {
-        let y = level_y(10f32.powf(db / 20.0)).round();
-        frame.fill_rectangle(Point::new(0.0, y), Size::new(size.width, 1.0), look.grid);
-        put_text(frame, &format!("{db:.0}"), Point::new(size.width - 6.0, y - 2.0), 10.5, look.text_dim, (1.0, 1.0));
+        let y = level_y(10f32.powf(db / 20.0));
+        guide(frame, Point::new(0.0, y), width, if db == 0.0 { look.grid_strong } else { look.grid });
+        axis_text(frame, &format!("{db:.0}"), Point::new(size.width - 2.0, y), look, (1.0, 0.5));
     }
-    let step = size.width / moments.len().max(1) as f32;
-    let bars = |frame: &mut canvas::Frame, pick: fn(&Moment) -> f32, colour| {
-        for (i, moment) in moments.iter().enumerate() {
-            let top = level_y(pick(moment));
-            if top < size.height {
-                frame.fill_rectangle(Point::new(i as f32 * step, top), Size::new(step + 1.0, size.height - top), colour);
-            }
-        }
-    };
-    bars(frame, |moment| moment.input, fade(look.text, 0.12));
-    bars(frame, |moment| moment.output, fade(look.bands[5], 0.45));
+    let step = width / (moments.len().max(2) - 1) as f32;
+    let trace = |pick: fn(&Moment) -> f32| -> Vec<Point> { moments.iter().enumerate().map(|(i, moment)| Point::new(i as f32 * step, level_y(pick(moment)))).collect() };
+    let input = trace(|moment| moment.input);
+    fill_under(frame, &input, bottom, fade(look.text, 0.06), fade(look.text, 0.01));
+    let output = trace(|moment| moment.output);
+    let blue = look.accent;
+    fill_under(frame, &output, bottom, fade(blue, 0.38), fade(blue, 0.05));
+    frame.stroke(&polyline(&output), Stroke::default().with_color(fade(blue, 0.9)).with_width(1.2));
     if let Some(db) = line_at {
         let y = level_y(10f32.powf(db / 20.0));
-        frame.fill_rectangle(Point::new(0.0, y), Size::new(size.width, 1.0), fade(look.accent, 0.6));
+        dashed(frame, Point::new(0.0, y), width, fade(look.accent, 0.75));
     }
-    let reduction_y = |db: f32| (-db).clamp(0.0, deepest) / deepest * size.height * 0.5;
-    let reduction = Path::new(|b| {
-        for (i, moment) in moments.iter().enumerate() {
-            let point = Point::new(i as f32 * step, reduction_y(moment.reduction));
-            if i == 0 {
-                b.move_to(point);
-            } else {
-                b.line_to(point);
-            }
-        }
-    });
-    frame.stroke(&reduction, Stroke::default().with_color(look.danger).with_width(1.5));
-    if let Some(now) = moments.last() {
-        let text = format!("{:.1} dB", now.reduction.min(0.0));
-        put_text(frame, &text, Point::new(12.0, 10.0), 13.0, look.danger, (0.0, 0.0));
-    }
+    let reduction_y = |db: f32| top + (-db).clamp(0.0, deepest) / deepest * tall * 0.5;
+    let reduction: Vec<Point> = moments.iter().enumerate().map(|(i, moment)| Point::new(i as f32 * step, reduction_y(moment.reduction))).collect();
+    fill_under(frame, &reduction, top, fade(look.danger, 0.3), fade(look.danger, 0.04));
+    frame.stroke(&polyline(&reduction), Stroke::default().with_color(look.danger).with_width(1.6));
 }

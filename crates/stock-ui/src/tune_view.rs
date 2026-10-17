@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use iced::widget::canvas::{self, Geometry, Path, Stroke};
-use iced::widget::{column, container, row, Space};
-use iced::{mouse, Alignment, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
+use iced::{mouse, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use loupe_stock::{tune_note_name, History, Moment, Tune, SILENT_NOTE, TUNE_STEPS};
 
-use crate::kit::{choice, dial, graph_frame, knob_row, panel, put_text};
+use crate::compressor_view::{GAP, INSET};
+use crate::kit::*;
 use crate::knobs::{change, Change, Knobs};
 use crate::look::{fade, Look};
 
@@ -13,7 +13,6 @@ const SHOWN_MOMENTS: usize = 800;
 const RECENT_MOMENTS: usize = 20;
 const NOTES_SHOWN: f32 = 14.0;
 const READOUT_WIDTH: f32 = 150.0;
-const GAP: f32 = 14.0;
 const LABEL_WIDTH: f32 = 34.0;
 
 pub struct TuneEditor {
@@ -26,6 +25,7 @@ pub struct TuneEditor {
 
 impl TuneEditor {
     pub fn new(history: Option<Arc<History>>, look: Look) -> Self {
+        let look = look.tinted(crate::look::accents::TUNE);
         Self { knobs: Knobs::of(&Tune::new()), history, moments: vec![Moment::default(); SHOWN_MOMENTS], middle: 60.0, look }
     }
 
@@ -54,19 +54,14 @@ impl TuneEditor {
         let look = self.look;
         let values = &self.knobs.values;
         let params = self.knobs.params;
-        let key = column![choice(params[0], values[0], |value| Change(0, value)), choice(params[1], values[1], |value| Change(1, value))].spacing(10).width(170);
-        let knobs = knob_row(vec![
-            dial(look, params, values, 2, look.accent, change),
-            dial(look, params, values, 3, look.bands[3], change),
-            dial(look, params, values, 4, look.bands[6], change),
-        ]);
-        let controls = row![key, Space::with_width(18), knobs, Space::with_width(Length::Fill)].align_y(Alignment::Center);
-        let graph = canvas::Canvas::new(Lines { editor: self }).width(Length::Fill).height(Length::Fill);
-        let backdrop = container(container(graph).padding([12, 12])).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
-            background: Some(look.background.into()),
-            ..Default::default()
-        });
-        column![backdrop, panel(look, controls)].into()
+        shell(look, "Tune", "Pitch correction", move || canvas::Canvas::new(Lines { editor: self }).width(Length::Fill).height(Length::Fill).into(), move |compact| {
+            let p = Panel::new(look, compact, params, values, change);
+            vec![vec![
+                section(look, "Scale", vec![stack(vec![choice(look, params[0], values[0], |value| Change(0, value)), choice(look, params[1], values[1], |value| Change(1, value))])]),
+                section(look, "Correction", vec![p.hero(2), p.hero(3)]),
+                section(look, "Voice", vec![p.knob(4)]),
+            ]]
+        })
     }
 }
 
@@ -85,12 +80,24 @@ impl canvas::Program<Change> for Lines<'_> {
             return Vec::new();
         }
         let mut frame = graph_frame(renderer, size, &look);
-        let rest = Size::new((size.width - READOUT_WIDTH - GAP).max(1.0), size.height);
-        draw_notes(&mut frame, rest, editor);
         frame.with_save(|frame| {
-            frame.translate(Vector::new(rest.width + GAP, 0.0));
-            draw_readout(frame, Size::new(READOUT_WIDTH, size.height), editor);
+            frame.translate(Vector::new(INSET, INSET));
+            let rest = Size::new((size.width - READOUT_WIDTH - GAP - INSET * 2.0).max(1.0), (size.height - INSET * 2.0).max(1.0));
+            draw_notes(frame, rest, editor);
         });
+        frame.with_save(|frame| {
+            frame.translate(Vector::new(size.width - READOUT_WIDTH - INSET, INSET));
+            let recent = &editor.moments[editor.moments.len().saturating_sub(RECENT_MOMENTS)..];
+            let latest = recent.iter().rev().find(|moment| moment.input >= 0.0);
+            let (note, off, moved) = match latest {
+                Some(moment) => (tune_note_name(moment.output), format!("{:+.0}", (moment.input - moment.output) * 100.0), format!("{:+.0}", moment.reduction * 100.0)),
+                None => ("-".to_string(), "-".to_string(), "-".to_string()),
+            };
+            let main = Reading::new("Note", note, "", look.accent);
+            let rest = [Reading::new("Sung off by", off, "cents", look.text), Reading::new("Moved by", moved, "cents", look.text)];
+            draw_readouts(frame, Size::new(READOUT_WIDTH, size.height - INSET * 2.0), &look, &main, None, &rest);
+        });
+        seal(&mut frame, size, &look);
         vec![frame.into_geometry()]
     }
 }
@@ -108,10 +115,10 @@ fn draw_notes(frame: &mut canvas::Frame, size: Size, editor: &TuneEditor) {
             continue;
         }
         let in_key = scale.contains(&((note - key).rem_euclid(12) as u8));
-        let colour = if in_key { look.grid_strong } else { fade(look.grid, 0.5) };
-        frame.fill_rectangle(Point::new(LABEL_WIDTH, y), Size::new(size.width - LABEL_WIDTH, 1.0), colour);
+        let colour = if in_key { look.grid_strong } else { look.grid };
+        frame.fill_rectangle(Point::new(LABEL_WIDTH, y.round()), Size::new(size.width - LABEL_WIDTH, 1.0), colour);
         if in_key {
-            put_text(frame, &tune_note_name(note as f32), Point::new(4.0, y), 10.5, look.text_dim, (0.0, 0.5));
+            axis_text(frame, &tune_note_name(note as f32), Point::new(4.0, y), &look, (0.0, 0.5));
         }
     }
     let count = editor.moments.len();
@@ -136,27 +143,9 @@ fn draw_notes(frame: &mut canvas::Frame, size: Size, editor: &TuneEditor) {
             }
         })
     };
-    frame.stroke(&trace(|moment| moment.output), Stroke::default().with_color(fade(look.accent, 0.55)).with_width(5.0));
-    frame.stroke(&trace(|moment| if moment.input < 0.0 { SILENT_NOTE } else { moment.input + moment.reduction }), Stroke::default().with_color(look.accent).with_width(1.6));
+    let target = trace(|moment| moment.output);
+    frame.stroke(&target, Stroke::default().with_color(fade(look.accent, 0.16)).with_width(9.0));
+    frame.stroke(&target, Stroke::default().with_color(fade(look.accent, 0.45)).with_width(4.0));
+    frame.stroke(&trace(|moment| if moment.input < 0.0 { SILENT_NOTE } else { moment.input + moment.reduction }), Stroke::default().with_color(look.accent).with_width(1.8));
     frame.stroke(&trace(|moment| moment.input), Stroke::default().with_color(fade(look.text_dim, 0.7)).with_width(1.0));
-}
-
-fn draw_readout(frame: &mut canvas::Frame, size: Size, editor: &TuneEditor) {
-    let look = editor.look;
-    frame.fill_rectangle(Point::ORIGIN, size, look.panel);
-    let recent = &editor.moments[editor.moments.len().saturating_sub(RECENT_MOMENTS)..];
-    let latest = recent.iter().rev().find(|moment| moment.input >= 0.0);
-    let middle = size.width / 2.0;
-    put_text(frame, "Note", Point::new(middle, 18.0), 11.5, look.text_dim, (0.5, 0.0));
-    let (note, off, moved) = match latest {
-        Some(moment) => (tune_note_name(moment.output), format!("{:+.0}", (moment.input - moment.output) * 100.0), format!("{:+.0}", moment.reduction * 100.0)),
-        None => ("-".to_string(), "-".to_string(), "-".to_string()),
-    };
-    put_text(frame, &note, Point::new(middle, 36.0), 30.0, look.accent, (0.5, 0.0));
-    put_text(frame, "Sung off by", Point::new(middle, 90.0), 11.5, look.text_dim, (0.5, 0.0));
-    put_text(frame, &off, Point::new(middle, 108.0), 22.0, look.text, (0.5, 0.0));
-    put_text(frame, "cents", Point::new(middle, 134.0), 11.5, look.text_dim, (0.5, 0.0));
-    put_text(frame, "Moved by", Point::new(middle, 162.0), 11.5, look.text_dim, (0.5, 0.0));
-    put_text(frame, &moved, Point::new(middle, 180.0), 22.0, look.text, (0.5, 0.0));
-    put_text(frame, "cents", Point::new(middle, 206.0), 11.5, look.text_dim, (0.5, 0.0));
 }

@@ -3,7 +3,7 @@
 use std::f32::consts::TAU;
 use std::time::Duration;
 
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Subscription, Task, Theme};
 use loupe_stock::{KeyListener, Tune, Chorus, Gate, Meter, Multiband, Transient, Compressor, Deesser, Saturation, Delay, Effect, Equalizer, Limiter, Reverb, Rider, Doubler, Denoise};
 use loupe_stock_ui::{KeyEditor, KeyMessage, TuneEditor, Change, ChorusEditor, GateEditor, MeterEditor, MultibandEditor, TransientEditor, CompressorEditor, DeesserEditor, SaturationEditor, DelayEditor, EqEditor, EqMessage, LimiterEditor, Look, ReverbEditor, RiderEditor, DoublerEditor, DenoiseEditor};
@@ -177,6 +177,21 @@ impl Preview {
             key,
             look,
         };
+        let mut preview = preview;
+        if std::env::var_os("PREVIEW_BANDS").is_some() {
+            use loupe_stock::{dynamic_knob, knob, BandShape, Dynamic, Knob};
+            let bands = [
+                (1usize, BandShape::LowCut, 90.0f32, 0.0f32, 0.71f32, false),
+                (2, BandShape::Bell, 380.0, -3.5, 2.0, false),
+                (0, BandShape::Bell, 2500.0, 4.0, 1.2, true),
+            ];
+            for (band, shape, hz, gain, q, dynamic) in bands {
+                let changes = vec![(knob(band, Knob::On), 1.0), (knob(band, Knob::Shape), shape.index()), (knob(band, Knob::Freq), hz), (knob(band, Knob::Gain), gain), (knob(band, Knob::Q), q), (dynamic_knob(band, Dynamic::On), if dynamic { 1.0 } else { 0.0 })];
+                for (index, value) in preview.eq_editor.update(EqMessage::Add { band, changes }) {
+                    preview.eq.set(index, value);
+                }
+            }
+        }
         (preview, Task::none())
     }
 
@@ -226,7 +241,10 @@ impl Preview {
                     9 => self.gate_editor.update(change),
                     10 => self.meter_editor.update(change),
                     11 => self.multiband_editor.update(change),
-                    _ => self.tune_editor.update(change),
+                    12 => self.tune_editor.update(change),
+                    14 => self.rider_editor.update(change),
+                    15 => self.doubler_editor.update(change),
+                    _ => self.denoise_editor.update(change),
                 };
                 for (index, value) in changes {
                     self.effect().set(index, value);
@@ -259,8 +277,8 @@ impl Preview {
         let look = self.look;
         let tabs = row(TABS.iter().enumerate().map(|(index, name)| {
             let chosen = index == self.tab;
-            button(text(name.trim_start_matches("Loupe ")).size(12.5))
-                .padding([6, 10])
+            button(text(name.trim_start_matches("Loupe ")).size(11.5).wrapping(iced::widget::text::Wrapping::None))
+                .padding([5, 7])
                 .style(move |_, status| {
                     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
                     button::Style {
@@ -274,8 +292,8 @@ impl Preview {
                 .into()
         }))
         .spacing(4);
-        let bar = container(row![tabs, Space::with_width(Length::Fill), text("Test beat at 120 BPM").size(12).color(look.text_dim)].align_y(iced::Alignment::Center))
-            .padding([8, 12])
+        let bar = container(iced::widget::scrollable(tabs).direction(iced::widget::scrollable::Direction::Horizontal(iced::widget::scrollable::Scrollbar::new().width(0).scroller_width(0))))
+            .padding([5, 8])
             .width(Length::Fill)
             .style(move |_| container::Style { background: Some(look.background.into()), ..Default::default() });
         let body = match self.tab {
@@ -310,8 +328,12 @@ fn main() -> iced::Result {
         .subscription(Preview::subscription)
         .theme(|_| Theme::Dark)
         .font(include_bytes!("../../app/assets/Inter-Regular.ttf").as_slice())
+        .font(include_bytes!("../../app/assets/Inter-Medium.ttf").as_slice())
+        .font(include_bytes!("../../app/assets/Inter-SemiBold.ttf").as_slice())
+        .font(include_bytes!("../../app/assets/JetBrainsMono-Regular.ttf").as_slice())
+        .font(include_bytes!("../../app/assets/JetBrainsMono-Medium.ttf").as_slice())
         .default_font(iced::Font::with_name("Inter"))
         .antialiasing(true)
-        .window_size((1280.0, 640.0))
+        .window_size((1060.0, 600.0))
         .run_with(Preview::new)
 }
