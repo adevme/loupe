@@ -271,6 +271,11 @@ impl Effect {
     }
 
     pub fn process(&mut self, audio: &mut [[f32; 2]]) {
+        let most = self.out_left.len();
+        crate::in_pieces(audio, &[], most, |piece, _, _| self.process_piece(piece));
+    }
+
+    fn process_piece(&mut self, audio: &mut [[f32; 2]]) {
         let frames = audio.len().min(self.waiting.left.len());
         for (i, frame) in audio.iter().take(frames).enumerate() {
             self.waiting.left[i] = frame[0];

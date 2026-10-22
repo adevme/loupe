@@ -342,8 +342,12 @@ impl Effect {
     pub fn process_at(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]], at: i64) {
         if let Some(document) = self.ara.as_mut() {
             document.start_reading();
-            self.context = playing_at(at, self.rate, document.placed().tempo);
-            self.process_as_told(audio, side);
+            let tempo = document.placed().tempo;
+            let most = self.left.len();
+            crate::in_pieces(audio, side, most, |piece, beside, into| {
+                self.context = playing_at(at + into as i64, self.rate, tempo);
+                self.process_as_told(piece, beside);
+            });
             return;
         }
         self.process_with(audio, side);
@@ -539,8 +543,11 @@ impl Effect {
     }
 
     pub fn process_with(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
-        self.context = where_the_song_is(&self.song, self.rate, self.since);
-        self.process_as_told(audio, side);
+        let most = self.left.len();
+        crate::in_pieces(audio, side, most, |piece, beside, _| {
+            self.context = where_the_song_is(&self.song, self.rate, self.since);
+            self.process_as_told(piece, beside);
+        });
     }
 
     fn process_as_told(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
