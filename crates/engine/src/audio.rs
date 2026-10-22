@@ -207,6 +207,9 @@ struct Rt {
     still: Frames,
     step: usize,
     flowing: bool,
+    mix_spent: Duration,
+    ear_spent: Duration,
+    plugin_nanos_seen: u64,
 }
 
 const NOT_HEARD: usize = usize::MAX;
@@ -441,6 +444,9 @@ fn pair(rate: u32) -> (Rt, Remote) {
         still: 0,
         step: ROLL_BLOCK,
         flowing: false,
+        mix_spent: Duration::ZERO,
+        ear_spent: Duration::ZERO,
+        plugin_nanos_seen: 0,
         live: Vec::with_capacity(MOST_LIVE_NOTES),
         keys: keys_out,
         keys_go_to: None,
@@ -585,6 +591,7 @@ impl Rt {
         if let Some(racks) = self.chains.as_deref_mut() {
             racks.song_goes(where_we_are);
         }
+        let mixing = Instant::now();
         let mut block = std::mem::take(&mut self.block);
         let out = &mut block[..frames];
         let mut done = 0;
@@ -674,11 +681,14 @@ impl Rt {
             }
         }
         self.block = block;
+        self.mix_spent = mixing.elapsed();
         if !self.playing || self.count_in > 0 {
             self.look_ahead();
         }
         self.play_live(frames);
+        let hearing = Instant::now();
         self.hear_input(frames);
+        self.ear_spent = hearing.elapsed();
         self.shared.pos.store(self.pos, Ordering::Relaxed);
         &self.block[..frames]
     }
@@ -986,6 +996,14 @@ impl Rt {
             voice.played += frames as Frames;
             voice.note.len == HELD || voice.played < voice.note.len + instrument.tail_for(&voice.note, rate, sample)
         });
+    }
+
+    fn plugins_spent_since_last_asked(&mut self) -> (u64, u64) {
+        let Some(racks) = self.chains.as_deref() else { return (0, 0) };
+        let spending = racks.plugin_spending();
+        let since = spending.nanoseconds.saturating_sub(self.plugin_nanos_seen);
+        self.plugin_nanos_seen = spending.nanoseconds;
+        (since / 1000, spending.slowest_nanoseconds / 1000)
     }
 
     fn note_load(&mut self, spent: Duration, budget: Duration) {
@@ -1420,6 +1438,10 @@ struct Tick {
     budget_us: u64,
     playing: bool,
     pos: Frames,
+    mix_us: u64,
+    ear_us: u64,
+    plugin_us: u64,
+    slowest_us: u64,
 }
 
 fn timing_log() -> Option<Producer<Tick>> {
@@ -1430,11 +1452,11 @@ fn timing_log() -> Option<Producer<Tick>> {
         .name("loupe-timing".into())
         .spawn(move || {
             use std::io::Write;
-            let _ = writeln!(file, "at_ms gap_us spent_us frames budget_us playing pos");
+            let _ = writeln!(file, "at_ms gap_us spent_us frames budget_us playing pos mix_us ear_us plugin_us slowest_us");
             loop {
                 let mut wrote = false;
                 while let Ok(t) = rx.pop() {
-                    let _ = writeln!(file, "{:.3} {} {} {} {} {} {}", t.at_ms, t.gap_us, t.spent_us, t.frames, t.budget_us, t.playing as u8, t.pos);
+                    let _ = writeln!(file, "{:.3} {} {} {} {} {} {} {} {} {} {}", t.at_ms, t.gap_us, t.spent_us, t.frames, t.budget_us, t.playing as u8, t.pos, t.mix_us, t.ear_us, t.plugin_us, t.slowest_us);
                     wrote = true;
                 }
                 if wrote {
@@ -1493,6 +1515,7 @@ fn stream<T: SizedSample + FromSample<f32>>(
             let budget = Duration::from_secs_f64(made as f64 / rate);
             rt.note_load(spent, budget);
             if let Some(log) = timing.as_mut() {
+                let (plugin_us, slowest_us) = rt.plugins_spent_since_last_asked();
                 let _ = log.push(Tick {
                     at_ms: began.duration_since(born).as_secs_f64() * 1000.0,
                     gap_us: gap.as_micros() as u64,
@@ -1501,6 +1524,10 @@ fn stream<T: SizedSample + FromSample<f32>>(
                     budget_us: budget.as_micros() as u64,
                     playing: rt.playing,
                     pos: rt.pos,
+                    mix_us: rt.mix_spent.as_micros() as u64,
+                    ear_us: rt.ear_spent.as_micros() as u64,
+                    plugin_us,
+                    slowest_us,
                 });
             }
         },

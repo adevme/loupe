@@ -31,7 +31,7 @@ pub enum Asked {
     Wrong(String),
     Tracks(PathBuf),
     Render { project: PathBuf, out: PathBuf, stems: bool },
-    Bench { project: PathBuf, frames: usize, seconds: f64, from: f64 },
+    Bench { project: PathBuf, frames: usize, seconds: f64, from: f64, pause: f64 },
 }
 
 pub fn asked_for(args: &[String]) -> Asked {
@@ -45,16 +45,16 @@ pub fn asked_for(args: &[String]) -> Asked {
         },
         "bench" => match &args[1..] {
             [project, rest @ ..] => {
-                let mut got = [256.0, 10.0, 0.0];
+                let mut got = [256.0, 10.0, 0.0, 0.0];
                 for (slot, text) in got.iter_mut().zip(rest) {
                     match text.parse::<f64>() {
                         Ok(number) if number >= 0.0 => *slot = number,
                         _ => return Asked::Wrong(format!("bench does not understand {text}")),
                     }
                 }
-                Asked::Bench { project: PathBuf::from(project), frames: got[0] as usize, seconds: got[1], from: got[2] }
+                Asked::Bench { project: PathBuf::from(project), frames: got[0] as usize, seconds: got[1], from: got[2], pause: got[3] }
             }
-            _ => Asked::Wrong("bench takes a project file, then optionally frames a block, seconds to run and where to start in seconds".into()),
+            _ => Asked::Wrong("bench takes a project file, then optionally frames a block, seconds to run, where to start in seconds, and a pause in seconds (paced like play, stop, play again)".into()),
         },
         "render" => {
             let mut stems = false;
@@ -122,7 +122,7 @@ pub fn run(asked: Asked) -> i32 {
                 1
             }
         },
-        Asked::Bench { project, frames, seconds, from } => match benching(&project, frames, seconds, from) {
+        Asked::Bench { project, frames, seconds, from, pause } => match benching(&project, frames, seconds, from, pause) {
             Ok(told) => {
                 print!("{told}");
                 0
@@ -293,7 +293,7 @@ fn rendering(file: &Path, out: &Path, stems: bool) -> Result<Vec<PathBuf>, Strin
 
 /// Runs the live mix the way the audio thread does, block after block, through the real
 /// plugin hosts, and reports where the time goes. No window, no sound card.
-fn benching(file: &Path, frames: usize, seconds: f64, from: f64) -> Result<String, String> {
+fn benching(file: &Path, frames: usize, seconds: f64, from: f64, pause: f64) -> Result<String, String> {
     let text = std::fs::read_to_string(file).map_err(|why| format!("{}: {why}", file.display()))?;
     let rate = SavedProject::parse(&text)?.rate;
     let opened = crate::files::read_text(&text, rate)?;
@@ -325,16 +325,42 @@ fn benching(file: &Path, frames: usize, seconds: f64, from: f64) -> Result<Strin
     let mut spent: Vec<u64> = Vec::with_capacity(blocks);
     let (count_before, nanos_before, _, late_before) = loupe_plugins::sandbox::exchanges();
     let (waves_before, wave_nanos_before) = racks::wave_timing();
+    loupe_plugins::rack::WATCH_SLOW_SLOTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = loupe_plugins::rack::take_slow_slots();
+    let paced = pause > 0.0;
+    let cycles = if paced { 3 } else { 1 };
+    let mut starts: Vec<(usize, usize, u64)> = Vec::new();
     let began = Instant::now();
     let mut pos = start;
-    for _ in 0..blocks {
-        racks.song_goes(loupe_engine::Song::where_it_is(&project, pos, true, false));
-        let one = Instant::now();
-        loupe_engine::render_through(&project, pos, &mut out, &mut scratch, Some(racks.as_mut()));
-        spent.push(one.elapsed().as_micros() as u64);
-        pos += frames as loupe_engine::Frames;
+    for cycle in 0..cycles {
+        if cycle > 0 {
+            racks.song_goes(loupe_engine::Song::where_it_is(&project, pos, false, false));
+            std::thread::sleep(Duration::from_secs_f64(pause));
+            pos = start;
+        }
+        let cycle_began = Instant::now();
+        for block in 0..blocks {
+            if paced {
+                let due = cycle_began + budget * block as u32;
+                let now = Instant::now();
+                if due > now {
+                    std::thread::sleep(due - now);
+                }
+            }
+            racks.song_goes(loupe_engine::Song::where_it_is(&project, pos, true, false));
+            let one = Instant::now();
+            loupe_engine::render_through(&project, pos, &mut out, &mut scratch, Some(racks.as_mut()));
+            let took = one.elapsed().as_micros() as u64;
+            spent.push(took);
+            if paced && Duration::from_micros(took) > budget {
+                starts.push((cycle, block, took));
+            }
+            pos += frames as loupe_engine::Frames;
+        }
     }
     let whole = began.elapsed();
+    loupe_plugins::rack::WATCH_SLOW_SLOTS.store(false, std::sync::atomic::Ordering::Relaxed);
+    let slow = loupe_plugins::rack::take_slow_slots();
     let (count, nanos, slowest, late) = loupe_plugins::sandbox::exchanges();
     let (waves, wave_nanos) = racks::wave_timing();
     let spending = racks.plugin_spending();
@@ -369,6 +395,33 @@ fn benching(file: &Path, frames: usize, seconds: f64, from: f64) -> Result<Strin
 ", spending.waves, scoped, scope_us / spent.len().max(1) as f64, spending.at_once));
     told.push_str(&format!("plugins    {:.0} us a block in process_wave/master/monitor overall
 ", spending.nanoseconds as f64 / 1000.0 / spent.len().max(1) as f64));
+    if paced {
+        told.push_str(&format!("
+over budget while paced (cycle, block, us), {} in all:
+", starts.len()));
+        for (cycle, block, us) in starts.iter().take(60) {
+            told.push_str(&format!("  {cycle} {block:>5} {us:>6}
+"));
+        }
+    }
+    let mut by_name: Vec<(String, usize, u64)> = Vec::new();
+    for (name, us) in &slow {
+        match by_name.iter_mut().find(|(known, _, _)| known == name) {
+            Some((_, count, worst)) => {
+                *count += 1;
+                *worst = (*worst).max(*us);
+            }
+            None => by_name.push((name.clone(), 1, *us)),
+        }
+    }
+    by_name.sort_by(|a, b| b.1.cmp(&a.1));
+    told.push_str(&format!("
+slow round trips (over 1 ms), {} in all, by plugin: count, worst us
+", slow.len()));
+    for (name, count, worst) in by_name.iter().take(30) {
+        told.push_str(&format!("  {count:>5} {worst:>7}  {name}
+"));
+    }
     drop(racks);
     Ok(told)
 }

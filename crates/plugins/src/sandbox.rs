@@ -95,6 +95,7 @@ pub struct Sandbox {
     writing: ChildStdin,
     wants: Option<Sender<Want>>,
     outgoing: Vec<u8>,
+    pending: Vec<u8>,
     gets: Receiver<Got>,
     moved: Receiver<(usize, usize)>,
     reader: Option<JoinHandle<()>>,
@@ -149,6 +150,7 @@ impl Sandbox {
             writing,
             wants: Some(wants),
             outgoing: Vec::with_capacity(1 << 16),
+            pending: Vec::new(),
             gets,
             moved,
             reader: Some(reader),
@@ -162,14 +164,22 @@ impl Sandbox {
         })
     }
 
+    /// A word the host needs no answer to, such as the time. It rides down the pipe with the
+    /// next ask instead of waking the host on its own.
     pub fn tell(&mut self, ask: Ask) -> Result<(), String> {
         if self.lost {
             return Err("the plugin host is gone".into());
         }
-        if ask.write(&mut self.writing).is_err() {
-            return Err(self.give_up("the plugin host stopped listening"));
-        }
+        let _ = ask.write(&mut self.pending);
         Ok(())
+    }
+
+    fn write_with_pending(&mut self, ask: &Ask) -> std::io::Result<()> {
+        self.outgoing.clear();
+        self.outgoing.append(&mut self.pending);
+        ask.write(&mut self.outgoing)?;
+        self.writing.write_all(&self.outgoing)?;
+        self.writing.flush()
     }
 
     pub fn ask(&mut self, ask: Ask) -> Result<Reply, String> {
@@ -214,7 +224,7 @@ impl Sandbox {
     }
 
     fn send_the_ask(&mut self, ask: &Ask, want: Want) -> Result<(), String> {
-        if ask.write(&mut self.writing).is_err() {
+        if self.write_with_pending(ask).is_err() {
             return Err(self.give_up("the plugin host stopped listening"));
         }
         if self.wants.as_ref().is_none_or(|w| w.send(want).is_err()) {
@@ -300,6 +310,7 @@ impl Sandbox {
         }
         // The ask and its audio go down the pipe in one write, so the host wakes once.
         self.outgoing.clear();
+        self.outgoing.append(&mut self.pending);
         let _ = ask.write(&mut self.outgoing);
         let _ = write_block(&mut self.outgoing, audio);
         if !side.is_empty() {
@@ -479,7 +490,7 @@ impl Sandbox {
         if self.lost || self.said_bye {
             return;
         }
-        let _ = Ask::Quit.write(&mut self.writing);
+        let _ = self.write_with_pending(&Ask::Quit);
         self.said_bye = true;
         self.seat.take();
     }
@@ -525,9 +536,9 @@ impl Drop for Sandbox {
             }
         }
         self.wants.take();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
+        // The reader ends when the pipe does. A host that leaves a child holding the pipe open
+        // would hold this thread too, so it is let go rather than waited for.
+        self.reader.take();
     }
 }
 

@@ -842,6 +842,7 @@ impl Chains for Racks {
     fn plugin_spending(&self) -> PluginSpending {
         PluginSpending {
             nanoseconds: self.spent_in_plugins.load(Ordering::Relaxed),
+            slowest_nanoseconds: loupe_plugins::sandbox::EXCHANGE_SLOWEST_NANOS.swap(0, Ordering::Relaxed),
             running: self.running(),
             held_back: self.held_back(),
             waves: self.waves.load(Ordering::Relaxed),
