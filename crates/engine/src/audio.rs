@@ -206,6 +206,7 @@ struct Rt {
     looked_at: Option<Frames>,
     still: Frames,
     step: usize,
+    flowing: bool,
 }
 
 const NOT_HEARD: usize = usize::MAX;
@@ -439,6 +440,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         looked_at: None,
         still: 0,
         step: ROLL_BLOCK,
+        flowing: false,
         live: Vec::with_capacity(MOST_LIVE_NOTES),
         keys: keys_out,
         keys_go_to: None,
@@ -506,6 +508,7 @@ impl Rt {
                 Msg::Stop => {
                     self.playing = false;
                     self.count_in = 0;
+                    self.flowing = false;
                 }
                 Msg::Metronome(on) => self.metronome = on,
                 Msg::CountIn(len) => {
@@ -589,6 +592,7 @@ impl Rt {
             if self.fade == 0 {
                 if let Some(to) = self.seek.take() {
                     self.pos = to;
+                    self.flowing = false;
                 }
                 if !self.playing && self.roll != Roll::Out {
                     out[done..].fill([0.0; 2]);
@@ -605,7 +609,10 @@ impl Rt {
                 continue;
             }
             let round = self.round_at(self.pos);
-            if self.roll == Roll::No && self.scratch.ready_for(&self.project, self.pos, round, self.chains.as_deref()) > frames {
+            // A song already in flow never stops for a pre-roll: a plugin changing its latency or a
+            // rewired track mid-song is taken up by the mix's own hurried prime (a block at most)
+            // instead of muting the song while the pre-roll thread runs the whole window again.
+            if self.roll == Roll::No && !self.flowing && self.scratch.ready_for(&self.project, self.pos, round, self.chains.as_deref()) > frames {
                 self.roll = Roll::Due;
             }
             if self.roll == Roll::Due && self.fade == 0 {
@@ -661,6 +668,7 @@ impl Rt {
             }
             self.pos += part as Frames;
             done += part;
+            self.flowing = rising;
             if rising && stop_at > 0 && self.pos == stop_at {
                 self.pos = go_round_to;
             }
@@ -1401,6 +1409,48 @@ fn start_stream(device: &cpal::Device, config: &cpal::StreamConfig, format: cpal
     Ok((stream, remote))
 }
 
+/// One line per sound-card callback, written when `LOUPE_AUDIO_LOG` names a file:
+/// milliseconds since the stream began, gap since the previous callback, time spent
+/// mixing, the callback's frame count and budget, and whether the song was playing.
+struct Tick {
+    at_ms: f64,
+    gap_us: u64,
+    spent_us: u64,
+    frames: usize,
+    budget_us: u64,
+    playing: bool,
+    pos: Frames,
+}
+
+fn timing_log() -> Option<Producer<Tick>> {
+    let path = std::env::var_os("LOUPE_AUDIO_LOG")?;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(&path).ok()?);
+    let (tx, mut rx) = RingBuffer::<Tick>::new(1 << 16);
+    thread::Builder::new()
+        .name("loupe-timing".into())
+        .spawn(move || {
+            use std::io::Write;
+            let _ = writeln!(file, "at_ms gap_us spent_us frames budget_us playing pos");
+            loop {
+                let mut wrote = false;
+                while let Ok(t) = rx.pop() {
+                    let _ = writeln!(file, "{:.3} {} {} {} {} {} {}", t.at_ms, t.gap_us, t.spent_us, t.frames, t.budget_us, t.playing as u8, t.pos);
+                    wrote = true;
+                }
+                if wrote {
+                    let _ = file.flush();
+                }
+                if rx.is_abandoned() {
+                    let _ = file.flush();
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+        .ok()?;
+    Some(tx)
+}
+
 fn stream<T: SizedSample + FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -1408,12 +1458,17 @@ fn stream<T: SizedSample + FromSample<f32>>(
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let channels = config.channels as usize;
     let rate = config.sample_rate.0 as f64;
+    let mut timing = timing_log();
+    let born = Instant::now();
+    let mut last_began: Option<Instant> = None;
     device.build_output_stream(
         config,
         move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
             let stamp = info.timestamp();
             let delay = stamp.playback.duration_since(&stamp.callback).unwrap_or_default();
             let began = Instant::now();
+            let gap = last_began.map_or(Duration::ZERO, |was| began.duration_since(was));
+            last_began = Some(began);
             let mut heard = began + delay;
             let mut made = 0;
             for part in data.chunks_mut(MAX_BLOCK * channels) {
@@ -1434,7 +1489,20 @@ fn stream<T: SizedSample + FromSample<f32>>(
                 heard += Duration::from_secs_f64(frames as f64 / rate);
                 rt.heard(heard);
             }
-            rt.note_load(began.elapsed(), Duration::from_secs_f64(made as f64 / rate));
+            let spent = began.elapsed();
+            let budget = Duration::from_secs_f64(made as f64 / rate);
+            rt.note_load(spent, budget);
+            if let Some(log) = timing.as_mut() {
+                let _ = log.push(Tick {
+                    at_ms: began.duration_since(born).as_secs_f64() * 1000.0,
+                    gap_us: gap.as_micros() as u64,
+                    spent_us: spent.as_micros() as u64,
+                    frames: made,
+                    budget_us: budget.as_micros() as u64,
+                    playing: rt.playing,
+                    pos: rt.pos,
+                });
+            }
         },
         |e| eprintln!("loupe: sound output error: {e}"),
         None,
@@ -2252,11 +2320,17 @@ mod tests {
         held: Vec<(TrackId, Vec<[f32; 2]>, usize)>,
         counted: Arc<AtomicU64>,
         slow: bool,
+        extra: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
     impl Heavy {
         fn with(lags: &[(TrackId, usize)], counted: Arc<AtomicU64>) -> Self {
-            Self { lags: lags.to_vec(), held: Vec::new(), counted, slow: false }
+            Self { lags: lags.to_vec(), held: Vec::new(), counted, slow: false, extra: None }
+        }
+
+        fn shifting(mut self, extra: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+            self.extra = Some(extra);
+            self
         }
 
         fn slowly(mut self) -> Self {
@@ -2286,7 +2360,8 @@ mod tests {
         }
 
         fn latency(&self, track: TrackId) -> usize {
-            self.lags.iter().find(|(id, _)| *id == track).map(|(_, by)| *by).unwrap_or(0)
+            let extra = self.extra.as_ref().map_or(0, |extra| extra.load(Ordering::Relaxed));
+            self.lags.iter().find(|(id, _)| *id == track).map(|(_, by)| *by + extra).unwrap_or(0)
         }
     }
 
@@ -2318,6 +2393,28 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         panic!("the transport never got past {want}");
+    }
+
+    #[test]
+    fn a_plugin_changing_its_latency_mid_song_never_pauses_the_song() {
+        let counted = Arc::new(AtomicU64::new(0));
+        let extra = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (p, lags) = a_song_of_three_heavy_buses();
+        let (mut rt, mut remote) = pair(RATE);
+        remote.outbox.push(Msg::Project(Arc::new(p))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Heavy::with(&lags, counted).shifting(extra.clone()))))).ok().unwrap();
+        remote.outbox.push(Msg::Endless(true)).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rolling(&mut rt, &remote, 512, 4 * 512);
+        for change in 1..=6 {
+            extra.store(change * 512, Ordering::Relaxed);
+            for _ in 0..40 {
+                let was = remote.shared.pos.load(Ordering::Relaxed);
+                rt.process(512);
+                assert_eq!(rt.roll, Roll::No, "a latency change mid-song asked for a pre-roll at {was}");
+                assert_eq!(remote.shared.pos.load(Ordering::Relaxed), was + 512, "the song paused at {was}");
+            }
+        }
     }
 
     #[test]

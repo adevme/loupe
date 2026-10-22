@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use loupe_engine::{Chains, Clip, ClipId, Engine, PluginSpending, Project, Saved, Touched, TrackId};
 use loupe_plugins::rack::{let_them_go, Fallen, Rack, Wanted};
@@ -79,7 +79,16 @@ impl<T> Lending<T> {
     }
 }
 
-const CHAIN_BLOCK: usize = 512;
+/// Waves of tracks run on scoped threads, counted for `loupe bench`: how many waves went that
+/// way and the time spent inside the scope, threads spawned and joined included.
+pub static WAVES_SCOPED: AtomicU64 = AtomicU64::new(0);
+pub static WAVE_SCOPE_NANOS: AtomicU64 = AtomicU64::new(0);
+
+pub fn wave_timing() -> (u64, u64) {
+    (WAVES_SCOPED.load(Ordering::Relaxed), WAVE_SCOPE_NANOS.load(Ordering::Relaxed))
+}
+
+pub const CHAIN_BLOCK: usize = 512;
 const WAIT_FOR_CHAINS: u32 = 500;
 
 pub fn lend(engine: &mut Engine, holder: &mut Lending<Box<dyn Chains>>, racks: Box<dyn Chains>) {
@@ -180,6 +189,7 @@ pub struct Racks {
     spent_in_plugins: AtomicU64,
     waves: AtomicU64,
     tracks_in_waves: AtomicU64,
+    crew: crate::crew::Crew,
 }
 
 type RunRack = fn(&mut Rack, &mut Vec<[f32; 2]>, &[[f32; 2]]);
@@ -222,6 +232,7 @@ impl Racks {
             spent_in_plugins: AtomicU64::new(0),
             waves: AtomicU64::new(0),
             tracks_in_waves: AtomicU64::new(0),
+            crew: crate::crew::Crew::of(crew_hands()),
         }
     }
 
@@ -272,9 +283,10 @@ impl Racks {
     }
 
     fn run_a_whole_wave(&mut self, jobs: &mut [loupe_engine::Job<'_>]) {
+        let Self { chains, falls, crew, waves, tracks_in_waves, .. } = self;
         let mut spare: Vec<&mut loupe_engine::Job<'_>> = jobs.iter_mut().collect();
         let mut pairs: Vec<(&mut Rack, &mut loupe_engine::Job<'_>)> = Vec::with_capacity(spare.len());
-        for (id, rack) in self.chains.iter_mut() {
+        for (id, rack) in chains.iter_mut() {
             if rack.is_empty() {
                 continue;
             }
@@ -282,27 +294,21 @@ impl Racks {
                 pairs.push((rack, spare.swap_remove(at)));
             }
         }
-        self.waves.fetch_add(1, Ordering::Relaxed);
-        self.tracks_in_waves.fetch_add(pairs.len() as u64, Ordering::Relaxed);
+        waves.fetch_add(1, Ordering::Relaxed);
+        tracks_in_waves.fetch_add(pairs.len() as u64, Ordering::Relaxed);
         if pairs.len() < 2 {
             for (rack, job) in pairs {
-                run_one(rack, job, &self.falls);
+                run_one(rack, job, falls);
             }
             return;
         }
-        let queue = Mutex::new(pairs);
-        let hands = queue.lock().map(|held| held.len()).unwrap_or(0).min(tracks_at_once());
-        let falls = &self.falls;
-        std::thread::scope(|scope| {
-            for _ in 0..hands {
-                let queue = &queue;
-                scope.spawn(move || loop {
-                    let next = queue.lock().ok().and_then(|mut held| held.pop());
-                    let Some((rack, job)) = next else { return };
-                    run_one(rack, job, falls);
-                });
-            }
-        });
+        let clock = Instant::now();
+        let falls: &Falls = falls;
+        let batch: Vec<Box<dyn FnMut() + Send + '_>> =
+            pairs.into_iter().map(|(rack, job)| Box::new(move || run_one(rack, job, falls)) as Box<dyn FnMut() + Send + '_>).collect();
+        crew.run_all(batch);
+        WAVES_SCOPED.fetch_add(1, Ordering::Relaxed);
+        WAVE_SCOPE_NANOS.fetch_add(clock.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     fn word_about_the_ceiling(&mut self) -> Option<String> {
@@ -817,7 +823,9 @@ impl Chains for Racks {
     }
 
     fn whole_waves_at_once(&self) -> bool {
-        self.off_the_audio_thread
+        // On the audio thread too: the crew is already up, so a wave of independent tracks
+        // runs its chains side by side instead of one after another.
+        true
     }
 
     fn takes_its_time(&mut self, spare: bool) {
@@ -919,6 +927,12 @@ impl Chains for Racks {
 const MOST_TRACKS_AT_ONCE: usize = 256;
 const FEWEST_TRACKS_AT_ONCE: usize = 4;
 const TRACKS_A_CORE_CARRIES: usize = 2;
+
+/// How many crew threads stand by to run tracks side by side: half the cores, a few at least,
+/// and never so many that they crowd out the plugin hosts.
+fn crew_hands() -> usize {
+    std::thread::available_parallelism().map_or(2, |cores| cores.get() / 2).clamp(2, 8)
+}
 
 fn tracks_at_once() -> usize {
     std::thread::available_parallelism()

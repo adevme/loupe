@@ -8,6 +8,7 @@ mod clip_window;
 mod clipboard;
 mod closing;
 mod crash;
+mod crew;
 mod crash_reports;
 mod exporting;
 mod files;
