@@ -50,26 +50,16 @@ pub(crate) fn use_driver(driver: Option<&str>) {
     }
 }
 
-pub(crate) fn host() -> &'static cpal::Host {
+pub(crate) fn host() -> cpal::Host {
     let chosen = DRIVER.lock().ok().and_then(|chosen| chosen.clone());
     host_named(chosen.as_deref())
 }
 
-static HOSTS: Mutex<Vec<&'static cpal::Host>> = Mutex::new(Vec::new());
-
-pub(crate) fn host_named(driver: Option<&str>) -> &'static cpal::Host {
-    let id = driver
+pub(crate) fn host_named(driver: Option<&str>) -> cpal::Host {
+    driver
         .and_then(|name| cpal::available_hosts().into_iter().find(|id| id.name() == name))
-        .unwrap_or_else(|| cpal::default_host().id());
-    let Ok(mut hosts) = HOSTS.lock() else {
-        return Box::leak(Box::new(cpal::host_from_id(id).unwrap_or_else(|_| cpal::default_host())));
-    };
-    if let Some(host) = hosts.iter().find(|host| host.id() == id) {
-        return host;
-    }
-    let host: &'static cpal::Host = Box::leak(Box::new(cpal::host_from_id(id).unwrap_or_else(|_| cpal::default_host())));
-    hosts.push(host);
-    host
+        .and_then(|id| cpal::host_from_id(id).ok())
+        .unwrap_or_else(cpal::default_host)
 }
 
 pub fn outputs(driver: Option<&str>) -> Vec<String> {
@@ -117,9 +107,22 @@ pub fn one_device_both_ways() -> bool {
 }
 
 pub fn choices(driver: Option<&str>, output: Option<&str>) -> Choices {
-    let host = host_named(driver);
-    let Some(device) = output_named(host, output) else {
-        return Choices::default();
+    // An ASIO driver can be loaded once. Asking a fresh host about it loads it again,
+    // and dropping that copy shuts the driver the running stream is using, so the
+    // mic dies when Settings opens. Ask the open device instead.
+    let open = (driver == Some("ASIO")).then(in_use).flatten();
+    let device = match open {
+        Some(device) => device,
+        None => {
+            if driver == Some("ASIO") && host().id().name() == "ASIO" {
+                return Choices::default();
+            }
+            let host = host_named(driver);
+            let Some(device) = output_named(&host, output) else {
+                return Choices::default();
+            };
+            device
+        }
     };
     let configs: Vec<cpal::SupportedStreamConfigRange> =
         device.supported_output_configs().map(|configs| configs.collect()).unwrap_or_default();
