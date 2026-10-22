@@ -172,11 +172,18 @@ impl Effect {
             if plugin.is_null() {
                 return Err("the plugin would not be made".into());
             }
+            let let_go = || {
+                if let Some(gone) = (*plugin).destroy {
+                    gone(plugin);
+                }
+            };
             if !(*plugin).init.map(|init| init(plugin)).unwrap_or(false) {
+                let_go();
                 return Err("the plugin would not start up".into());
             }
             let awake = (*plugin).activate.map(|go| go(plugin, rate, 1, block as u32)).unwrap_or(false);
             if !awake {
+                let_go();
                 return Err("the plugin refused this sample rate or block size".into());
             }
             if let Some(go) = (*plugin).start_processing {
