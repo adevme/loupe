@@ -2261,7 +2261,7 @@ impl Timeline<'_> {
             return;
         }
         let middle = top + height / 2.0;
-        let reach = height / 2.0;
+        let reach = height / 2.0 * wave_boost(clip);
         let frames_per_px = self.rate() / self.view.zoom;
         let source_at = |x: f32| offset as f64 + (x - clip_left) as f64 * frames_per_px;
         let source_end = (offset + clip.len) as f64;
@@ -2312,6 +2312,7 @@ impl Timeline<'_> {
             let level = clip.gain * clip.fade_level((a - offset as f64) as Frames);
             let hi = middle - (hi * level).clamp(-1.0, 1.0) * reach;
             let lo = middle - (lo * level).clamp(-1.0, 1.0) * reach;
+            let (hi, lo) = (hi.max(top), lo.min(top + height));
             let thin = (1.0 - (lo - hi)).max(0.0) / 2.0;
             highs.push(Point::new(x, hi - thin));
             lows.push(Point::new(x, lo + thin));
@@ -3226,5 +3227,35 @@ mod take_folders {
         let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 60.0));
         let (_, clicked) = canvas::Program::update(&timeline, &mut state, released, CANVAS, cursor(LEFT + 60.0));
         assert!(matches!(clicked, Some(crate::Message::UseTake(_, 3))), "a click on lane 4 did not pick take 4");
+    }
+}
+
+/// The most a quiet clip's waveform is enlarged: 18 dB, so a whisper fills the lane
+/// but background hiss in a near-silent clip is not blown up into a wall.
+const MOST_WAVE_BOOST: f32 = 8.0;
+
+/// How much to enlarge a clip's waveform so its loudest moment reaches the lane edge.
+/// A take recorded at -20 dB then looks as full as a mastered beat, and the shape
+/// inside it keeps its real dynamics.
+fn wave_boost(clip: &Clip) -> f32 {
+    let (lo, hi) = clip.peak(clip.offset as usize, (clip.offset + clip.len) as usize);
+    let loudest = lo.abs().max(hi.abs()) * clip.gain;
+    if loudest <= 1e-4 {
+        return 1.0;
+    }
+    (1.0 / loudest).clamp(1.0, MOST_WAVE_BOOST)
+}
+
+#[cfg(test)]
+mod wave_boost_tests {
+    use super::MOST_WAVE_BOOST;
+
+    #[test]
+    fn the_boost_never_shrinks_and_never_passes_the_ceiling() {
+        let boost = |loudest: f32| (1.0 / loudest).clamp(1.0, MOST_WAVE_BOOST);
+        assert_eq!(boost(1.0), 1.0, "a full-scale beat is drawn as it is");
+        assert!((boost(0.125) - 8.0).abs() < 1e-6, "a -18 dB take fills the lane");
+        assert_eq!(boost(0.01), MOST_WAVE_BOOST, "near silence is not blown up past 18 dB");
+        assert_eq!(boost(1.5), 1.0, "clipping is never shrunk");
     }
 }
