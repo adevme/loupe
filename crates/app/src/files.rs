@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use crate::{settings, App, Message, Overlay, Pending, Screen};
 pub const EXTENSION: &str = "lp";
 const PROJECT_FOLDERS: [&str; 2] = ["Audio", "Exports"];
 const NOT_IN_FILE_NAMES: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+const BEING_WRITTEN: &str = ".writing";
 
 fn make_project_folders(project_file: &Path) {
     let Some(folder) = project_file.parent() else {
@@ -22,6 +24,19 @@ fn make_project_folders(project_file: &Path) {
             let _ = std::fs::create_dir_all(folder.join(name));
         }
     }
+}
+
+fn write_whole(file: &Path, text: &str) -> std::io::Result<()> {
+    let mut unfinished = file.as_os_str().to_owned();
+    unfinished.push(BEING_WRITTEN);
+    let unfinished = PathBuf::from(unfinished);
+    let written = std::fs::File::create(&unfinished)
+        .and_then(|mut out| out.write_all(text.as_bytes()).and_then(|()| out.sync_all()))
+        .and_then(|()| std::fs::rename(&unfinished, file));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&unfinished);
+    }
+    written
 }
 
 pub(crate) fn is_a_project(path: &Path) -> bool {
@@ -160,7 +175,7 @@ impl App {
         }
         self.gather_fx_state();
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
-        match std::fs::write(&path, saved.to_text()) {
+        match write_whole(&path, &saved.to_text()) {
             Ok(()) => {
                 make_project_folders(&path);
                 settings::remember(&path);
@@ -232,7 +247,7 @@ impl App {
         let file = folder.join(format!("{name}.{EXTENSION}"));
         self.gather_fx_state();
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
-        let written = std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&file, saved.to_text()));
+        let written = std::fs::create_dir_all(&folder).and_then(|()| write_whole(&file, &saved.to_text()));
         match written {
             Err(why) => self.problem = Some(format!("Could not save the template {}: {why}", file.display())),
             Ok(()) => {
@@ -368,5 +383,18 @@ mod tests {
         assert!(is_a_project(Path::new("C:\\Songs\\Trap.LP")));
         assert!(!is_a_project(Path::new("/songs/Get High/Audio/lead.wav")));
         assert!(!is_a_project(Path::new("/songs/lead")));
+    }
+
+    #[test]
+    fn saving_over_a_song_replaces_it_whole_and_leaves_nothing_half_written() {
+        let folder = std::env::temp_dir().join(format!("loupe-save-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let song = folder.join("Song.lp");
+        std::fs::write(&song, "the old song, which was longer").unwrap();
+        write_whole(&song, "the new song").unwrap();
+        assert_eq!(std::fs::read_to_string(&song).unwrap(), "the new song");
+        let left: Vec<_> = std::fs::read_dir(&folder).unwrap().filter_map(Result::ok).map(|entry| entry.file_name()).collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("Song.lp")]);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 }
