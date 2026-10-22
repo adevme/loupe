@@ -1341,7 +1341,7 @@ fn host(output: Output, ready: mpsc::Sender<Ready>, quit: Arc<AtomicBool>) {
 
 fn open_device(choice: &Device) -> Result<(cpal::Stream, Remote, Running, Option<String>), String> {
     let host = devices::host_named(choice.driver.as_deref());
-    let device = devices::output_named(&host, choice.output.as_deref()).ok_or("no sound output found")?;
+    let device = devices::output_named(host, choice.output.as_deref()).ok_or("no sound output found")?;
     let default = device.default_output_config().map_err(|e| e.to_string())?;
     let supported = match choice.rate {
         Some(rate) if rate != default.sample_rate().0 => device
