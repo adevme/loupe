@@ -730,7 +730,8 @@ fn instrument_from(text: &str) -> Option<Instrument> {
 pub(crate) fn hex_of(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+        out.push(char::from_digit((byte >> 4) as u32, 16).unwrap_or('0'));
+        out.push(char::from_digit((byte & 15) as u32, 16).unwrap_or('0'));
     }
     out
 }
@@ -774,6 +775,14 @@ fn fade_from(value: &str) -> Option<Fade> {
 mod tests {
     use super::*;
     use crate::render::render;
+
+    #[test]
+    fn plugin_settings_are_written_as_two_lowercase_hex_digits_a_byte() {
+        let every: Vec<u8> = (0..=255).collect();
+        let written: String = every.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(hex_of(&every), written);
+        assert_eq!(bytes_of(&hex_of(&every)), Some(every));
+    }
 
     #[test]
     fn a_colour_that_is_not_plain_hex_is_ignored_rather_than_crashing() {
