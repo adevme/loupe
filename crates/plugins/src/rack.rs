@@ -922,6 +922,7 @@ impl Rack {
 
     fn take_arrivals(&mut self) {
         self.take_what_moved();
+        let mut arrived = false;
         for (at, slot) in self.slots.iter_mut().enumerate() {
             let Some(waiting) = slot.coming.as_ref() else { continue };
             match waiting.try_recv() {
@@ -930,6 +931,7 @@ impl Rack {
                     slot.settle_in(opened, placed.as_ref());
                     slot.coming = None;
                     self.told = None;
+                    arrived = true;
                 }
                 Ok(Err((why, fell))) => {
                     slot.trouble = Some(why.clone());
@@ -944,6 +946,9 @@ impl Rack {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
+        }
+        if arrived {
+            self.take_what_moved();
         }
         self.start_what_there_is_room_to_start();
     }
@@ -1729,6 +1734,24 @@ mod fallen_tests {
         assert_eq!(rack.latency(), 1_024, "the chain now waits as long as the plugin does");
         assert_eq!(rack.slots()[0].latency, 1_024);
         assert!(rack.slots()[0].trouble.is_none());
+    }
+
+    #[test]
+    fn a_latency_the_saved_settings_bring_is_known_before_the_first_block() {
+        let script = host(
+            "restored-late",
+            "while read -r ask rest; do\n  case \"$ask\" in\n    load) printf 'loaded\\t2\\t2\\t0\\t0\\n' ;;\n    restore) printf 'latencymoved\\t0\\t40\\n' ; printf 'fine\\n' ;;\n    *) printf 'fine\\n' ;;\n  esac\ndone\n",
+        );
+        let mut rack = Rack::new(script.0.clone(), 48_000, 64);
+        let oversampled = Wanted { state: vec![4, 0], ..wanted("Pro-C 2 at 4x") };
+        assert!(rack.reconcile(&[oversampled]).is_empty());
+        let gave_up = std::time::Instant::now();
+        while !rack.ready() {
+            assert!(gave_up.elapsed() < std::time::Duration::from_secs(10), "the plugin never loaded");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(rack.slots()[0].trouble.is_none(), "{:?}", rack.slots()[0].trouble);
+        assert_eq!(rack.latency(), 40, "the chain is still lined up with the latency the plugin had before its settings went in");
     }
 
     #[test]
