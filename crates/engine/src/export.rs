@@ -597,6 +597,12 @@ type Takes<'a> = dyn FnMut(&mut [[f32; 2]], &crate::render::Mixdown) -> io::Resu
 
 const QUIET_TAIL: f32 = 1.0e-4;
 const MOST_TAIL_SECONDS: Frames = 30;
+const KNOB_AUTOMATION_STEP: usize = 512;
+
+fn turns_knobs(project: &Project) -> bool {
+    use crate::envelope::Target;
+    project.envelopes.iter().any(|shape| matches!(shape.target, Target::TrackFx { .. } | Target::ClipFx { .. } | Target::MasterFx { .. }))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Reach {
@@ -619,20 +625,26 @@ fn render_into(
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
     take: &mut Takes<'_>,
 ) -> io::Result<Frames> {
-    let mut block = vec![[0.0f32; 2]; BLOCK];
+    let most = match turns_knobs(project) {
+        true => KNOB_AUTOMATION_STEP,
+        false => BLOCK,
+    };
+    let mut block = vec![[0.0f32; 2]; most];
     let mut spare = crate::render::Mixdown::default();
     let mut pos = reach.from;
     let mut skip = reach.lead as usize;
     let mut written: Frames = 0;
+    let mut held_quiet: Vec<[f32; 2]> = Vec::new();
     let longest_tail = MOST_TAIL_SECONDS * project.rate as Frames;
+    let quiet_enough = (project.rate as usize).max(1);
     loop {
         let ringing = written >= reach.frames;
-        if ringing && (!reach.rings_out || written >= reach.frames + longest_tail) {
+        if ringing && (!reach.rings_out || written + held_quiet.len() as Frames >= reach.frames + longest_tail) {
             break;
         }
         let count = match ringing {
-            true => BLOCK,
-            false => BLOCK.min((reach.frames - written) as usize + skip),
+            true => most,
+            false => most.min((reach.frames - written) as usize + skip),
         };
         let began = Instant::now();
         crate::render::render_through(project, pos, &mut block[..count], &mut spare, chains.as_deref_mut());
@@ -648,8 +660,20 @@ fn render_into(
         if kept.is_empty() {
             continue;
         }
-        if ringing && crate::render::loudest(kept) < QUIET_TAIL {
-            break;
+        if ringing {
+            if crate::render::loudest(kept) < QUIET_TAIL {
+                held_quiet.extend_from_slice(kept);
+                if held_quiet.len() >= quiet_enough {
+                    break;
+                }
+                continue;
+            }
+            if !held_quiet.is_empty() {
+                take(&mut held_quiet, &spare)?;
+                written += held_quiet.len() as Frames;
+                pacer.wrote(held_quiet.len() as Frames);
+                held_quiet.clear();
+            }
         }
         take(kept, &spare)?;
         written += kept.len() as Frames;
@@ -1135,6 +1159,41 @@ mod tests {
             assert!(apart < 0.01, "{what}: the export is {apart} away from playback at frame {at}, it moves in steps");
             fs::remove_dir_all(folder).unwrap();
         }
+    }
+
+    struct KnobWatcher {
+        turned_to: Vec<f32>,
+    }
+
+    impl crate::render::Chains for KnobWatcher {
+        fn process(&mut self, _track: crate::model::TrackId, _audio: &mut [[f32; 2]]) {}
+
+        fn automate(&mut self, _track: crate::model::TrackId, _slot: usize, _knob: usize, value: f32) {
+            self.turned_to.push(value);
+        }
+    }
+
+    #[test]
+    fn plugin_knob_automation_moves_as_often_in_an_export_as_in_playback() {
+        let mut project = a_shout_near_the_end(48_000, 100);
+        let track = project.tracks[0].id;
+        let target = crate::envelope::Target::TrackFx { track, slot: 0, knob: 0 };
+        project.apply(Command::AddEnvelope { target }).unwrap();
+        project.apply(Command::ClearPoints { target, from: 0, to: Frames::MAX }).unwrap();
+        for (at, value) in [(0, 0.0), (48_000, 1.0)] {
+            project.apply(Command::PutPoint { target, point: crate::envelope::Point { at, value, shape: crate::envelope::Shape::Linear } }).unwrap();
+        }
+        let folder = scratch("knob-steps");
+        let mut racks = KnobWatcher { turned_to: Vec::new() };
+        let plan = ExportPlan { range: Some((0, 48_000)), ..plan_for(&folder) };
+        export_through(&project, &plan, &|_| true, Some(&mut racks)).unwrap();
+        let biggest_step = racks.turned_to.windows(2).map(|pair| pair[1] - pair[0]).fold(0.0f32, f32::max);
+        assert!(
+            biggest_step <= 1_024.0 / 48_000.0,
+            "the knob jumped {biggest_step} at a time ({} turns in a second), playback moves it every block of a few hundred frames",
+            racks.turned_to.len()
+        );
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
