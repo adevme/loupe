@@ -26,7 +26,7 @@ fn make_project_folders(project_file: &Path) {
     }
 }
 
-fn write_whole(file: &Path, text: &str) -> std::io::Result<()> {
+pub(crate) fn write_whole(file: &Path, text: &str) -> std::io::Result<()> {
     let mut unfinished = file.as_os_str().to_owned();
     unfinished.push(BEING_WRITTEN);
     let unfinished = PathBuf::from(unfinished);

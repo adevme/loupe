@@ -218,7 +218,7 @@ pub fn save(key: &str, value: &str) -> Result<(), String> {
     if let Some(folder) = path.parent() {
         fs::create_dir_all(folder).map_err(|e| e.to_string())?;
     }
-    fs::write(&path, lines.join("\n") + "\n").map_err(|e| e.to_string())
+    crate::files::write_whole(&path, &(lines.join("\n") + "\n")).map_err(|e| e.to_string())
 }
 
 pub fn forget(key: &str) -> Result<(), String> {
@@ -230,7 +230,7 @@ pub fn forget(key: &str) -> Result<(), String> {
         .lines()
         .filter(|line| !line.split_once('=').is_some_and(|(found, _)| found.trim() == key))
         .collect();
-    fs::write(&path, kept.join("\n") + "\n").map_err(|e| e.to_string())
+    crate::files::write_whole(&path, &(kept.join("\n") + "\n")).map_err(|e| e.to_string())
 }
 
 pub fn config_dir() -> Option<PathBuf> {
