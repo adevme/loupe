@@ -851,6 +851,8 @@ fn lay_reading(
     lay_clips(project, track, begin, &mut buffer[into..], only, chains, apart);
 }
 
+const CLIP_CHAIN_TAIL_SECONDS: Frames = 30;
+
 fn lay_clips(
     project: &Project,
     track: &Track,
@@ -872,11 +874,16 @@ fn lay_clips(
             Some(chosen) => clip.id != chosen || clip.muted,
             None => clip.muted,
         };
-        if silenced || clip.end() <= pos || clip.start >= end {
+        let own = !clip.fx.is_empty() && chains.is_some();
+        let rings_until = match own {
+            true => clip.end() + CLIP_CHAIN_TAIL_SECONDS * rate as Frames,
+            false => clip.end(),
+        };
+        if silenced || rings_until <= pos || clip.start >= end {
             continue;
         }
         let from = clip.start.max(pos);
-        let to = clip.end().min(end);
+        let to = clip.end().min(end).max(from);
         let source = clip.audio();
         let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
         let count = match clip.notes {
@@ -884,7 +891,6 @@ fn lay_clips(
             None => ((to - from) as usize).min(source.len() - source_from),
         };
         let gain = clip_automated(project, crate::envelope::Target::ClipGain(clip.id), pos, clip.start, clip.gain);
-        let own = !clip.fx.is_empty() && chains.is_some();
         if own {
             apart.clear();
             apart.resize(out.len(), [0.0; 2]);
@@ -1198,6 +1204,46 @@ mod tests {
         assert_eq!(out[50], [100.0, -100.0], "the clip with a chain was not doubled");
         assert_eq!(out[350], [50.0, -50.0], "the clip without a chain changed");
         let _ = plain;
+    }
+
+    struct ClipEcho {
+        held: Vec<[f32; 2]>,
+        at: usize,
+    }
+
+    impl Chains for ClipEcho {
+        fn process(&mut self, _track: TrackId, _audio: &mut [[f32; 2]]) {}
+
+        fn process_clip(&mut self, _clip: ClipId, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                let back = self.held[self.at];
+                self.held[self.at] = *frame;
+                self.at = (self.at + 1) % self.held.len();
+                frame[0] += back[0] * 0.5;
+                frame[1] += back[1] * 0.5;
+            }
+        }
+    }
+
+    #[test]
+    fn a_clip_chain_rings_on_after_its_clip_ends() {
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        let mut audio = vec![[0.0f32; 2]; 1_000];
+        audio[900] = [0.8, 0.8];
+        let shout = clip(&mut p, one, Arc::new(Source::from_frames("shout", audio)), 0);
+        let fx = crate::model::Fx { mix: 1.0, path: std::path::PathBuf::from("delay.vst3"), index: 0, name: "Delay".into(), bypassed: false, state: Vec::new(), record: false };
+        p.apply(Command::AddClipFx { clip: shout, fx }).unwrap();
+        let mut racks = ClipEcho { held: vec![[0.0; 2]; 500], at: 0 };
+        let mut scratch = Mixdown::default();
+        let mut heard = Vec::new();
+        for block in 0..8 {
+            let mut out = vec![[0.0; 2]; 256];
+            mix_tracks_metered(&p, block * 256, &mut out, None, None, &mut scratch, Some(&mut racks));
+            heard.extend_from_slice(&out);
+        }
+        assert!((heard[900][0] - 0.8).abs() < 1e-6, "the shout read {:?}", heard[900]);
+        assert!((heard[1_400][0] - 0.4).abs() < 1e-6, "the clip's echo was cut off with the clip: {:?}", heard[1_400]);
     }
 
     struct Placer {
