@@ -55,9 +55,6 @@ pub(crate) fn host() -> &'static cpal::Host {
     host_named(chosen.as_deref())
 }
 
-/// One host per driver for the life of Loupe. Each new ASIO host is a stranger to the
-/// driver the running one loaded: listing devices through it reloads the driver, and
-/// when the list is dropped the driver shuts, killing the stream that was recording.
 static HOSTS: Mutex<Vec<&'static cpal::Host>> = Mutex::new(Vec::new());
 
 pub(crate) fn host_named(driver: Option<&str>) -> &'static cpal::Host {
