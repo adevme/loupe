@@ -631,6 +631,9 @@ impl Rt {
             let chunk = &mut out[done..done + part];
             self.peaks = [[0.0; METER_POINTS]; METERS];
             mix_tracks_metered(&self.project, self.pos, chunk, self.audition, Some(&mut self.peaks), &mut self.scratch, self.chains.as_deref_mut());
+            if let Some(racks) = self.chains.as_deref_mut() {
+                racks.process_master(chunk);
+            }
             let target = if self.project.master_muted { 0.0 } else { self.project.master };
             scale(chunk, self.master, target);
             self.master = target;
@@ -1770,6 +1773,40 @@ mod tests {
         assert!(!rt.playing, "hearing the input does not start the song");
         remote.outbox.push(Msg::HearOn([None; MOST_HEARD])).ok().unwrap();
         assert!(rt.process(256).iter().all(|f| *f == [0.0, 0.0]));
+    }
+
+    struct QuarterMaster;
+
+    impl Chains for QuarterMaster {
+        fn process_master(&mut self, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                frame[0] *= 0.25;
+                frame[1] *= 0.25;
+            }
+        }
+    }
+
+    #[test]
+    fn playback_runs_the_master_chain_like_the_export_does() {
+        let (mut rt, mut remote) = pair(RATE);
+        let project = steady(RATE as usize);
+        let mut exported = vec![[0.0f32; 2]; 1_024];
+        crate::render::render_through(&project, 0, &mut exported, &mut crate::render::Mixdown::default(), Some(&mut QuarterMaster));
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(QuarterMaster)))).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        let mut played = Vec::new();
+        for _ in 0..8 {
+            played.extend_from_slice(rt.process(128));
+        }
+        let settled = played.len() - 256;
+        assert!((exported[settled][0] - 0.25).abs() < 1e-6, "the export read {:?}", exported[settled]);
+        assert!(
+            (played[settled][0] - exported[settled][0]).abs() < 1e-6,
+            "playback played {:?} where the export wrote {:?}: the master chain was left out",
+            played[settled],
+            exported[settled]
+        );
     }
 
     #[derive(Default)]
