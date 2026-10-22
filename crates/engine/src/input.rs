@@ -136,8 +136,6 @@ pub struct Input {
 }
 
 pub fn input_devices() -> Vec<String> {
-    // ASIO records through the device already playing. Listing through a fresh host
-    // would load the driver a second time and shut it, killing the stream.
     if crate::devices::one_device_both_ways() {
         return crate::devices::in_use().iter().filter_map(|device| device.name().ok()).collect();
     }

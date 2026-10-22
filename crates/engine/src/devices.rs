@@ -107,9 +107,6 @@ pub fn one_device_both_ways() -> bool {
 }
 
 pub fn choices(driver: Option<&str>, output: Option<&str>) -> Choices {
-    // An ASIO driver can be loaded once. Asking a fresh host about it loads it again,
-    // and dropping that copy shuts the driver the running stream is using, so the
-    // mic dies when Settings opens. Ask the open device instead.
     let open = (driver == Some("ASIO")).then(in_use).flatten();
     let device = match open {
         Some(device) => device,
