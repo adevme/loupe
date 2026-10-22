@@ -154,22 +154,18 @@ unsafe impl Send for Effect {}
 impl Effect {
     pub fn start(library: Library, index: usize, rate: f64, block: usize) -> Result<Self, String> {
         let id = library.id_at(index).ok_or("that plugin has no such part")?;
-        let name = CString::new("Loupe").unwrap();
-        let empty = CString::new("").unwrap();
         let mut host = Box::new(clap_host {
             clap_version: CLAP_VERSION,
             host_data: std::ptr::null_mut(),
-            name: name.as_ptr(),
-            vendor: empty.as_ptr(),
-            url: empty.as_ptr(),
-            version: empty.as_ptr(),
+            name: c"Loupe".as_ptr(),
+            vendor: c"".as_ptr(),
+            url: c"".as_ptr(),
+            version: c"".as_ptr(),
             get_extension: Some(no_extension),
             request_restart: Some(nothing_to_do),
             request_process: Some(nothing_to_do),
             request_callback: Some(nothing_to_do),
         });
-        std::mem::forget(name);
-        std::mem::forget(empty);
         unsafe {
             let make = (*library.factory).create_plugin.ok_or("this plugin cannot be made")?;
             let plugin = make(library.factory, host.as_mut() as *mut clap_host, id.as_ptr());
