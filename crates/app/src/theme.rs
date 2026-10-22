@@ -857,7 +857,7 @@ fn colour(value: &str) -> Result<Color, String> {
     if digits.len() != 6 {
         return Err(bad());
     }
-    let channel = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).map_err(|_| bad());
+    let channel = |at: usize| digits.get(at..at + 2).and_then(|two| u8::from_str_radix(two, 16).ok()).ok_or_else(bad);
     Ok(Color::from_rgb8(channel(0)?, channel(2)?, channel(4)?))
 }
 
@@ -935,6 +935,12 @@ fn bar(value: &str) -> Result<[BarItem; BAR_SLOTS], String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_theme_colour_that_is_not_plain_hex_is_refused_rather_than_crashing() {
+        assert!(colour("#\u{20ac}aaa").is_err());
+        assert!(colour("#ff8000").is_ok());
+    }
 
     #[test]
     fn the_written_reference_theme_reads_back_as_the_default() {

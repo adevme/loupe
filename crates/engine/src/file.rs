@@ -761,7 +761,7 @@ fn colour_from(value: &str) -> Option<[u8; 3]> {
     if digits.len() != 6 {
         return None;
     }
-    let channel = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16).ok();
+    let channel = |at: usize| u8::from_str_radix(digits.get(at..at + 2)?, 16).ok();
     Some([channel(0)?, channel(2)?, channel(4)?])
 }
 
@@ -774,6 +774,12 @@ fn fade_from(value: &str) -> Option<Fade> {
 mod tests {
     use super::*;
     use crate::render::render;
+
+    #[test]
+    fn a_colour_that_is_not_plain_hex_is_ignored_rather_than_crashing() {
+        assert_eq!(colour_from("#\u{20ac}aaa"), None);
+        assert_eq!(colour_from("#ff8000"), Some([255, 128, 0]));
+    }
 
     fn song() -> Project {
         let mut p = Project::new(48_000);
