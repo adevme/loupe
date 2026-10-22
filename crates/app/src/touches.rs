@@ -458,6 +458,22 @@ mod running_tests {
     }
 
     #[test]
+    fn an_export_while_a_track_is_armed_carries_the_plugin_settings_heard_now() {
+        let fake = a_plugin_with_a_knob("armed-export", &[0x11]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        app.gather_fx_state();
+        assert_eq!(state_on(&app, track), vec![0x11]);
+        let mut input = loupe_engine::Input::open(loupe_engine::InputChoice::Practice).expect("the practice input opens");
+        app.engine.hear(&mut input);
+        app.engine.hear_on(&[track]);
+        assert!(racks_must_stay(&app.engine), "the track is armed");
+        fake.turned_to(&[0x22]);
+        let written = app.exported_project_file();
+        assert_eq!(state_on(&app, track), vec![0x22], "the export took the settings from before the knob moved");
+        assert!(written.contains("state=22"), "the project copy beside the export holds the old settings");
+    }
+
+    #[test]
     fn the_racks_stay_with_the_engine_while_it_plays_or_hears_the_input() {
         let mut engine = Engine::start(loupe_engine::Output::Silent);
         assert!(!racks_must_stay(&engine), "a quiet engine can lend its racks");
