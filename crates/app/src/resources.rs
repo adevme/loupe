@@ -42,7 +42,7 @@ impl Resources {
             .system
             .processes()
             .values()
-            .filter(|process| process.thread_kind().is_none())
+            .filter(|process| process.thread_kind().is_none() && mine.contains(&process.pid()))
             .map(|process| (process.pid().as_u32(), Usage { cpu: (!first).then(|| (process.cpu_usage() / cores).clamp(0.0, 100.0)), memory: process.memory() }))
             .collect();
         let (cpu, memory) = self.each.values().fold((0.0f32, 0u64), |(cpu, memory), usage| (cpu + usage.cpu.unwrap_or(0.0), memory + usage.memory));
@@ -85,5 +85,19 @@ mod tests {
         std::thread::sleep(LOOK_EVERY + Duration::from_millis(50));
         found.look(&[]);
         assert!(found.cpu.is_some_and(|cpu| (0.0..=100.0).contains(&cpu)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_that_has_gone_is_no_longer_counted() {
+        let mut host = std::process::Command::new("sleep").arg("30").spawn().expect("a stand-in host starts");
+        let mut found = Resources::new();
+        found.look(&[host.id()]);
+        assert!(found.each.contains_key(&host.id()), "the running host was not measured");
+        let _ = host.kill();
+        let _ = host.wait();
+        found.looked = None;
+        found.look(&[]);
+        assert!(!found.each.contains_key(&host.id()), "a host that was let go is still counted");
     }
 }
