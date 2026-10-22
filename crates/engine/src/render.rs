@@ -106,6 +106,10 @@ pub trait Chains: Send {
         0
     }
 
+    fn master_latency(&self) -> usize {
+        0
+    }
+
     fn follow(&mut self, project: &Project) -> Vec<String> {
         let _ = project;
         Vec::new()

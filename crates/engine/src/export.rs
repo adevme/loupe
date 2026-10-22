@@ -455,23 +455,25 @@ pub fn export_through(
 
     let extension = plan.format.extension();
     let mix = plan.folder.join(format!("{}.{extension}", plan.name));
-    let gain = if measuring {
+    let lead = chains.as_deref().map_or(0, |racks| racks.master_latency()) as Frames;
+    let whole = Reach { from, frames: span, rings_out: plan.range.is_none(), lead };
+    let (gain, written) = if measuring {
         let spilt = plan.folder.join(format!("{}.{MEASURING}", plan.name));
         let mut mixdown = if in_memory { Mixed::Memory(Vec::new()) } else { Mixed::Spilt(spilt.clone()) };
-        let made = measure_into(&mut mixdown, project, from, to, &mut pacer, chains.as_deref_mut()).and_then(|levels| {
+        let made = measure_into(&mut mixdown, project, whole, &mut pacer, chains.as_deref_mut()).and_then(|(levels, written)| {
             pacer.finished_a_stage();
             let gain = plan.normalise.gain(levels);
-            write_mixdown(&mixdown, &mix, plan, project.rate, span, gain.linear(), &mut pacer)?;
+            write_mixdown(&mixdown, &mix, plan, project.rate, written, gain.linear(), &mut pacer)?;
             pacer.finished_a_stage();
-            Ok(gain)
+            Ok((gain, written))
         });
         let _ = fs::remove_file(&spilt);
         made.map_err(|why| failed(&mix, why))?
     } else {
-        write_file(&mix, plan.format, plan.dither, project, from, to, 1.0, &mut pacer, chains.as_deref_mut())
+        let written = write_file(&mix, plan.format, plan.dither, project, whole, 1.0, &mut pacer, chains.as_deref_mut())
             .map_err(|why| failed(&mix, why))?;
         pacer.finished_a_stage();
-        Gain::unchanged(None)
+        (Gain::unchanged(None), written)
     };
     let copy = plan.folder.join(format!("{}.lp", plan.name));
     let began = Instant::now();
@@ -481,7 +483,7 @@ pub fn export_through(
     if plan.split {
         let stems_folder = plan.folder.join(STEMS_FOLDER);
         fs::create_dir_all(&stems_folder).map_err(|why| failed(&stems_folder, why))?;
-        write_stems(&stems_folder, &stems, plan.format, plan.dither, project, from, to, gain.linear(), &mut pacer, chains.as_deref_mut())?;
+        write_stems(&stems_folder, &stems, plan.format, plan.dither, project, Reach::fixed(from, written, 0), gain.linear(), &mut pacer, chains.as_deref_mut())?;
         pacer.finished_a_stage();
     }
     let mut notes: Vec<String> = gain.note.into_iter().collect();
@@ -526,7 +528,9 @@ pub fn render_to_wav_through(
         render_units: render_units(project),
         other_nanoseconds_a_frame: Format::WavFloat.nanoseconds_a_frame(),
     }]);
-    write_file(path, Format::WavFloat, false, project, from, to, 1.0, &mut pacer, chains)
+    let lead = chains.as_deref().map_or(0, |racks| racks.master_latency()) as Frames;
+    write_file(path, Format::WavFloat, false, project, Reach::fixed(from, span, lead), 1.0, &mut pacer, chains)
+        .map(|_| ())
         .map_err(|why| format!("{}: {why}", path.display()))
 }
 
@@ -553,7 +557,7 @@ pub fn render_stems_through(
         render_units: render_units(project),
         other_nanoseconds_a_frame: Format::WavFloat.nanoseconds_a_frame(),
     }]);
-    write_stems(folder, &stems, Format::WavFloat, false, project, from, to, 1.0, &mut pacer, chains)
+    write_stems(folder, &stems, Format::WavFloat, false, project, Reach::fixed(from, span, 0), 1.0, &mut pacer, chains)
 }
 
 pub fn next_version_folder(exports: &Path) -> PathBuf {
@@ -591,19 +595,45 @@ fn amplify(block: &mut [[f32; 2]], gain: f32) {
 
 type Takes<'a> = dyn FnMut(&mut [[f32; 2]], &crate::render::Mixdown) -> io::Result<()> + 'a;
 
+const QUIET_TAIL: f32 = 1.0e-4;
+const MOST_TAIL_SECONDS: Frames = 30;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Reach {
+    pub from: Frames,
+    pub frames: Frames,
+    pub rings_out: bool,
+    pub lead: Frames,
+}
+
+impl Reach {
+    fn fixed(from: Frames, frames: Frames, lead: Frames) -> Self {
+        Self { from, frames, rings_out: false, lead }
+    }
+}
+
 fn render_into(
     project: &Project,
-    from: Frames,
-    to: Frames,
+    reach: Reach,
     pacer: &mut Pacer<'_>,
     mut chains: Option<&mut (dyn crate::render::Chains + '_)>,
     take: &mut Takes<'_>,
-) -> io::Result<()> {
+) -> io::Result<Frames> {
     let mut block = vec![[0.0f32; 2]; BLOCK];
     let mut spare = crate::render::Mixdown::default();
-    let mut pos = from;
-    while pos < to {
-        let count = BLOCK.min((to - pos) as usize);
+    let mut pos = reach.from;
+    let mut skip = reach.lead as usize;
+    let mut written: Frames = 0;
+    let longest_tail = MOST_TAIL_SECONDS * project.rate as Frames;
+    loop {
+        let ringing = written >= reach.frames;
+        if ringing && (!reach.rings_out || written >= reach.frames + longest_tail) {
+            break;
+        }
+        let count = match ringing {
+            true => BLOCK,
+            false => BLOCK.min((reach.frames - written) as usize + skip),
+        };
         let began = Instant::now();
         crate::render::render_through(project, pos, &mut block[..count], &mut spare, chains.as_deref_mut());
         if pacer.timing_wanted() {
@@ -611,14 +641,24 @@ fn render_into(
             let plugins = chains.as_deref().map_or(0, |racks| racks.plugin_spending().nanoseconds);
             pacer.spent_rendering(taken, plugins);
         }
-        take(&mut block[..count], &spare)?;
         pos += count as Frames;
-        pacer.wrote(count as Frames);
+        let dropped = skip.min(count);
+        skip -= dropped;
+        let kept = &mut block[dropped..count];
+        if kept.is_empty() {
+            continue;
+        }
+        if ringing && crate::render::loudest(kept) < QUIET_TAIL {
+            break;
+        }
+        take(kept, &spare)?;
+        written += kept.len() as Frames;
+        pacer.wrote(kept.len() as Frames);
         if pacer.stopped() {
             return Err(io::Error::other(STOPPED));
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -627,15 +667,14 @@ fn write_file(
     format: Format,
     dither: bool,
     project: &Project,
-    from: Frames,
-    to: Frames,
+    reach: Reach,
     gain: f32,
     pacer: &mut Pacer<'_>,
     chains: Option<&mut (dyn crate::render::Chains + '_)>,
-) -> io::Result<()> {
-    let mut writer = timed_on_files(pacer, || Writer::create(path, format, project.rate, to - from, dither))?;
+) -> io::Result<Frames> {
+    let mut writer = timed_on_files(pacer, || Writer::create(path, format, project.rate, reach.frames, dither))?;
     let mut encoding = Duration::ZERO;
-    render_into(project, from, to, pacer, chains, &mut |block, _| {
+    let written = render_into(project, reach, pacer, chains, &mut |block, _| {
         amplify(block, gain);
         let began = Instant::now();
         let went = writer.push(block);
@@ -643,7 +682,8 @@ fn write_file(
         went
     })?;
     pacer.spent_encoding(encoding);
-    timed_on_files(pacer, || writer.finish())
+    timed_on_files(pacer, || writer.finish())?;
+    Ok(written)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -653,8 +693,7 @@ fn write_stems(
     format: Format,
     dither: bool,
     project: &Project,
-    from: Frames,
-    to: Frames,
+    reach: Reach,
     gain: f32,
     pacer: &mut Pacer<'_>,
     chains: Option<&mut (dyn crate::render::Chains + '_)>,
@@ -666,13 +705,13 @@ fn write_stems(
     for track in stems {
         let at = project.tracks.iter().position(|other| other.id == track.id);
         let file = folder.join(format!("{}.{extension}", unused_name(&track.name, &mut used)));
-        let writer = timed_on_files(pacer, || Writer::create(&file, format, project.rate, to - from, dither))
+        let writer = timed_on_files(pacer, || Writer::create(&file, format, project.rate, reach.frames, dither))
             .map_err(|why| failed(&file, why))?;
         writing.push((at, file, writer));
     }
     let mut leaving = vec![[0.0f32; 2]; BLOCK];
     let mut encoding = Duration::ZERO;
-    render_into(project, from, to, pacer, chains, &mut |block, spare| {
+    render_into(project, reach, pacer, chains, &mut |block, spare| {
         let count = block.len();
         for (at, _, writer) in writing.iter_mut() {
             match at.and_then(|at| spare.tap(at, count)) {
@@ -719,18 +758,18 @@ enum Mixed {
 fn measure_into(
     mixdown: &mut Mixed,
     project: &Project,
-    from: Frames,
-    to: Frames,
+    reach: Reach,
     pacer: &mut Pacer<'_>,
     chains: Option<&mut (dyn crate::render::Chains + '_)>,
-) -> io::Result<Levels> {
+) -> io::Result<(Levels, Frames)> {
     let mut meter = Meter::new();
     meter.prepare(project.rate as f32);
+    let written;
     match mixdown {
         Mixed::Memory(kept) => {
-            kept.reserve((to - from) as usize);
+            kept.reserve(reach.frames as usize);
             let mut metering = Duration::ZERO;
-            render_into(project, from, to, pacer, chains, &mut |block, _| {
+            written = render_into(project, reach, pacer, chains, &mut |block, _| {
                 let began = Instant::now();
                 meter.process(block);
                 metering += began.elapsed();
@@ -740,10 +779,10 @@ fn measure_into(
             pacer.spent_metering(metering);
         }
         Mixed::Spilt(path) => {
-            let mut writer = timed_on_files(pacer, || Writer::create(path, Format::WavFloat, project.rate, to - from, false))?;
+            let mut writer = timed_on_files(pacer, || Writer::create(path, Format::WavFloat, project.rate, reach.frames, false))?;
             let mut metering = Duration::ZERO;
             let mut spilling = Duration::ZERO;
-            render_into(project, from, to, pacer, chains, &mut |block, _| {
+            written = render_into(project, reach, pacer, chains, &mut |block, _| {
                 let began = Instant::now();
                 meter.process(block);
                 let metered = began.elapsed();
@@ -760,7 +799,7 @@ fn measure_into(
     let began = Instant::now();
     let levels = levels_of(&mut meter, project.rate);
     pacer.spent_metering(began.elapsed());
-    Ok(levels)
+    Ok((levels, written))
 }
 
 fn write_mixdown(
@@ -935,6 +974,121 @@ mod tests {
         let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
         assert_eq!(racks.runs, 0, "the export ran the monitoring chain");
         assert_eq!(read.frames, heard(&project), "the monitoring chain leaked into the export");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    const ECHO_AFTER: usize = 6_000;
+
+    struct Echo {
+        held: Vec<[f32; 2]>,
+        at: usize,
+    }
+
+    impl Echo {
+        fn new() -> Self {
+            Self { held: vec![[0.0; 2]; ECHO_AFTER], at: 0 }
+        }
+    }
+
+    impl crate::render::Chains for Echo {
+        fn process(&mut self, _track: crate::model::TrackId, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                let back = self.held[self.at];
+                self.held[self.at] = *frame;
+                self.at = (self.at + 1) % ECHO_AFTER;
+                frame[0] += back[0] * 0.5;
+                frame[1] += back[1] * 0.5;
+            }
+        }
+    }
+
+    fn a_shout_near_the_end(frames: usize, shout_at: usize) -> Project {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        let mut audio = vec![[0.0f32; 2]; frames];
+        audio[shout_at] = [0.8, 0.8];
+        project.apply(Command::AddClip { track, source: Arc::new(Source::from_frames("shout", audio)), start: 0 }).unwrap();
+        project
+            .apply(Command::AddFx {
+                track,
+                fx: crate::model::Fx { mix: 1.0, path: PathBuf::from("delay.vst3"), index: 0, name: "Delay".into(), bypassed: false, state: Vec::new(), record: false },
+            })
+            .unwrap();
+        project
+    }
+
+    #[test]
+    fn a_whole_song_export_lets_the_delay_ring_out_past_the_last_clip() {
+        let project = a_shout_near_the_end(20_000, 18_000);
+        let folder = scratch("ring-out");
+        export_through(&project, &plan_for(&folder), &|_| true, Some(&mut Echo::new())).unwrap();
+        let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
+        let echo = 18_000 + ECHO_AFTER;
+        assert!(read.frames.len() > echo, "the file stops at frame {} with the song, before the echo at {echo}", read.frames.len());
+        assert!((read.frames[echo][0] - 0.4).abs() < 1e-6, "the echo read {:?}", read.frames[echo]);
+        assert!(read.frames.len() < echo + 2 * BLOCK, "the file ran on {} frames past the echo", read.frames.len() - echo);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_range_export_stops_where_the_range_does() {
+        let project = a_shout_near_the_end(20_000, 18_000);
+        let folder = scratch("range-no-tail");
+        let plan = ExportPlan { range: Some((0, 20_000)), ..plan_for(&folder) };
+        export_through(&project, &plan, &|_| true, Some(&mut Echo::new())).unwrap();
+        let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
+        assert_eq!(read.frames.len(), 20_000);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn stems_ring_out_as_long_as_the_mix_does() {
+        let project = a_shout_near_the_end(20_000, 18_000);
+        let folder = scratch("ring-out-stems");
+        let plan = ExportPlan { split: true, ..plan_for(&folder) };
+        export_through(&project, &plan, &|_| true, Some(&mut Echo::new())).unwrap();
+        let mix = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
+        let stem = Source::load(&folder.join(STEMS_FOLDER).join("Vox.wav"), 48_000).unwrap();
+        assert_eq!(stem.frames.len(), mix.frames.len());
+        assert!(stem.frames[18_000 + ECHO_AFTER][0] > 0.1, "the stem lost the echo");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    const MASTER_LOOKAHEAD: usize = 300;
+
+    struct Lookahead {
+        held: Vec<[f32; 2]>,
+        at: usize,
+    }
+
+    impl crate::render::Chains for Lookahead {
+        fn process(&mut self, _track: crate::model::TrackId, _audio: &mut [[f32; 2]]) {}
+
+        fn process_master(&mut self, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                let out = self.held[self.at];
+                self.held[self.at] = *frame;
+                self.at = (self.at + 1) % MASTER_LOOKAHEAD;
+                *frame = out;
+            }
+        }
+
+        fn master_latency(&self) -> usize {
+            MASTER_LOOKAHEAD
+        }
+    }
+
+    #[test]
+    fn a_master_limiter_with_lookahead_does_not_push_the_export_late() {
+        let project = a_shout_near_the_end(20_000, 1_000);
+        let folder = scratch("master-lookahead");
+        let mut racks = Lookahead { held: vec![[0.0; 2]; MASTER_LOOKAHEAD], at: 0 };
+        let plan = ExportPlan { range: Some((0, 20_000)), ..plan_for(&folder) };
+        export_through(&project, &plan, &|_| true, Some(&mut racks)).unwrap();
+        let read = Source::load(&folder.join("Song.wav"), 48_000).unwrap();
+        let loudest = read.frames.iter().position(|frame| frame[0] > 0.5);
+        assert_eq!(loudest, Some(1_000), "the shout landed {:?} frames late", loudest.map(|at| at as i64 - 1_000));
+        assert_eq!(read.frames.len(), 20_000);
         fs::remove_dir_all(folder).unwrap();
     }
 

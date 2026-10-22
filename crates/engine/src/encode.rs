@@ -124,8 +124,8 @@ pub struct Writer {
 }
 
 enum Kind {
-    Float { out: BufWriter<File>, raw: Vec<u8> },
-    Pcm { out: BufWriter<File>, quantiser: Quantiser, bytes: usize, raw: Vec<u8> },
+    Float { out: BufWriter<File>, raw: Vec<u8>, rate: u32, written: u64 },
+    Pcm { out: BufWriter<File>, quantiser: Quantiser, bytes: usize, raw: Vec<u8>, rate: u32, written: u64 },
     Flac(Box<Flac>),
     Mp3(Box<Mp3>),
 }
@@ -163,7 +163,7 @@ impl Writer {
                 }
                 let mut out = BufWriter::new(File::create(path)?);
                 out.write_all(&wav::float_header(CHANNELS, rate, frames as u32))?;
-                Kind::Float { out, raw: Vec::new() }
+                Kind::Float { out, raw: Vec::new(), rate, written: 0 }
             }
             Format::Wav24 | Format::Wav16 => {
                 let bits = format.bits().unwrap_or(16);
@@ -172,7 +172,7 @@ impl Writer {
                 }
                 let mut out = BufWriter::new(File::create(path)?);
                 out.write_all(&wav::pcm_header(CHANNELS, rate, bits, frames as u32))?;
-                Kind::Pcm { out, quantiser: Quantiser::new(bits, dither), bytes: bits as usize / 8, raw: Vec::new() }
+                Kind::Pcm { out, quantiser: Quantiser::new(bits, dither), bytes: bits as usize / 8, raw: Vec::new(), rate, written: 0 }
             }
             Format::Flac24 | Format::Flac16 => Kind::Flac(Box::new(Flac::create(path, rate, format.bits().unwrap_or(16), dither)?)),
             Format::Mp3Cbr320 => Kind::Mp3(Box::new(Mp3::create(path, rate)?)),
@@ -182,7 +182,8 @@ impl Writer {
 
     pub fn push(&mut self, block: &[[f32; 2]]) -> io::Result<()> {
         match &mut self.kind {
-            Kind::Float { out, raw } => {
+            Kind::Float { out, raw, written, .. } => {
+                *written += block.len() as u64;
                 raw.clear();
                 for frame in block {
                     raw.extend_from_slice(&frame[0].to_le_bytes());
@@ -190,7 +191,8 @@ impl Writer {
                 }
                 out.write_all(raw)
             }
-            Kind::Pcm { out, quantiser, bytes, raw } => {
+            Kind::Pcm { out, quantiser, bytes, raw, written, .. } => {
+                *written += block.len() as u64;
                 raw.clear();
                 for frame in block {
                     for value in frame {
@@ -206,11 +208,30 @@ impl Writer {
 
     pub fn finish(self) -> io::Result<()> {
         match self.kind {
-            Kind::Float { mut out, .. } | Kind::Pcm { mut out, .. } => out.flush(),
+            Kind::Float { out, rate, written, .. } => {
+                if written > wav::most_frames(CHANNELS) {
+                    return Err(too_long());
+                }
+                head_again(out, &wav::float_header(CHANNELS, rate, written as u32))
+            }
+            Kind::Pcm { out, rate, written, bytes, .. } => {
+                let bits = bytes as u16 * 8;
+                if written > wav::most_pcm_frames(CHANNELS, bits) {
+                    return Err(too_long());
+                }
+                head_again(out, &wav::pcm_header(CHANNELS, rate, bits, written as u32))
+            }
             Kind::Flac(flac) => flac.finish(),
             Kind::Mp3(mp3) => mp3.finish(),
         }
     }
+}
+
+fn head_again(out: BufWriter<File>, header: &[u8]) -> io::Result<()> {
+    let mut file = out.into_inner().map_err(|held| held.into_error())?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(header)?;
+    file.flush()
 }
 
 impl Flac {
