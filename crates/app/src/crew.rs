@@ -71,8 +71,7 @@ impl Crew {
         loop {
             let next = lock(&self.shared.queue).pop();
             let Some(job) = next else { break };
-            unsafe { (*job.run)() };
-            self.shared.done.fetch_add(1, Ordering::AcqRel);
+            run_counted(job, &self.shared);
         }
         while self.shared.done.load(Ordering::Acquire) < count {
             std::hint::spin_loop();
@@ -88,6 +87,12 @@ impl Drop for Crew {
     }
 }
 
+/// A job that panics still counts as done, so the caller waiting on the batch never hangs.
+fn run_counted(job: Job, shared: &Shared) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*job.run)() }));
+    shared.done.fetch_add(1, Ordering::AcqRel);
+}
+
 fn lock<T>(held: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     held.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -101,8 +106,7 @@ fn work(shared: Arc<Shared>) {
         }
         let next = lock(&shared.queue).pop();
         if let Some(job) = next {
-            unsafe { (*job.run)() };
-            shared.done.fetch_add(1, Ordering::AcqRel);
+            run_counted(job, &shared);
             keen_since = Instant::now();
             continue;
         }
@@ -155,6 +159,18 @@ mod tests {
             crew.run_all(jobs);
         }
         assert!(counts.iter().all(|count| *count == 50), "{counts:?}");
+    }
+
+    #[test]
+    fn a_job_that_panics_does_not_hang_the_batch() {
+        let crew = Crew::of(2);
+        let mut ran = 0u32;
+        let jobs: Vec<Box<dyn FnMut() + Send + '_>> = vec![
+            Box::new(|| panic!("a plugin job blew up")) as Box<dyn FnMut() + Send + '_>,
+            Box::new(|| ran += 1) as Box<dyn FnMut() + Send + '_>,
+        ];
+        crew.run_all(jobs);
+        assert_eq!(ran, 1);
     }
 
     #[test]

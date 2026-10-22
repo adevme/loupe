@@ -1021,7 +1021,7 @@ mod tests {
             if at_once {
                 racks = racks.away_from_the_audio_thread();
             }
-            assert_eq!(racks.whole_waves_at_once(), at_once);
+            assert!(racks.whole_waves_at_once(), "waves run on the crew on and off the audio thread alike");
             racks.follow(&project);
             assert_eq!(racks.chains.len(), 6);
             let mut out = vec![[0.0f32; 2]; 512];
