@@ -2888,7 +2888,7 @@ impl App {
         self.transact(run, |project| project.apply(command))
     }
 
-    fn remember(&mut self, before: Project, run: Option<Run>) {
+    fn keep_for_undo(&mut self, before: Project, run: Option<Run>) {
         if run.is_none() || run != self.run {
             self.undo.push(before);
             if self.undo.len() > UNDO_STEPS {
@@ -2897,6 +2897,10 @@ impl App {
         }
         self.redo.clear();
         self.run = run;
+    }
+
+    fn remember(&mut self, before: Project, run: Option<Run>) {
+        self.keep_for_undo(before, run);
         self.dirty = true;
         self.revision += 1;
         self.engine.set_project(&self.project);
@@ -2911,14 +2915,7 @@ impl App {
         let before = self.project.clone();
         match change(&mut self.project) {
             Ok(outcome) => {
-                if run.is_none() || run != self.run {
-                    self.undo.push(before);
-                    if self.undo.len() > UNDO_STEPS {
-                        self.undo.remove(0);
-                    }
-                }
-                self.redo.clear();
-                self.run = run;
+                self.keep_for_undo(before, run);
                 self.problem = None;
                 self.notice = None;
                 self.dirty = true;
