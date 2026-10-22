@@ -1092,6 +1092,51 @@ mod tests {
         fs::remove_dir_all(folder).unwrap();
     }
 
+    fn swept(target: impl Fn(crate::model::TrackId, crate::model::TrackId) -> crate::envelope::Target, from: f32, to: f32) -> Project {
+        use crate::envelope::{Point, Shape};
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(vox)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!("no track") };
+        let Ok(Outcome::Track(room)) = project.apply(Command::AddTrack { name: "Room".into() }) else { panic!("no track") };
+        project.apply(Command::AddClip { track: vox, source: Arc::new(Source::from_frames("held", vec![[0.5, 0.5]; 48_000])), start: 0 }).unwrap();
+        project.apply(Command::AddSend { from: vox, to: room }).unwrap();
+        let target = target(vox, room);
+        project.apply(Command::AddEnvelope { target }).unwrap();
+        project.apply(Command::ClearPoints { target, from: 0, to: Frames::MAX }).unwrap();
+        project.apply(Command::PutPoint { target, point: Point { at: 0, value: from, shape: Shape::Linear } }).unwrap();
+        project.apply(Command::PutPoint { target, point: Point { at: 48_000, value: to, shape: Shape::Linear } }).unwrap();
+        project
+    }
+
+    fn played_in_small_blocks(project: &Project) -> Vec<[f32; 2]> {
+        let mut heard = vec![[0.0f32; 2]; project.length() as usize];
+        let mut scratch = crate::render::Mixdown::default();
+        for (at, block) in heard.chunks_mut(256).enumerate() {
+            crate::render::render_through(project, (at * 256) as Frames, block, &mut scratch, None);
+        }
+        heard
+    }
+
+    fn furthest_apart(one: &[[f32; 2]], other: &[[f32; 2]]) -> (usize, f32) {
+        one.iter().zip(other).enumerate().fold((0, 0.0f32), |(at, most), (here, (a, b))| {
+            let apart = (a[0] - b[0]).abs().max((a[1] - b[1]).abs());
+            if apart > most { (here, apart) } else { (at, most) }
+        })
+    }
+
+    #[test]
+    fn pan_and_send_automation_export_as_smoothly_as_they_play() {
+        let pan = swept(|vox, _| crate::envelope::Target::TrackPan(vox), -1.0, 1.0);
+        let send = swept(|vox, room| crate::envelope::Target::SendGain { from: vox, to: room }, 0.0, 1.0);
+        for (what, project) in [("pan", pan), ("send", send)] {
+            let folder = scratch(&format!("smooth-{what}"));
+            export(&project, &plan_for(&folder), &|_| true).unwrap();
+            let written = Source::load(&folder.join("Song.wav"), 48_000).unwrap().frames;
+            let (at, apart) = furthest_apart(&written, &played_in_small_blocks(&project));
+            assert!(apart < 0.01, "{what}: the export is {apart} away from playback at frame {at}, it moves in steps");
+            fs::remove_dir_all(folder).unwrap();
+        }
+    }
+
     #[test]
     fn the_exported_mix_is_exactly_what_plays() {
         let project = song();

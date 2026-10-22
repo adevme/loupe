@@ -710,9 +710,15 @@ fn run(
             let closes = automated(project, target, pos + len as Frames, track.gain);
             let (opens, closes) = if silent { (0.0, 0.0) } else { (opens, closes) };
             let ramp = (closes - opens) / len.max(1) as f32;
-            let written_pan = automated(project, crate::envelope::Target::TrackPan(track.id), pos, track.pan);
-            let (left, right) = pan_gains(written_pan);
+            let pan_target = crate::envelope::Target::TrackPan(track.id);
+            let pan_opens = automated(project, pan_target, pos, track.pan);
+            let pan_closes = automated(project, pan_target, pos + len as Frames, track.pan);
+            let pan_ramp = (pan_closes - pan_opens) / len.max(1) as f32;
+            let (mut left, mut right) = pan_gains(pan_opens);
             for (i, frame) in scratch.buffers[index][..len].iter_mut().enumerate() {
+                if pan_ramp != 0.0 {
+                    (left, right) = pan_gains(pan_opens + pan_ramp * (i + 1) as f32);
+                }
                 let gain = opens + ramp * (i + 1) as f32;
                 frame[0] *= gain * left;
                 frame[1] *= gain * right;
@@ -723,17 +729,16 @@ fn run(
                 let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
                     continue;
                 };
-                let gain = automated(
-                    project,
-                    crate::envelope::Target::SendGain { from: track.id, to: send.to },
-                    pos,
-                    send.gain,
-                );
+                let send_target = crate::envelope::Target::SendGain { from: track.id, to: send.to };
+                let send_opens = automated(project, send_target, pos, send.gain);
+                let send_closes = automated(project, send_target, pos + len as Frames, send.gain);
+                let send_ramp = (send_closes - send_opens) / len.max(1) as f32;
                 let Mixdown { buffers, sides, pre, lines, .. } = &mut *scratch;
                 let line = &mut lines[first + 1 + which];
                 for i in 0..len {
                     let from = if send.pre_fader { pre[i] } else { buffers[index][i] };
                     let carried = line.step(from);
+                    let gain = send_opens + send_ramp * (i + 1) as f32;
                     let dest = if send.sidechain { &mut sides[target][i] } else { &mut buffers[target][i] };
                     dest[0] += carried[0] * gain;
                     dest[1] += carried[1] * gain;
@@ -1095,7 +1100,7 @@ mod tests {
         let mut out = vec![[0.0; 2]; 8];
         let mut scratch = Mixdown::default();
         mix_tracks_metered(&p, 1, &mut out, None, None, &mut scratch, None);
-        assert!(out[4][0] > 0.9 && out[4][1] < 0.05, "it should start hard left, got {:?}", out[4]);
+        assert!(out[4][0] > 0.9 && out[4][1] < 0.15, "it should start nearly hard left, got {:?}", out[4]);
         mix_tracks_metered(&p, 199, &mut out, None, None, &mut scratch, None);
         assert!(out[4][1] > 0.9 && out[4][0] < 0.05, "it should end hard right, got {:?}", out[4]);
     }
