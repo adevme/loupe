@@ -50,29 +50,16 @@ pub(crate) fn use_driver(driver: Option<&str>) {
     }
 }
 
-pub(crate) fn host() -> &'static cpal::Host {
+pub(crate) fn host() -> cpal::Host {
     let chosen = DRIVER.lock().ok().and_then(|chosen| chosen.clone());
     host_named(chosen.as_deref())
 }
 
-/// One host per driver for the life of Loupe. Each new ASIO host is a stranger to the
-/// driver the running one loaded: listing devices through it reloads the driver, and
-/// when the list is dropped the driver shuts, killing the stream that was recording.
-static HOSTS: Mutex<Vec<&'static cpal::Host>> = Mutex::new(Vec::new());
-
-pub(crate) fn host_named(driver: Option<&str>) -> &'static cpal::Host {
-    let id = driver
+pub(crate) fn host_named(driver: Option<&str>) -> cpal::Host {
+    driver
         .and_then(|name| cpal::available_hosts().into_iter().find(|id| id.name() == name))
-        .unwrap_or_else(|| cpal::default_host().id());
-    let Ok(mut hosts) = HOSTS.lock() else {
-        return Box::leak(Box::new(cpal::host_from_id(id).unwrap_or_else(|_| cpal::default_host())));
-    };
-    if let Some(host) = hosts.iter().find(|host| host.id() == id) {
-        return host;
-    }
-    let host: &'static cpal::Host = Box::leak(Box::new(cpal::host_from_id(id).unwrap_or_else(|_| cpal::default_host())));
-    hosts.push(host);
-    host
+        .and_then(|id| cpal::host_from_id(id).ok())
+        .unwrap_or_else(cpal::default_host)
 }
 
 pub fn outputs(driver: Option<&str>) -> Vec<String> {
@@ -121,7 +108,7 @@ pub fn one_device_both_ways() -> bool {
 
 pub fn choices(driver: Option<&str>, output: Option<&str>) -> Choices {
     let host = host_named(driver);
-    let Some(device) = output_named(host, output) else {
+    let Some(device) = output_named(&host, output) else {
         return Choices::default();
     };
     let configs: Vec<cpal::SupportedStreamConfigRange> =
