@@ -3230,13 +3230,8 @@ mod take_folders {
     }
 }
 
-/// The most a quiet clip's waveform is enlarged: 18 dB, so a whisper fills the lane
-/// but background hiss in a near-silent clip is not blown up into a wall.
 const MOST_WAVE_BOOST: f32 = 8.0;
 
-/// How much to enlarge a clip's waveform so its loudest moment reaches the lane edge.
-/// A take recorded at -20 dB then looks as full as a mastered beat, and the shape
-/// inside it keeps its real dynamics.
 fn wave_boost(clip: &Clip) -> f32 {
     let (lo, hi) = clip.peak(clip.offset as usize, (clip.offset + clip.len) as usize);
     let loudest = lo.abs().max(hi.abs()) * clip.gain;
