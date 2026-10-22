@@ -1,14 +1,20 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::history::{History, Moment, MOMENTS_PER_SECOND};
+use crate::key::{detected, Detected};
 use crate::{gain_of, Effect, Frame, Param, Unit, Values, DEFAULT_RATE};
 
 pub const KEYS: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-pub const SCALES: [&str; 5] = ["Chromatic", "Major", "Minor", "Major pentatonic", "Minor pentatonic"];
+pub const FOUND: &str = "Detected";
+pub const KEY_CHOICES: [&str; 13] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B", FOUND];
+pub const SCALES: [&str; 6] = ["Chromatic", "Major", "Minor", "Major pentatonic", "Minor pentatonic", FOUND];
 pub const STEPS: [&[u8]; 5] = [&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[0, 2, 4, 5, 7, 9, 11], &[0, 2, 3, 5, 7, 8, 10], &[0, 2, 4, 7, 9], &[0, 3, 5, 7, 10]];
+pub const FOLLOWED_KEY: f32 = KEYS.len() as f32;
+pub const FOLLOWED_SCALE: f32 = STEPS.len() as f32;
 
 const PARAMS: [Param; 5] = [
-    Param::choice("key", "Key", &KEYS, 0),
+    Param::choice("key", "Key", &KEY_CHOICES, 0),
     Param::choice("scale", "Scale", &SCALES, 0),
     Param::new("speed", "Speed", 0.0, 400.0, 40.0, Unit::Milliseconds),
     Param::new("amount", "Amount", 0.0, 100.0, 100.0, Unit::Percent),
@@ -32,6 +38,44 @@ const QUIETEST_DB: f32 = -50.0;
 const STICKY: f32 = 0.25;
 const UNVOICED_PERIOD_SECONDS: f32 = 0.005;
 const KEPT: usize = 1 << 15;
+const HOLD_SECONDS: f32 = 2.0;
+const NOTHING: u8 = 255;
+
+pub struct Tuning {
+    word: AtomicU32,
+}
+
+impl Tuning {
+    pub fn new() -> Self {
+        Self { word: AtomicU32::new(u32::from(NOTHING) | u32::from(NOTHING) << 8) }
+    }
+
+    fn read(&self) -> (u8, u8) {
+        let word = self.word.load(Ordering::Relaxed);
+        (word as u8, (word >> 8) as u8)
+    }
+
+    pub fn following(&self) -> Option<u8> {
+        let (following, _) = self.read();
+        (following != NOTHING).then_some(following)
+    }
+
+    pub fn waiting(&self) -> Option<u8> {
+        let (_, waiting) = self.read();
+        (waiting != NOTHING).then_some(waiting)
+    }
+
+    fn tell(&self, following: Option<u8>, waiting: Option<u8>) {
+        let packed = |which: Option<u8>| u32::from(which.unwrap_or(NOTHING));
+        self.word.store(packed(following) | packed(waiting) << 8, Ordering::Relaxed);
+    }
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct Tune {
     values: Values<5>,
@@ -57,6 +101,12 @@ pub struct Tune {
     since_moment: usize,
     moment_every: usize,
     history: Arc<History>,
+    detected: Arc<Detected>,
+    tuning: Arc<Tuning>,
+    following: Option<u8>,
+    waiting: Option<u8>,
+    waited: usize,
+    hold_for: usize,
 }
 
 impl Tune {
@@ -85,6 +135,12 @@ impl Tune {
             since_moment: 0,
             moment_every: 1,
             history: Arc::new(History::new()),
+            detected: detected(),
+            tuning: Arc::new(Tuning::new()),
+            following: None,
+            waiting: None,
+            waited: 0,
+            hold_for: 1,
         };
         tune.prepare(DEFAULT_RATE);
         tune
@@ -92,6 +148,70 @@ impl Tune {
 
     pub fn history(&self) -> Arc<History> {
         self.history.clone()
+    }
+
+    pub fn tuning(&self) -> Arc<Tuning> {
+        self.tuning.clone()
+    }
+
+    pub fn listens_to(&mut self, detected: Arc<Detected>) {
+        self.detected = detected;
+        self.following = None;
+        self.waiting = None;
+        self.waited = 0;
+    }
+
+    fn follows(&self) -> bool {
+        self.values.get(KEY) == FOLLOWED_KEY || self.values.get(SCALE) == FOLLOWED_SCALE
+    }
+
+    fn key_in_use(&self) -> i32 {
+        if self.values.get(KEY) == FOLLOWED_KEY {
+            return self.following.map_or(0, |key| i32::from(key % 12));
+        }
+        self.values.get(KEY) as i32
+    }
+
+    fn steps_in_use(&self) -> &'static [u8] {
+        let scale = self.values.get(SCALE);
+        if scale == FOLLOWED_SCALE {
+            return match self.following {
+                Some(key) if key < 12 => STEPS[1],
+                Some(_) => STEPS[2],
+                None => STEPS[0],
+            };
+        }
+        STEPS[(scale as usize).min(STEPS.len() - 1)]
+    }
+
+    fn hear_detected(&mut self, frames: usize) {
+        if !self.follows() {
+            self.waiting = None;
+            self.waited = 0;
+            self.tuning.tell(None, None);
+            return;
+        }
+        match self.detected.settled() {
+            Some(key) if Some(key) != self.following => {
+                if self.waiting == Some(key) {
+                    self.waited += frames;
+                } else {
+                    self.waiting = Some(key);
+                    self.waited = 0;
+                }
+                if self.waited >= self.hold_for && !self.voiced {
+                    self.following = Some(key);
+                    self.waiting = None;
+                    self.waited = 0;
+                    self.values.mark_changed();
+                }
+            }
+            _ => {
+                self.waiting = None;
+                self.waited = 0;
+            }
+        }
+        self.tuning.tell(self.following, self.waiting);
     }
 
     fn unvoiced_period(&self) -> f32 {
@@ -155,8 +275,8 @@ impl Tune {
     }
 
     fn choose_target(&mut self) {
-        let key = self.values.get(KEY) as i32;
-        let steps = STEPS[(self.values.get(SCALE) as usize).min(STEPS.len() - 1)];
+        let key = self.key_in_use();
+        let steps = self.steps_in_use();
         let near = self.sung.round() as i32;
         let mut best = self.target;
         let mut best_gap = if self.target >= 0.0 { (self.sung - self.target).abs() - STICKY } else { f32::MAX };
@@ -233,6 +353,10 @@ impl Effect for Tune {
         Some(self.history())
     }
 
+    fn tuning(&self) -> Option<Arc<Tuning>> {
+        Some(self.tuning())
+    }
+
     fn keeps_its_own_clock(&self) -> bool {
         true
     }
@@ -262,6 +386,7 @@ impl Effect for Tune {
         self.ahead = (LOOK_AHEAD_SECONDS * rate) as usize;
         self.detect_every = (DETECT_EVERY_SECONDS * rate).max(1.0) as usize;
         self.moment_every = (rate / MOMENTS_PER_SECOND).max(1.0) as usize;
+        self.hold_for = (HOLD_SECONDS * rate).max(1.0) as usize;
         let detect_len = ((DETECT_SECONDS * rate) as usize / SQUEEZE).max(64) * 2;
         self.squeezed = vec![0.0; detect_len];
         self.difference = Vec::with_capacity(detect_len);
@@ -287,6 +412,7 @@ impl Effect for Tune {
     }
 
     fn process(&mut self, audio: &mut [Frame]) {
+        self.hear_detected(audio.len());
         if self.values.take_change() && self.voiced {
             self.target = SILENT_NOTE;
             self.choose_target();
@@ -485,6 +611,133 @@ mod tests {
         let late = *seen.last().unwrap();
         assert!(early > 0.02 && early < 0.3, "after a tenth of a second it had moved {early}");
         assert!((late - 0.4).abs() < 0.04, "it never arrived: {late}");
+    }
+
+    fn told(key: u8, sure: f32, seconds: f32) -> Arc<Detected> {
+        let shared = Arc::new(Detected::new());
+        shared.tell(1, &crate::Heard { bpm: None, key: Some(key), sure, seconds });
+        shared
+    }
+
+    fn quiet(rate: f32, seconds: f32) -> Vec<Frame> {
+        vec![[0.0; 2]; (rate * seconds) as usize]
+    }
+
+    const A_MINOR: u8 = 21;
+    const D_MAJOR: u8 = 2;
+
+    #[test]
+    fn a_settled_reading_reaches_tune() {
+        let rate = 48_000.0;
+        let mut tune = Tune::new();
+        tune.prepare(rate);
+        tune.listens_to(told(A_MINOR, 0.8, 20.0));
+        tune.set(KEY, FOLLOWED_KEY);
+        tune.set(SCALE, FOLLOWED_SCALE);
+        run(&mut tune, &mut quiet(rate, 3.0));
+        assert_eq!(tune.following, Some(A_MINOR));
+        assert_eq!(tune.key_in_use(), 9);
+        assert_eq!(tune.steps_in_use(), STEPS[2]);
+        assert_eq!(tune.tuning().following(), Some(A_MINOR));
+        assert_eq!(tune.tuning().waiting(), None);
+    }
+
+    #[test]
+    fn a_shaky_or_fresh_reading_is_not_followed() {
+        let rate = 48_000.0;
+        for (sure, seconds) in [(0.3, 20.0), (0.9, 4.0)] {
+            let mut tune = Tune::new();
+            tune.prepare(rate);
+            tune.listens_to(told(A_MINOR, sure, seconds));
+            tune.set(KEY, FOLLOWED_KEY);
+            tune.set(SCALE, FOLLOWED_SCALE);
+            run(&mut tune, &mut quiet(rate, 3.0));
+            assert_eq!(tune.following, None, "{sure} sure after {seconds} s was followed");
+            assert_eq!(tune.key_in_use(), 0);
+            assert_eq!(tune.steps_in_use(), STEPS[0]);
+            assert_eq!(tune.tuning().following(), None);
+        }
+    }
+
+    #[test]
+    fn a_key_set_by_hand_is_never_overridden() {
+        let rate = 48_000.0;
+        let mut tune = Tune::new();
+        tune.prepare(rate);
+        tune.listens_to(told(D_MAJOR, 0.95, 30.0));
+        tune.set(KEY, 9.0);
+        tune.set(SCALE, 2.0);
+        run(&mut tune, &mut quiet(rate, 3.0));
+        assert_eq!((tune.value(KEY), tune.value(SCALE)), (9.0, 2.0));
+        assert_eq!(tune.key_in_use(), 9);
+        assert_eq!(tune.steps_in_use(), STEPS[2]);
+        assert_eq!(tune.following, None);
+        assert_eq!(tune.tuning().following(), None);
+    }
+
+    #[test]
+    fn a_new_key_waits_for_the_gap_between_phrases() {
+        let rate = 48_000.0;
+        let mut tune = Tune::new();
+        tune.prepare(rate);
+        let shared = told(A_MINOR, 0.8, 20.0);
+        tune.listens_to(shared.clone());
+        tune.set(KEY, FOLLOWED_KEY);
+        tune.set(SCALE, FOLLOWED_SCALE);
+        run(&mut tune, &mut quiet(rate, 3.0));
+        assert_eq!(tune.following, Some(A_MINOR));
+        shared.tell(1, &crate::Heard { bpm: None, key: Some(D_MAJOR), sure: 0.9, seconds: 40.0 });
+        let mut singing = sine(rate, 440.0, 0.5, (rate * 2.5) as usize);
+        run(&mut tune, &mut singing);
+        assert_eq!(tune.following, Some(A_MINOR), "it swapped key while the voice was still going");
+        assert_eq!(tune.waiting, Some(D_MAJOR));
+        assert_eq!(tune.tuning().waiting(), Some(D_MAJOR));
+        run(&mut tune, &mut quiet(rate, 0.5));
+        assert_eq!(tune.following, Some(D_MAJOR));
+        assert_eq!(tune.steps_in_use(), STEPS[1]);
+    }
+
+    #[test]
+    fn with_no_loupe_key_tune_tunes_as_it_always_did() {
+        let rate = 48_000.0;
+        let mut by_hand = Tune::new();
+        by_hand.prepare(rate);
+        by_hand.set(SPEED, 0.0);
+        let mut follower = Tune::new();
+        follower.prepare(rate);
+        follower.listens_to(Arc::new(Detected::new()));
+        follower.set(SPEED, 0.0);
+        follower.set(KEY, FOLLOWED_KEY);
+        follower.set(SCALE, FOLLOWED_SCALE);
+        let flat_a = 440.0 * 2f32.powf(-0.3 / 12.0);
+        let mut one = sine(rate, flat_a, 0.5, 48_000);
+        let mut two = one.clone();
+        run(&mut by_hand, &mut one);
+        run(&mut follower, &mut two);
+        assert_eq!(one, two);
+        assert_eq!(note_name(follower.target), note_name(by_hand.target));
+        assert_eq!(follower.following, None);
+    }
+
+    #[test]
+    fn following_comes_back_after_a_save_and_a_reload() {
+        let rate = 48_000.0;
+        let mut tune = Tune::new();
+        tune.prepare(rate);
+        tune.set(KEY, FOLLOWED_KEY);
+        tune.set(SCALE, FOLLOWED_SCALE);
+        let saved: Vec<u8> = (0..tune.params().len()).flat_map(|index| tune.value(index).to_le_bytes()).collect();
+        let mut again = Tune::new();
+        again.prepare(rate);
+        for (index, four) in saved.chunks_exact(4).enumerate() {
+            again.set(index, f32::from_le_bytes([four[0], four[1], four[2], four[3]]));
+        }
+        assert_eq!((again.value(KEY), again.value(SCALE)), (FOLLOWED_KEY, FOLLOWED_SCALE));
+        assert_eq!(again.params()[KEY].chosen(FOLLOWED_KEY), Some(FOUND));
+        assert_eq!(again.params()[SCALE].chosen(FOLLOWED_SCALE), Some(FOUND));
+        again.listens_to(told(A_MINOR, 0.8, 20.0));
+        run(&mut again, &mut quiet(rate, 3.0));
+        assert_eq!(again.following, Some(A_MINOR));
     }
 
     #[test]

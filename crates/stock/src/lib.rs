@@ -31,7 +31,7 @@ pub use denoise::{Denoise, Spectra};
 pub use doubler::{Doubler, MOST_VOICES as MOST_DOUBLER_VOICES};
 pub use rider::Rider;
 pub use history::{History, Moment, MOMENTS_PER_SECOND};
-pub use key::{key_name, listen_to, relative_of, Findings, Heard, KeyListener};
+pub use key::{detected, key_name, listen_to, relative_of, Detected, Findings, Heard, KeyListener, SETTLED_SECONDS, SURE_ENOUGH};
 pub use limiter::Limiter;
 pub use multiband::{band_knob as multiband_knob, Multiband, BANDS as MULTIBAND_BANDS, SOLOS as MULTIBAND_SOLOS};
 pub use loudness::{Meter, Readings, SILENT as SILENT_LUFS};
@@ -39,7 +39,7 @@ pub use reverb::{decay_seconds, Reverb};
 pub use saturation::{curve_of as saturation_curve, Saturation, STYLES as SATURATION_STYLES};
 pub use scope::Scope;
 pub use transient::Transient;
-pub use tune::{note_name as tune_note_name, Tune, KEYS as TUNE_KEYS, SCALES as TUNE_SCALES, SILENT_NOTE, STEPS as TUNE_STEPS};
+pub use tune::{note_name as tune_note_name, Tune, Tuning, FOLLOWED_KEY, FOLLOWED_SCALE, KEYS as TUNE_KEYS, KEY_CHOICES as TUNE_KEY_CHOICES, SCALES as TUNE_SCALES, SILENT_NOTE, STEPS as TUNE_STEPS};
 
 pub type Frame = [f32; 2];
 
@@ -150,6 +150,10 @@ pub trait Effect: Send {
     }
 
     fn findings(&self) -> Option<std::sync::Arc<Findings>> {
+        None
+    }
+
+    fn tuning(&self) -> Option<std::sync::Arc<Tuning>> {
         None
     }
 

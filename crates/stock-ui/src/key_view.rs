@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use iced::widget::{column, container, row, text, Space};
 use iced::{Alignment, Color, Element, Length};
-use loupe_stock::{key_name, relative_of, Findings, Heard};
+use loupe_stock::{key_name, relative_of, Findings, Heard, SETTLED_SECONDS, SURE_ENOUGH};
 
 use crate::kit::*;
 use crate::look::{Look, MEDIUM};
@@ -111,6 +111,12 @@ impl KeyEditor {
             Some(_) => "Not sure yet, let it hear more",
             None => "",
         };
+        let settled = self.live.sure >= SURE_ENOUGH && self.live.seconds >= SETTLED_SECONDS;
+        let follows = match self.live.key {
+            Some(key) if settled => format!("Every Loupe Tune set to Detected follows {}", key_name(key)),
+            Some(_) => "Not settled enough yet for a Loupe Tune to follow".to_string(),
+            None => String::new(),
+        };
         let relative = heard.key.map_or("Relative key".to_string(), |key| format!("Use {}", key_name(relative_of(if self.relative { relative_of(key) } else { key }))));
         let tweaks = row![
             toggle(look, "BPM × 2", self.factor > 1.0, KeyMessage::Double).element,
@@ -133,7 +139,13 @@ impl KeyEditor {
                 border: iced::Border::default().rounded(8).width(1).color(look.grid_strong),
                 ..Default::default()
             });
-        let status = column![text(source).size(12.5).color(look.text_dim), text(sure).size(12).font(MEDIUM).color(look.text_faint)].spacing(4).align_x(Alignment::Center);
+        let status = column![
+            text(source).size(12.5).color(look.text_dim),
+            text(sure).size(12).font(MEDIUM).color(look.text_faint),
+            text(follows).size(11.5).font(MEDIUM).color(if settled { look.accent } else { look.text_faint }),
+        ]
+        .spacing(4)
+        .align_x(Alignment::Center);
         let body = column![
             readouts,
             status,

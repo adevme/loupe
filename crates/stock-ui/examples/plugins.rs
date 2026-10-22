@@ -153,7 +153,7 @@ impl Preview {
             gate_editor: GateEditor::new(Some(gate.history()), look),
             meter_editor: MeterEditor::new(Some(meter.readings()), look),
             multiband_editor: MultibandEditor::new(Some(multiband.history()), look),
-            tune_editor: TuneEditor::new(Some(tune.history()), look),
+            tune_editor: TuneEditor::new(Some(tune.history()), Some(tune.tuning()), look),
             rider_editor: RiderEditor::new(Some(rider.history()), look),
             doubler_editor: DoublerEditor::new(look),
             denoise_editor: DenoiseEditor::new(Some(denoise.spectra()), RATE, look),

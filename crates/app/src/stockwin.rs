@@ -62,7 +62,7 @@ impl Window {
             9 => Face::Gate(Box::new(GateEditor::new(peek.history.clone(), look))),
             10 => Face::Meter(Box::new(MeterEditor::new(peek.meter.clone(), look))),
             11 => Face::Multiband(Box::new(MultibandEditor::new(peek.history.clone(), look))),
-            12 => Face::Tune(Box::new(TuneEditor::new(peek.history.clone(), look))),
+            12 => Face::Tune(Box::new(TuneEditor::new(peek.history.clone(), peek.tuning.clone(), look))),
             13 => Face::Key(Box::new(KeyEditor::new(peek.findings.clone(), look))),
             14 => Face::Rider(Box::new(RiderEditor::new(peek.history.clone(), look))),
             15 => Face::Doubler(Box::new(DoublerEditor::new(look))),

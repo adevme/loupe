@@ -8,7 +8,7 @@ use loupe_engine::{Chains, Clip, ClipId, Engine, PluginSpending, Project, Saved,
 use loupe_plugins::rack::{let_them_go, Fallen, Rack, Wanted};
 use loupe_plugins::sandbox::host_beside_us;
 use loupe_plugins::wire::Region;
-use loupe_stock::{Findings, History, Readings, Scopes, Spectra};
+use loupe_stock::{Findings, History, Readings, Scopes, Spectra, Tuning};
 
 #[derive(Clone, Default)]
 pub struct Peek {
@@ -17,6 +17,7 @@ pub struct Peek {
     pub meter: Option<Arc<Readings>>,
     pub findings: Option<Arc<Findings>>,
     pub spectra: Option<Arc<Spectra>>,
+    pub tuning: Option<Arc<Tuning>>,
     pub knobs: Vec<String>,
     pub held_back: bool,
     pub host: Option<u32>,
@@ -468,12 +469,12 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
-                let (scopes, history, meter, findings, spectra) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra()),
-                    None => (None, None, None, None, None),
+                let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
+                    None => (None, None, None, None, None, None),
                 };
 
-                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, spectra, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
 
 
             }
@@ -482,12 +483,12 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
-                let (scopes, history, meter, findings, spectra) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra()),
-                    None => (None, None, None, None, None),
+                let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
+                    None => (None, None, None, None, None, None),
                 };
 
-                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, spectra, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
 
 
             }
@@ -496,12 +497,12 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
-                let (scopes, history, meter, findings, spectra) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra()),
-                    None => (None, None, None, None, None),
+                let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
+                    None => (None, None, None, None, None, None),
                 };
 
-                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, spectra, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
 
 
             }
@@ -510,11 +511,11 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
-                let (scopes, history, meter, findings, spectra) = match rack.built_at(slot) {
-                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra()),
-                    None => (None, None, None, None, None),
+                let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
+                    Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
+                    None => (None, None, None, None, None, None),
                 };
-                found.push((Spot::Monitor(slot), Peek { scopes, history, meter, findings, spectra, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Monitor(slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
             }
         }
         let Ok(mut held) = self.peeks.lock() else { return };

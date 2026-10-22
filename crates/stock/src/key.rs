@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::tune::KEYS;
 use crate::{Effect, Frame, Param, DEFAULT_RATE};
@@ -24,6 +24,7 @@ const SMOOTH_HZ: f32 = 20.0;
 const BAND_WEIGHTS: [f32; 3] = [1.0, 1.0, 1.0];
 const SILENT: f32 = 1e-4;
 const NO_KEY: u32 = 255;
+const NOTHING: u8 = 255;
 const MAJOR: [f32; 12] = [0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081];
 const MINOR: [f32; 12] = [0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052];
 
@@ -79,6 +80,72 @@ impl Default for Findings {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub const SURE_ENOUGH: f32 = 0.5;
+pub const SETTLED_SECONDS: f32 = 10.0;
+const TENTHS: f32 = 10.0;
+const MOST_TENTHS: u64 = 0xFFFF;
+
+pub struct Detected {
+    word: AtomicU64,
+}
+
+impl Detected {
+    pub fn new() -> Self {
+        Self { word: AtomicU64::new(u64::from(NOTHING)) }
+    }
+
+    fn read(&self) -> (u8, f32, f32, u16) {
+        let word = self.word.load(Ordering::Relaxed);
+        let sure = ((word >> 8) & 0xFF) as f32 / 255.0;
+        let seconds = ((word >> 16) & 0xFFFF) as f32 / TENTHS;
+        (word as u8, sure, seconds, (word >> 32) as u16)
+    }
+
+    pub fn key(&self) -> Option<u8> {
+        let (key, _, _, _) = self.read();
+        (key != NOTHING).then_some(key)
+    }
+
+    pub fn sure(&self) -> f32 {
+        self.read().1
+    }
+
+    pub fn heard_seconds(&self) -> f32 {
+        self.read().2
+    }
+
+    pub fn settled(&self) -> Option<u8> {
+        let (key, sure, seconds, _) = self.read();
+        (key != NOTHING && sure >= SURE_ENOUGH && seconds >= SETTLED_SECONDS).then_some(key)
+    }
+
+    pub fn tell(&self, source: u16, heard: &Heard) {
+        if heard.key.is_none() && self.read().3 != source {
+            return;
+        }
+        let key = u64::from(heard.key.unwrap_or(NOTHING));
+        let sure = (heard.sure.clamp(0.0, 1.0) * 255.0).round() as u64;
+        let tenths = ((heard.seconds.max(0.0) * TENTHS) as u64).min(MOST_TENTHS);
+        self.word.store(key | sure << 8 | tenths << 16 | u64::from(source) << 32, Ordering::Relaxed);
+    }
+}
+
+impl Default for Detected {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn detected() -> Arc<Detected> {
+    static SHARED: OnceLock<Arc<Detected>> = OnceLock::new();
+    SHARED.get_or_init(|| Arc::new(Detected::new())).clone()
+}
+
+pub fn a_source() -> u16 {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    (NEXT.fetch_add(1, Ordering::Relaxed) % u32::from(u16::MAX)) as u16 + 1
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -358,15 +425,27 @@ pub struct KeyListener {
     rate: f32,
     listener: Listener,
     findings: Arc<Findings>,
+    detected: Arc<Detected>,
+    source: u16,
 }
 
 impl KeyListener {
     pub fn new() -> Self {
-        Self { rate: DEFAULT_RATE, listener: Listener::new(DEFAULT_RATE), findings: Arc::new(Findings::new()) }
+        Self { rate: DEFAULT_RATE, listener: Listener::new(DEFAULT_RATE), findings: Arc::new(Findings::new()), detected: detected(), source: a_source() }
     }
 
     pub fn findings(&self) -> Arc<Findings> {
         self.findings.clone()
+    }
+
+    pub fn tells(&mut self, detected: Arc<Detected>) {
+        self.detected = detected;
+    }
+
+    fn say(&self) {
+        let heard = self.listener.heard();
+        self.findings.tell(&heard);
+        self.detected.tell(self.source, &heard);
     }
 }
 
@@ -398,7 +477,7 @@ impl Effect for KeyListener {
 
     fn reset(&mut self) {
         self.listener = Listener::new(self.rate);
-        self.findings.tell(&self.listener.heard());
+        self.say();
     }
 
     fn findings(&self) -> Option<Arc<Findings>> {
@@ -414,7 +493,7 @@ impl Effect for KeyListener {
             changed |= self.listener.hear(*frame);
         }
         if changed {
-            self.findings.tell(&self.listener.heard());
+            self.say();
         }
     }
 }
@@ -486,6 +565,48 @@ mod tests {
         findings.start_again();
         plugin.process(&mut [[0.0; 2]; 64]);
         assert_eq!((findings.key(), findings.bpm()), (None, None));
+    }
+
+    #[test]
+    fn what_the_listener_hears_reaches_the_shared_reading() {
+        let mut plugin = KeyListener::new();
+        let shared = Arc::new(Detected::new());
+        plugin.tells(shared.clone());
+        plugin.prepare(RATE);
+        assert_eq!(shared.key(), None);
+        let chords = [[57, 60, 64], [50, 53, 57], [52, 56, 59], [57, 60, 64]];
+        let mut audio = song(92.0, &chords, 24.0);
+        for block in audio.chunks_mut(512) {
+            plugin.process(block);
+        }
+        assert_eq!(shared.key().map(key_name).as_deref(), Some("A minor"));
+        assert!(shared.heard_seconds() >= SETTLED_SECONDS, "only {} s reached the reading", shared.heard_seconds());
+        assert!(shared.sure() >= SURE_ENOUGH, "only {} sure", shared.sure());
+        assert_eq!(shared.settled(), shared.key());
+        plugin.findings().start_again();
+        plugin.process(&mut [[0.0; 2]; 64]);
+        assert_eq!((shared.key(), shared.settled()), (None, None));
+    }
+
+    #[test]
+    fn a_listener_that_has_heard_nothing_does_not_wipe_another_one() {
+        let shared = Detected::new();
+        shared.tell(1, &Heard { bpm: None, key: Some(5), sure: 0.9, seconds: 20.0 });
+        shared.tell(2, &Heard::default());
+        assert_eq!(shared.settled(), Some(5));
+        shared.tell(1, &Heard::default());
+        assert_eq!(shared.settled(), None);
+    }
+
+    #[test]
+    fn a_reading_is_only_settled_once_it_is_sure_and_has_heard_enough() {
+        let shared = Detected::new();
+        shared.tell(1, &Heard { bpm: None, key: Some(7), sure: SURE_ENOUGH - 0.1, seconds: 30.0 });
+        assert_eq!((shared.key(), shared.settled()), (Some(7), None));
+        shared.tell(1, &Heard { bpm: None, key: Some(7), sure: 0.9, seconds: SETTLED_SECONDS - 1.0 });
+        assert_eq!((shared.key(), shared.settled()), (Some(7), None));
+        shared.tell(1, &Heard { bpm: None, key: Some(7), sure: 0.9, seconds: SETTLED_SECONDS });
+        assert_eq!(shared.settled(), Some(7));
     }
 
     #[test]
