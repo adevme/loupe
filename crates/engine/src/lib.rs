@@ -17,7 +17,7 @@ mod wav;
 
 pub use audio::{bar_frames, Engine, Load, Output, TapedKey, METERS};
 pub use chain::{chain_from, chain_text};
-pub use devices::{choices, default_driver, drivers, milliseconds, outputs, Choices, Device, Failure, Running, BUFFERS, RATES};
+pub use devices::{choices, default_driver, driver_extra_delay, drivers, milliseconds, outputs, Choices, Device, Failure, Running, BUFFERS, RATES};
 pub use encode::Format;
 pub use export::{export, BLOCK as EXPORT_BLOCK, Going, STOPPED, export_through, next_version_folder, render_stems_through, render_to_wav, render_to_wav_through, ExportPlan, Gain, Levels, Normalise, TRUE_PEAK_CEILING};
 pub use file::{SavedClip, SavedFx, SavedProject, SavedTrack};

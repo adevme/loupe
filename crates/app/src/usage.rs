@@ -214,6 +214,7 @@ mod tests {
             metronome: false,
             count_in_bars: 0,
             preroll_bars: 2,
+            record_offset_ms: 0,
             punch: false,
             hear_input: crate::settings::Hearing::default(),
             snap: true,

@@ -1135,3 +1135,19 @@ fn check_type_sizes() {
         std::mem::size_of::<ai::ASIOTime>()
     );
 }
+
+/// The loaded driver's own report of its delays, in frames: how long a sound takes
+/// from the input jack to the program, and from the program to the output jack.
+/// Only meaningful once buffers are made, so ask after a stream has started.
+pub fn current_latencies() -> Result<(c_long, c_long), AsioError> {
+    let (mut input, mut output): (c_long, c_long) = (0, 0);
+    unsafe {
+        asio_result!(ai::ASIOGetLatencies(&mut input, &mut output))?;
+    }
+    Ok((input, output))
+}
+
+/// The buffer size the loaded driver prefers, which is the one used when none is asked for.
+pub fn preferred_buffer_size() -> Result<c_long, AsioError> {
+    asio_get_buffer_sizes().map(|sizes| sizes.pref)
+}

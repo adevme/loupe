@@ -17,5 +17,8 @@ symphonia = { version = "0.5", features = ["aac", "aiff", "isomp4", "mp3", "wav"
 # build that links it cannot be given away under this licence, and the build
 # downloads the SDK from steinberg.net. Build with --features asio only if you
 # have agreed to Steinberg's terms and are keeping that build to yourself.
+[target.'cfg(windows)'.dependencies]
+asio-sys = { version = "0.2", optional = true }
+
 [features]
-asio = ["cpal/asio"]
+asio = ["cpal/asio", "dep:asio-sys"]

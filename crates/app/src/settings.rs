@@ -10,6 +10,8 @@ pub const BACKUPS_KEPT: std::ops::RangeInclusive<u32> = 1..=100;
 pub const DEFAULT_BACKUPS_KEPT: u32 = 20;
 pub const COUNT_IN_BARS: [u32; 4] = [0, 1, 2, 4];
 pub const DEFAULT_PREROLL_BARS: u32 = 2;
+/// The furthest a take can be nudged by hand, either way, in milliseconds.
+pub const MOST_RECORD_OFFSET_MS: i32 = 50;
 const LONGEST_NUMBER: usize = 3;
 
 pub struct Settings {
@@ -29,6 +31,7 @@ pub struct Settings {
     pub metronome: bool,
     pub count_in_bars: u32,
     pub preroll_bars: u32,
+    pub record_offset_ms: i32,
     pub punch: bool,
     pub hear_input: Hearing,
     pub hear_through_chain: bool,
@@ -101,6 +104,7 @@ impl Settings {
             metronome: value_of("metronome") == Some("on"),
             count_in_bars: value_of("count_in").and_then(count_in_from).unwrap_or(0),
             preroll_bars: value_of("preroll").and_then(count_in_from).unwrap_or(DEFAULT_PREROLL_BARS),
+            record_offset_ms: value_of("record_offset").and_then(|text| text.trim().parse::<i32>().ok()).filter(|ms| ms.abs() <= MOST_RECORD_OFFSET_MS).unwrap_or(0),
             punch: value_of("punch") == Some("on"),
             hear_input: Hearing::from_saved(value_of("hear_input")),
             hear_through_chain: value_of("hear_through_chain") != Some("off"),
@@ -318,6 +322,15 @@ mod tests {
         }
         assert_eq!(Hearing::from_saved(Some("on")), Hearing::WhileRecording, "settings written before the modes existed");
         assert_eq!(Hearing::from_saved(None), Hearing::WhileRecording);
+    }
+
+    #[test]
+    fn the_record_offset_is_kept_within_reach() {
+        let parse = |text: &str| Some(text).and_then(|text| text.trim().parse::<i32>().ok()).filter(|ms| ms.abs() <= MOST_RECORD_OFFSET_MS).unwrap_or(0);
+        assert_eq!(parse("-12"), -12);
+        assert_eq!(parse("7"), 7);
+        assert_eq!(parse("400"), 0, "a wild offset is ignored");
+        assert_eq!(parse("soon"), 0);
     }
 
     #[test]

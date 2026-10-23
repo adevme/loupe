@@ -359,6 +359,7 @@ pub enum Message {
     CountInChosen(CountIn),
     FollowChosen(following::Follow),
     PrerollChosen(CountIn),
+    RecordOffsetChosen(RecordOffset),
     TogglePunch,
     ClipToTrack(ClipId, TrackId),
     ToggleClipMute(ClipId),
@@ -708,6 +709,8 @@ struct App {
     count_in_bars: u32,
     resources: resources::Resources,
     preroll_bars: u32,
+    /// Milliseconds added to where every take lands; negative moves takes earlier.
+    record_offset_ms: i32,
     punch: bool,
     hear_input: settings::Hearing,
     hear_through_chain: bool,
@@ -867,6 +870,7 @@ impl App {
             count_in_bars: settings.count_in_bars,
             resources: resources::Resources::new(),
             preroll_bars: settings.preroll_bars,
+            record_offset_ms: settings.record_offset_ms,
             punch: settings.punch,
             hear_input: settings.hear_input,
             hear_through_chain: settings.hear_through_chain,
@@ -1082,6 +1086,7 @@ impl App {
             count_in_bars: 0,
             resources: resources::Resources::new(),
             preroll_bars: 0,
+            record_offset_ms: 0,
             punch: false,
             hear_input: settings::Hearing::default(),
             hear_through_chain: false,
@@ -2824,6 +2829,12 @@ impl App {
                     self.problem = Some(format!("Could not save settings: {why}"));
                 }
             }
+            Message::RecordOffsetChosen(RecordOffset(ms)) => {
+                self.record_offset_ms = ms;
+                if let Err(why) = settings::save("record_offset", &ms.to_string()) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
+                }
+            }
             Message::PrerollChosen(CountIn(bars)) => {
                 self.preroll_bars = bars;
                 if let Err(why) = settings::save("preroll", &bars.to_string()) {
@@ -4030,6 +4041,9 @@ impl App {
             text("Pre-roll").size(13).font(palette.medium),
             text("With Punch on, how many bars play before the marked part, so you can catch the beat.").size(12).color(palette.text_dim),
             theme::picker(palette, COUNT_INS, Some(CountIn(self.preroll_bars)), Message::PrerollChosen).width(160),
+            text("Recording offset").size(13).font(palette.medium),
+            text("Loupe already allows for the delay your audio driver reports. If takes still land early or late against the beat, move them here: a positive number moves every new take later.").size(12).color(palette.text_dim),
+            theme::picker(palette, record_offsets(), Some(RecordOffset(self.record_offset_ms)), Message::RecordOffsetChosen).width(160),
         ]
         .spacing(8);
 
@@ -4154,6 +4168,22 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CountIn(u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordOffset(i32);
+
+fn record_offsets() -> Vec<RecordOffset> {
+    (-settings::MOST_RECORD_OFFSET_MS..=settings::MOST_RECORD_OFFSET_MS).map(RecordOffset).collect()
+}
+
+impl std::fmt::Display for RecordOffset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            0 => write!(f, "None"),
+            ms => write!(f, "{ms:+} ms"),
+        }
+    }
+}
 
 const HEARINGS: [settings::Hearing; 3] = [settings::Hearing::Never, settings::Hearing::WhileArmed, settings::Hearing::WhileRecording];
 

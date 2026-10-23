@@ -106,6 +106,19 @@ pub fn one_device_both_ways() -> bool {
     host().id().name() == "ASIO"
 }
 
+/// Frames the ASIO driver reports for its input and output beyond the one buffer each way
+/// that stream timestamps already count, so a take can be moved back to where it was played.
+/// Zero away from ASIO, or when the driver will not say.
+pub fn driver_extra_delay() -> i64 {
+    #[cfg(all(windows, feature = "asio"))]
+    if one_device_both_ways() {
+        if let (Ok((input, output)), Ok(buffer)) = (asio_sys::current_latencies(), asio_sys::preferred_buffer_size()) {
+            return ((input - buffer).max(0) + (output - buffer).max(0)) as i64;
+        }
+    }
+    0
+}
+
 pub fn choices(driver: Option<&str>, output: Option<&str>) -> Choices {
     let open = (driver == Some("ASIO")).then(in_use).flatten();
     let device = match open {
