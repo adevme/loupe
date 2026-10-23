@@ -715,7 +715,6 @@ struct App {
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
     background: Vec<scripts::Background>,
-    /// Set by next_take so the loop pass it interrupts is not kept.
     drop_cut_pass: bool,
     snap: bool,
     follow: following::Follow,
@@ -2069,7 +2068,6 @@ impl App {
                 let muted = found.take_muted(take);
                 if offsets.get(take).is_some_and(|was| *was != offset) {
                     offsets[take] = offset;
-                    // SetTakes finds muted takes by where they start, so a slid take is muted again here.
                     self.transact(Some(Run::Slide(clip)), |project| {
                         project.apply(Command::SetTakes { clip, offsets, active })?;
                         if muted {

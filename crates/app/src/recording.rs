@@ -99,8 +99,6 @@ impl App {
         Task::none()
     }
 
-    /// Ends this take and records the next from the same place. In a loop recording the
-    /// pass that was cut short is dropped and the next pass starts at the top of the loop.
     pub(crate) fn next_take(&mut self) -> Task<Message> {
         let looping = self.recording.as_ref().and_then(|recording| recording.looping);
         let mut tasks = Vec::new();
@@ -173,7 +171,6 @@ impl App {
         let keep_from = if recording.counted_in { recording.from as i64 } else { 0 };
         let punch = recording.punch;
         let passes = recording.looping.and_then(|(from, to)| loop_takes(start, from, to, frames, rate));
-        // "Next take" in a loop recording drops the pass it cut short.
         let passes = match std::mem::take(&mut self.drop_cut_pass) {
             true => passes.map(|mut passes| {
                 passes.offsets.truncate(passes.active + 1);
@@ -562,7 +559,6 @@ impl App {
     fn place_passes(&mut self, passes: Passes, sources: Vec<(TrackId, Arc<Source>)>) {
         let Passes { from, len, offsets, active, .. } = passes;
         let count = offsets.len();
-        // Passes over clips already there join their takes, like a single take does.
         let mut stacks = Vec::new();
         let mut loose = Vec::new();
         for (track, source) in sources {
@@ -652,7 +648,6 @@ pub(crate) struct Stacked {
     pub offsets: Vec<i64>,
 }
 
-/// One side of a stack: audio, where it sits in the song, and where each take starts in the audio.
 pub(crate) struct Part<'a> {
     pub frames: &'a [[f32; 2]],
     pub start: Frames,
@@ -660,8 +655,6 @@ pub(crate) struct Part<'a> {
     pub offsets: Vec<i64>,
 }
 
-/// Lays new takes beside old ones in one file, so both live in one clip that covers both spans.
-/// Every take keeps its place in time; the new ones come after the old.
 pub(crate) fn stacked(old: Part<'_>, new: Part<'_>) -> Stacked {
     let start = old.start.min(new.start);
     let end = (old.start + old.len).max(new.start + new.len);
@@ -681,7 +674,6 @@ pub(crate) fn stacked(old: Part<'_>, new: Part<'_>) -> Stacked {
 }
 
 impl App {
-    /// Joins new takes to the audio clip on `track` they overlap most, if any.
     fn stack_onto(&self, track: TrackId, new: Part<'_>, active: usize, path: &Path) -> Option<Result<Command, String>> {
         let end = new.start + new.len;
         let found = self.project.track(track)?;

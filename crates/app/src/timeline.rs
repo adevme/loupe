@@ -168,7 +168,6 @@ enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
-    /// Alt+drag on a take lane: slides that take's audio under the clip, like Reaper's take slip.
     SlideTake { clip: ClipId, take: usize, grab: f64, from: i64, length: i64 },
     Resize { track: TrackId, top: f32 },
     LaneResize { target: loupe_engine::Target, top: f32 },
