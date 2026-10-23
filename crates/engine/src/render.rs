@@ -877,8 +877,8 @@ fn lay_clips(
         let pos = pos + ahead;
         let end = pos + out.len() as Frames;
         let silenced = match only {
-            Some(chosen) => clip.id != chosen || clip.muted,
-            None => clip.muted,
+            Some(chosen) => clip.id != chosen || clip.is_silent(),
+            None => clip.is_silent(),
         };
         let own = !clip.fx.is_empty() && chains.is_some();
         let rings_until = match own {
@@ -2636,5 +2636,29 @@ mod note_tests {
         let kept = project.clips().next().unwrap().notes.clone().unwrap();
         assert_eq!(kept.iter().map(|n| n.key).collect::<Vec<_>>(), [60, 64]);
         assert_eq!(kept[1].velocity, 1.0);
+    }
+}
+
+#[cfg(test)]
+mod take_mute {
+    use std::sync::Arc;
+
+    use crate::model::{Command, Outcome, Project};
+    use crate::source::Source;
+
+    #[test]
+    fn muting_the_playing_take_silences_the_piece_and_muting_another_does_not() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[0.5, 0.5]; 3_000]));
+        let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
+        p.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
+        p.apply(Command::SetTakes { clip, offsets: vec![0, 1_000, 2_000], active: 1 }).unwrap();
+        p.apply(Command::SetTakeMuted { clip, take: 0, muted: true }).unwrap();
+        assert!(!p.clip(clip).unwrap().is_silent(), "muting a take that is not playing silenced the piece");
+        p.apply(Command::SetTakeMuted { clip, take: 1, muted: true }).unwrap();
+        assert!(p.clip(clip).unwrap().is_silent(), "muting the playing take left the piece sounding");
+        p.apply(Command::SetTakes { clip, offsets: vec![1_000, 2_000], active: 0 }).unwrap();
+        assert_eq!(p.clip(clip).unwrap().muted_takes, vec![0], "the muted take lost its mute when a take before it was removed");
     }
 }

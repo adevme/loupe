@@ -176,7 +176,7 @@ enum Drag {
     Marquee { from: Point, to: Point },
     Trim { clip: ClipId, edge: Edge },
     Stretch { clip: ClipId, edge: Edge },
-    Paint { muted: Option<bool>, touched: Vec<ClipId> },
+    Paint { muted: Option<bool>, touched: Vec<ClipId>, take: Option<usize> },
     Point { target: loupe_engine::Target, which: usize },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
     Pan { track: TrackId, pull: EndlessDrag, pan_at_grab: f32 },
@@ -1132,17 +1132,23 @@ impl canvas::Program<Message> for Timeline<'_> {
                         closed.map(|track| Message::ToggleTakes(track.id))
                     }
                     (Tool::Comp, Hit::Clip(_) | Hit::Grip(..)) => None,
-                    (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) => {
+                    // On a take lane the mute tool mutes only that take in that piece; the other takes are left alone.
+                    (Tool::Mute, Hit::Take(clip, take)) => {
+                        let muted = !clip.take_muted(take);
+                        state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id], take: Some(take) });
+                        Some(Message::PaintMuteTake { clip: clip.id, take, muted })
+                    }
+                    (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
                         let muted = !clip.muted;
-                        state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id] });
+                        state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id], take: None });
                         Some(Message::PaintMute { clip: clip.id, muted })
                     }
                     (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) => {
-                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
+                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new(), take: None });
                         Some(Message::PaintDelete(clip.id))
                     }
                     (Tool::Mute | Tool::Delete, Hit::Lane) => {
-                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
+                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new(), take: None });
                         None
                     }
                     (_, Hit::Scrollbar) => {
@@ -1198,7 +1204,6 @@ impl canvas::Program<Message> for Timeline<'_> {
                     (_, Hit::Folder(track)) => Some(Message::ToggleTakes(track.id)),
                     (_, Hit::TakeHeader(track, take)) => Some(Message::UseTakeOnTrack(track.id, take)),
                     (_, Hit::RemoveTake(track, take)) => Some(Message::DeleteTake(track.id, take)),
-                    (_, Hit::Take(..)) => None,
                     (_, Hit::AddTrack) => Some(Message::AddTrack),
                     (_, Hit::Grip(clip, grip)) => {
                         let curve_at_grab = match grip {
@@ -1391,7 +1396,18 @@ impl canvas::Program<Message> for Timeline<'_> {
                         *to = p;
                         (Captured, Some(Message::Refresh))
                     }
-                    Drag::Paint { muted, touched } => {
+                    Drag::Paint { muted, touched, take: Some(lane) } => {
+                        let Hit::Take(clip, take) = self.hit(p) else {
+                            return (Captured, None);
+                        };
+                        if take != *lane || touched.contains(&clip.id) {
+                            return (Captured, None);
+                        }
+                        touched.push(clip.id);
+                        let muted = *muted.get_or_insert(!clip.take_muted(take));
+                        (Captured, Some(Message::PaintMuteTake { clip: clip.id, take, muted }))
+                    }
+                    Drag::Paint { muted, touched, take: None } => {
                         let (Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) = self.hit(p) else {
                             return (Captured, None);
                         };
@@ -1818,7 +1834,7 @@ impl Timeline<'_> {
             let clips_height = self.clips_height(track);
             let badges = self.take_badges(i);
             for clip in &track.clips {
-                let colour = if clip.muted { p.text_faint } else { track_colour };
+                let colour = if clip.is_silent() { p.text_faint } else { track_colour };
                 self.draw_clip(frame, size, clip, top, clips_height, colour, &badges);
             }
             self.draw_take_lanes(frame, size, track, top + clips_height, track_colour);
@@ -2118,7 +2134,7 @@ impl Timeline<'_> {
                     continue;
                 }
                 let (from_x, to_x) = (left.max(0.0), right.min(size.width));
-                let colour = if clip.muted { p.text_faint } else { track_colour };
+                let colour = if clip.muted || clip.take_muted(take) { p.text_faint } else { track_colour };
                 let chosen = take == clip.take;
                 let span = Size::new((to_x - from_x).max(1.0), box_height);
                 frame.fill_rectangle(Point::new(from_x, box_top), span, theme::mix(p.background, colour, if chosen { 0.3 } else { 0.1 }));
@@ -3228,6 +3244,25 @@ mod take_folders {
         let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 60.0));
         let (_, clicked) = canvas::Program::update(&timeline, &mut state, released, CANVAS, cursor(LEFT + 60.0));
         assert!(matches!(clicked, Some(crate::Message::UseTake(_, 3))), "a click on lane 4 did not pick take 4");
+    }
+
+    #[test]
+    fn the_mute_tool_on_a_take_lane_mutes_only_that_take() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        app.tool = Tool::Mute;
+        let clip = app.project.track(vox).unwrap().clips[0].id;
+        let timeline = timeline_of(&app);
+        let mut state = Interaction::default();
+        let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let (_, muted) = canvas::Program::update(&timeline, &mut state, press, CANVAS, mouse::Cursor::Available(Point::new(CANVAS.x + LEFT + 50.0, CANVAS.y + y)));
+        let Some(message) = muted else { panic!("muting on a take lane did nothing") };
+        assert!(matches!(message, crate::Message::PaintMuteTake { clip: id, take: 2, muted: true } if id == clip));
+        let _ = app.update(message);
+        let found = app.project.clip(clip).unwrap();
+        assert_eq!(found.muted_takes, vec![2]);
+        assert!(!found.muted, "the whole piece was muted, not just the take");
     }
 
     #[test]
