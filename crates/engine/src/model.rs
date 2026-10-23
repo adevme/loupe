@@ -48,7 +48,6 @@ pub struct Clip {
     pub stretched: Option<Arc<Source>>,
     pub takes: Vec<i64>,
     pub take: usize,
-    /// Takes muted on their own lane. When the playing take is one of them, this piece is silent.
     pub muted_takes: Vec<usize>,
     pub name: Option<String>,
 }
@@ -93,7 +92,6 @@ impl Clip {
         self.takes.len() > 1
     }
 
-    /// Whether this piece is heard: muted as a whole, or its playing take muted on its lane, silences it.
     pub fn is_silent(&self) -> bool {
         self.muted || self.muted_takes.contains(&self.take)
     }
@@ -757,7 +755,6 @@ impl Project {
                 if target.notes.is_some() || chosen < 0 {
                     return Err(CommandError::InvalidValue);
                 }
-                // Muted takes follow their recordings, found by where each one starts.
                 let muted_at: Vec<i64> = target.muted_takes.iter().filter_map(|take| target.takes.get(*take).map(|shift| target.offset as i64 + shift)).collect();
                 target.muted_takes = offsets.iter().enumerate().filter(|(_, at)| muted_at.contains(at)).map(|(take, _)| take).collect();
                 if offsets.len() < 2 {

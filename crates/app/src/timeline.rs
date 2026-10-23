@@ -1132,7 +1132,6 @@ impl canvas::Program<Message> for Timeline<'_> {
                         closed.map(|track| Message::ToggleTakes(track.id))
                     }
                     (Tool::Comp, Hit::Clip(_) | Hit::Grip(..)) => None,
-                    // On a take lane the mute tool mutes only that take in that piece; the other takes are left alone.
                     (Tool::Mute, Hit::Take(clip, take)) => {
                         let muted = !clip.take_muted(take);
                         state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id], take: Some(take) });
