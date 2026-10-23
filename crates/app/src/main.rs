@@ -1380,7 +1380,6 @@ impl App {
             }
             Message::SetLoop(range) => self.set_loop(range),
             Message::RangeMade => {
-                // Like Reaper: a new time selection puts the cursor at its start, unless the song is playing.
                 if let (Some((start, _)), false) = (self.loop_range, self.playing) {
                     self.seek(start);
                 }
