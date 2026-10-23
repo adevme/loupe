@@ -106,9 +106,6 @@ pub fn one_device_both_ways() -> bool {
     host().id().name() == "ASIO"
 }
 
-/// Frames the ASIO driver reports for its input and output beyond the one buffer each way
-/// that stream timestamps already count, so a take can be moved back to where it was played.
-/// Zero away from ASIO, or when the driver will not say.
 pub fn driver_extra_delay() -> i64 {
     #[cfg(all(windows, feature = "asio"))]
     if one_device_both_ways() {

@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::fmt;
 
-/// Errors that might occur during `Asio::load_driver`.
 #[derive(Clone, Debug)]
 pub enum LoadDriverError {
     LoadDriverFailed,
@@ -9,7 +8,6 @@ pub enum LoadDriverError {
     InitializationFailed(AsioError),
 }
 
-/// General errors returned by ASIO.
 #[derive(Clone, Debug)]
 pub enum AsioError {
     NoDrivers,

@@ -10,7 +10,6 @@ pub const BACKUPS_KEPT: std::ops::RangeInclusive<u32> = 1..=100;
 pub const DEFAULT_BACKUPS_KEPT: u32 = 20;
 pub const COUNT_IN_BARS: [u32; 4] = [0, 1, 2, 4];
 pub const DEFAULT_PREROLL_BARS: u32 = 2;
-/// The furthest a take can be nudged by hand, either way, in milliseconds.
 pub const MOST_RECORD_OFFSET_MS: i32 = 50;
 const LONGEST_NUMBER: usize = 3;
 

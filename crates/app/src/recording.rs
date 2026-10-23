@@ -122,8 +122,6 @@ impl App {
         self.engine.hear_on(&[]);
         self.engine.tape_keys(false);
         let began = recording.began.or_else(|| self.input.as_ref().and_then(Input::take_began).map(|at| self.engine.position_at(at)));
-        // Move the take back by what the driver says its input and output add, then by the
-        // hand-set offset, so it sits where it was sung against the beat that was heard.
         let nudge = self.record_offset_ms as i64 * self.project.rate as i64 / 1000 - loupe_engine::driver_extra_delay();
         let began = began.map(|at| at + nudge);
         self.engine.stop();

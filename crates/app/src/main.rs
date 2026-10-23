@@ -709,7 +709,6 @@ struct App {
     count_in_bars: u32,
     resources: resources::Resources,
     preroll_bars: u32,
-    /// Milliseconds added to where every take lands; negative moves takes earlier.
     record_offset_ms: i32,
     punch: bool,
     hear_input: settings::Hearing,
