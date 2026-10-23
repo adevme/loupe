@@ -291,8 +291,6 @@ fn rendering(file: &Path, out: &Path, stems: bool) -> Result<Vec<PathBuf>, Strin
     went
 }
 
-/// Runs the live mix the way the audio thread does, block after block, through the real
-/// plugin hosts, and reports where the time goes. No window, no sound card.
 fn benching(file: &Path, frames: usize, seconds: f64, from: f64, pause: f64) -> Result<String, String> {
     let text = std::fs::read_to_string(file).map_err(|why| format!("{}: {why}", file.display()))?;
     let rate = SavedProject::parse(&text)?.rate;

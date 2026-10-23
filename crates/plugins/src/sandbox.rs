@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 use crate::ceiling::{Ceiling, Seat};
 use crate::wire::{read_block_or_line, write_block, Ask, Came, Link, Reply};
 
-/// Round trips to the plugin hosts, counted for `loupe bench`: how many, their total time,
-/// the slowest one, and how many came back late.
 pub static EXCHANGES: AtomicU64 = AtomicU64::new(0);
 pub static EXCHANGE_NANOS: AtomicU64 = AtomicU64::new(0);
 pub static EXCHANGE_SLOWEST_NANOS: AtomicU64 = AtomicU64::new(0);
@@ -26,9 +24,6 @@ pub fn exchanges() -> (u64, u64, u64, u64) {
     )
 }
 
-/// How long the audio thread spins for a block to come back before it sleeps on it. A host
-/// answers most blocks within a few hundred microseconds, and being woken from a sleep costs
-/// the audio thread as much again.
 const SPIN_FOR_A_REPLY: Duration = Duration::from_millis(2);
 const PATIENCE: Duration = Duration::from_secs(20);
 const BLOCK_PATIENCE: Duration = Duration::from_millis(2_000);
@@ -164,8 +159,6 @@ impl Sandbox {
         })
     }
 
-    /// A word the host needs no answer to, such as the time. It rides down the pipe with the
-    /// next ask instead of waking the host on its own.
     pub fn tell(&mut self, ask: Ask) -> Result<(), String> {
         if self.lost {
             return Err("the plugin host is gone".into());
@@ -308,7 +301,6 @@ impl Sandbox {
             self.fell_behind()?;
             return Ok(Ran::Late);
         }
-        // The ask and its audio go down the pipe in one write, so the host wakes once.
         self.outgoing.clear();
         self.outgoing.append(&mut self.pending);
         let _ = ask.write(&mut self.outgoing);
@@ -453,9 +445,6 @@ impl Sandbox {
     }
 }
 
-/// Reads everything the host says as it says it, so the reader is already waiting on the pipe
-/// when a block comes back, instead of first being woken to ask for it. A block starts with
-/// the mark byte and a reply line never does, so nothing needs to know which is due.
 fn read_for(out: impl Read, _asked: Receiver<Want>, sends: Sender<Got>, tells: Sender<(usize, usize)>) {
     let mut reading = BufReader::new(out);
     let mut audio = Vec::new();
@@ -536,8 +525,6 @@ impl Drop for Sandbox {
             }
         }
         self.wants.take();
-        // The reader ends when the pipe does. A host that leaves a child holding the pipe open
-        // would hold this thread too, so it is let go rather than waited for.
         self.reader.take();
     }
 }

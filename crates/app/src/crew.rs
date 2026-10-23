@@ -1,23 +1,14 @@
-//! A crew of worker threads that stays up between blocks, so a wave of independent tracks can
-//! run its plugin chains side by side on the audio thread without spawning a thread per block.
-//!
-//! The caller hands over a batch of jobs and does not return until every one is done, which is
-//! what lets the jobs borrow the racks and audio for the duration: the borrows outlive the run
-//! the same way they would inside `std::thread::scope`, only the threads are already there.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// How long a worker keeps looking for the next wave before it sleeps: the waves of one block
-/// come a few hundred microseconds apart, the next block comes milliseconds later.
 const STAYS_KEEN_FOR: Duration = Duration::from_micros(800);
 
 pub struct Job {
     run: *mut (dyn FnMut() + Send),
 }
 
-// A job is a pointer to a closure the caller still owns; the caller blocks until it has run.
 unsafe impl Send for Job {}
 
 struct Shared {
@@ -49,7 +40,6 @@ impl Crew {
         Self { shared }
     }
 
-    /// Runs every closure, on the crew and on this thread, and returns once all have run.
     pub fn run_all<'a>(&self, jobs: Vec<Box<dyn FnMut() + Send + 'a>>) {
         let count = jobs.len();
         if count == 0 {
@@ -61,8 +51,6 @@ impl Crew {
             let mut queue = lock(&self.shared.queue);
             for job in boxes.iter_mut() {
                 let run: *mut (dyn FnMut() + Send + 'a) = &mut **job;
-                // The lifetime is erased here and restored by the wait below: nothing in
-                // `boxes` is dropped until `done` says every job has run.
                 let run: *mut (dyn FnMut() + Send) = unsafe { std::mem::transmute(run) };
                 queue.push(Job { run });
             }
@@ -87,7 +75,6 @@ impl Drop for Crew {
     }
 }
 
-/// A job that panics still counts as done, so the caller waiting on the batch never hangs.
 fn run_counted(job: Job, shared: &Shared) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*job.run)() }));
     shared.done.fetch_add(1, Ordering::AcqRel);

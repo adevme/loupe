@@ -616,9 +616,6 @@ impl Rt {
                 continue;
             }
             let round = self.round_at(self.pos);
-            // A song already in flow never stops for a pre-roll: a plugin changing its latency or a
-            // rewired track mid-song is taken up by the mix's own hurried prime (a block at most)
-            // instead of muting the song while the pre-roll thread runs the whole window again.
             if self.roll == Roll::No && !self.flowing && self.scratch.ready_for(&self.project, self.pos, round, self.chains.as_deref()) > frames {
                 self.roll = Roll::Due;
             }
@@ -1430,9 +1427,6 @@ fn start_stream(device: &cpal::Device, config: &cpal::StreamConfig, format: cpal
     Ok((stream, remote))
 }
 
-/// One line per sound-card callback, written when `LOUPE_AUDIO_LOG` names a file:
-/// milliseconds since the stream began, gap since the previous callback, time spent
-/// mixing, the callback's frame count and budget, and whether the song was playing.
 struct Tick {
     at_ms: f64,
     gap_us: u64,

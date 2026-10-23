@@ -311,7 +311,6 @@ impl Out {
     }
 
     fn hand_back(&self, audio: &[[f32; 2]]) -> bool {
-        // One write up the pipe per block, so Loupe's reader wakes once.
         let mut bytes = Vec::with_capacity(8 + audio.len() * 8);
         let _ = write_block(&mut bytes, audio);
         let mut open = self.open();
@@ -349,8 +348,6 @@ fn blocks_after(ask: &Ask) -> usize {
     }
 }
 
-/// Reads asks off the pipe and runs the audio ones right here: a block is processed and handed
-/// back on the thread that read it, with no second thread to wake in between.
 fn read_asks(to_main: Sender<ForMain>, seats: Arc<Mutex<Seats>>, out: Arc<Out>, touches: Arc<Touches>, bell: Arc<waking::Bell>) {
     waking::hurry_this_thread();
     let tell_main = |item: ForMain| {

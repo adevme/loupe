@@ -14,7 +14,6 @@ pub struct Job<'a> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PluginSpending {
     pub nanoseconds: u64,
-    /// The slowest single plugin round trip since this was last read.
     pub slowest_nanoseconds: u64,
     pub running: usize,
     pub held_back: usize,

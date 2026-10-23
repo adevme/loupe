@@ -10,8 +10,6 @@ use crate::wire::{Ask, Region, Reply, Song};
 const SETTLING_BLOCKS: usize = 24;
 const SETTLING_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
 const BLOCKS_BEFORE_WAITING: usize = 4;
-/// When `WATCH_SLOW_SLOTS` is set, every plugin round trip slower than this is noted by name,
-/// for `loupe bench` to list.
 const SLOW_SLOT: std::time::Duration = std::time::Duration::from_micros(1_000);
 pub static WATCH_SLOW_SLOTS: AtomicBool = AtomicBool::new(false);
 static SLOW_SLOTS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
@@ -24,7 +22,6 @@ fn note_slow_slot(name: &str, took: std::time::Duration) {
     }
 }
 
-/// Takes the slow round trips noted so far: plugin name and microseconds, in order.
 pub fn take_slow_slots() -> Vec<(String, u64)> {
     SLOW_SLOTS.lock().map(|mut slow| std::mem::take(&mut *slow)).unwrap_or_default()
 }

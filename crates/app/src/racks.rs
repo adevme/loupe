@@ -79,8 +79,6 @@ impl<T> Lending<T> {
     }
 }
 
-/// Waves of tracks run on scoped threads, counted for `loupe bench`: how many waves went that
-/// way and the time spent inside the scope, threads spawned and joined included.
 pub static WAVES_SCOPED: AtomicU64 = AtomicU64::new(0);
 pub static WAVE_SCOPE_NANOS: AtomicU64 = AtomicU64::new(0);
 
@@ -823,8 +821,6 @@ impl Chains for Racks {
     }
 
     fn whole_waves_at_once(&self) -> bool {
-        // On the audio thread too: the crew is already up, so a wave of independent tracks
-        // runs its chains side by side instead of one after another.
         true
     }
 
@@ -933,8 +929,6 @@ const MOST_TRACKS_AT_ONCE: usize = 256;
 const FEWEST_TRACKS_AT_ONCE: usize = 4;
 const TRACKS_A_CORE_CARRIES: usize = 2;
 
-/// How many crew threads stand by to run tracks side by side: half the cores, a few at least,
-/// and never so many that they crowd out the plugin hosts.
 fn crew_hands() -> usize {
     std::thread::available_parallelism().map_or(2, |cores| cores.get() / 2).clamp(2, 8)
 }

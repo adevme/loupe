@@ -97,8 +97,6 @@ fn main() -> iced::Result {
     if asked != cli::Asked::Gui {
         std::process::exit(cli::run(asked));
     }
-    // On Windows wgpu tends to pick Vulkan, which flickers on AMD cards and on PCs with
-    // two GPUs. DirectX 12 presents through the Windows compositor. WGPU_BACKEND still wins.
     #[cfg(windows)]
     if std::env::var_os("WGPU_BACKEND").is_none() {
         std::env::set_var("WGPU_BACKEND", "dx12");
