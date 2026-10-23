@@ -113,6 +113,8 @@ impl App {
         self.playing = false;
         self.settle = SETTLE_TICKS;
         self.cache.clear();
+        // Like Reaper and FL: stopping goes back to where the take started, so the next take records over the same spot.
+        self.seek(recording.from);
         let mut recording = recording;
         recording.taped.extend(self.engine.taped_keys());
         self.place_notes(&recording, stopped_at);
@@ -370,6 +372,16 @@ mod tests {
         assert_eq!(late.active, 2);
         assert_eq!(loop_takes(1_000, 1_000, 2_000, 900, 100), None, "once round is an ordinary take");
         assert_eq!(loop_takes(1_000, 1_000, 2_000, 1_010, 100), None, "a stub after the loop comes round is not a take");
+    }
+
+    #[test]
+    fn stopping_a_recording_goes_back_to_where_the_take_started() {
+        let mut app = App::bare();
+        app.playhead = 96_000;
+        app.recording = Some(Recording { from: 48_000, tracks: Vec::new(), note_tracks: Vec::new(), taped: Vec::new(), counted_in: false, looping: None, began: None, punch: None });
+        let _ = app.finish_recording();
+        assert!(app.recording.is_none());
+        assert_eq!(app.playhead, 48_000, "the cursor stayed where the take stopped");
     }
 
     #[test]
