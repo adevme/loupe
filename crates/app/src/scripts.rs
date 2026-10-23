@@ -207,7 +207,6 @@ impl App {
         }
     }
 
-    /// Runs the repeating scripts whose turn has come.
     pub(crate) fn run_due_scripts(&mut self) -> Task<Message> {
         let now = Instant::now();
         let mut tasks = Vec::new();
@@ -235,7 +234,6 @@ impl App {
         Task::batch(tasks)
     }
 
-    /// One turn of a repeating script. It never borrows the plugins, so the sound does not stutter while it runs.
     fn run_background(&mut self, at: usize, source: String) -> Task<Message> {
         let running = &mut self.background[at];
         running.next = Instant::now() + running.every;
@@ -330,7 +328,6 @@ impl App {
         Task::batch(tasks)
     }
 
-    /// Starts the repeating scripts marked to start by themselves.
     pub(crate) fn autostart_scripts(&mut self) -> Task<Message> {
         let mut tasks = Vec::new();
         for script in self.scripts.clone() {
@@ -346,7 +343,6 @@ impl App {
     }
 }
 
-/// A script that runs again every so often, with what it keeps between runs.
 pub struct Background {
     pub path: PathBuf,
     pub name: String,
@@ -363,7 +359,6 @@ impl Background {
     }
 }
 
-/// Asks a web address on its own thread; the answer waits in the inbox for the script's next run.
 fn ask(fetch: Fetch, inbox: Arc<Mutex<Vec<Response>>>) {
     std::thread::spawn(move || {
         let agent = ureq::AgentBuilder::new().timeout(FETCH_TIMEOUT).build();

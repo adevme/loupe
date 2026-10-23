@@ -77,7 +77,6 @@ use timeline::{LoopRange, Timeline, Tool, View};
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
-/// How often Loupe looks for repeating scripts whose turn has come.
 const SCRIPT_CHECK_MS: u64 = 100;
 const STATUS_HEIGHT: f32 = 30.0;
 const LOOK_IN_EVERY: u8 = 12;
@@ -713,7 +712,6 @@ struct App {
     rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
-    /// Scripts that run again every so often until they are picked again.
     background: Vec<scripts::Background>,
     snap: bool,
     follow: following::Follow,

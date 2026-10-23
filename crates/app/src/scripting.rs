@@ -11,7 +11,6 @@ const CHECK_EVERY: u32 = 10_000;
 const MOST_MEMORY: usize = 256 * 1024 * 1024;
 const HIGHEST_KEY: i64 = 127;
 const MOST_FETCHES: usize = 16;
-/// Repeating scripts run at most four times a second.
 const SHORTEST_EVERY: f64 = 0.25;
 
 pub const FUNCTIONS: [(&str, &str); 69] = [
@@ -94,7 +93,6 @@ pub struct View {
     pub armed: Vec<TrackId>,
     pub responses: Vec<Response>,
     pub kept: std::collections::HashMap<String, String>,
-    /// The number the next fetch() is given, so numbers never repeat while a script repeats.
     pub next_fetch: u64,
     pub selected: Vec<ClipId>,
     pub plugins: Vec<(String, PathBuf, usize)>,
@@ -275,13 +273,11 @@ fn header_of(source: &str, wanted: &str) -> Option<String> {
     })
 }
 
-/// A script with "-- every: 1" at the top runs again every so many seconds until it is picked again.
 pub fn every_of(source: &str) -> Option<Duration> {
     let seconds: f64 = header_of(source, "every")?.parse().ok()?;
     (seconds.is_finite() && seconds > 0.0).then(|| Duration::from_secs_f64(seconds.max(SHORTEST_EVERY)))
 }
 
-/// A repeating script with "-- autostart: yes" starts by itself when Loupe opens.
 pub fn autostarts(source: &str) -> bool {
     header_of(source, "autostart").is_some_and(|value| matches!(value.to_lowercase().as_str(), "yes" | "true" | "on"))
 }
