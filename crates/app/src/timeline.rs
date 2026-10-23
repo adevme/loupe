@@ -168,6 +168,8 @@ enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
+    /// Alt+drag on a take lane: slides that take's audio under the clip, like Reaper's take slip.
+    SlideTake { clip: ClipId, take: usize, grab: f64, from: i64, length: i64 },
     Resize { track: TrackId, top: f32 },
     LaneResize { target: loupe_engine::Target, top: f32 },
     Reorder { track: TrackId, from: Point, at: Option<usize> },
@@ -1118,6 +1120,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Slice { from: p, to: p });
                         Some(Message::Refresh)
                     }
+                    (Tool::Pencil | Tool::Comp, Hit::Take(clip, take)) if state.modifiers.alt() => {
+                        let from = clip.offset as i64 + clip.takes.get(take).copied().unwrap_or(0);
+                        state.drag = Some(Drag::SlideTake { clip: clip.id, take, grab: self.frames_at(p.x) as f64, from, length: clip.source.frames.len() as i64 });
+                        Some(Message::Refresh)
+                    }
                     (Tool::Pencil | Tool::Comp, Hit::Take(clip, take)) => {
                         let Some(index) = self.project.tracks.iter().position(|t| t.clips.iter().any(|c| c.id == clip.id)) else {
                             return (Captured, None);
@@ -1286,6 +1293,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let range = (here != *anchor).then(|| (here.min(*anchor), here.max(*anchor)));
                         (Captured, (range != self.loop_range).then_some(Message::SetLoop(range)))
                     }
+                    Drag::SlideTake { clip, take, grab, from, length } => {
+                        let moved = self.frames_at(p.x) as f64 - *grab;
+                        let offset = (*from - moved.round() as i64).clamp(0, (*length - 1).max(0));
+                        (Captured, Some(Message::SlideTake { clip: *clip, take: *take, offset }))
+                    }
                     Drag::Comp { to, .. } => {
                         *to = self.snap(self.frames_at(p.x), free);
                         (Captured, Some(Message::Refresh))
@@ -1449,6 +1461,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 Some(Drag::Reorder { track, at: Some(to), .. }) => {
                     (Captured, Some(Message::MoveTrack { track, to, parent: self.folder_at(to, track) }))
                 }
+                Some(Drag::SlideTake { .. }) => (Captured, Some(Message::Refresh)),
                 Some(Drag::Comp { clip, track, take, from, to, .. }) => {
                     let message = match from == to {
                         true => Message::UseTake(clip, take),
@@ -3256,6 +3269,31 @@ mod take_folders {
         let found = app.project.clip(clip).unwrap();
         assert_eq!(found.muted_takes, vec![2]);
         assert!(!found.muted, "the whole piece was muted, not just the take");
+    }
+
+    #[test]
+    fn alt_dragging_a_take_lane_slides_only_that_take() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        app.tool = Tool::Pencil;
+        let clip = app.project.track(vox).unwrap().clips[0].clone();
+        let was: Vec<i64> = clip.takes.iter().map(|shift| clip.offset as i64 + shift).collect();
+        let timeline = timeline_of(&app);
+        let mut state = Interaction { modifiers: keyboard::Modifiers::ALT, ..Interaction::default() };
+        let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
+        let cursor = |x: f32| mouse::Cursor::Available(Point::new(CANVAS.x + x, CANVAS.y + y));
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let moved = canvas::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(LEFT + 150.0, y) });
+        let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 50.0));
+        let (_, slid) = canvas::Program::update(&timeline, &mut state, moved, CANVAS, cursor(LEFT + 150.0));
+        let Some(message) = slid else { panic!("alt-dragging a take lane did nothing") };
+        assert!(matches!(message, crate::Message::SlideTake { take: 2, .. }), "{message:?}");
+        let _ = app.update(message);
+        let now = app.project.clip(clip.id).unwrap();
+        let after: Vec<i64> = now.takes.iter().map(|shift| now.offset as i64 + shift).collect();
+        assert!(after[2] < was[2], "dragging right did not move take 3's audio later");
+        assert_eq!((after[0], after[1]), (was[0], was[1]), "the other takes moved too");
+        assert_eq!(now.take, clip.take, "sliding changed which take plays");
     }
 
     #[test]
