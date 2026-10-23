@@ -3235,7 +3235,6 @@ const MOST_WAVE_BOOST: f32 = 8.0;
 
 fn wave_boost(clip: &Clip) -> f32 {
     let (lo, hi) = clip.peak(clip.offset as usize, (clip.offset + clip.len) as usize);
-    // The recording's own peak, not counting clip gain, so turning the gain down still shrinks the waveform.
     let loudest = lo.abs().max(hi.abs());
     if loudest <= 1e-4 {
         return 1.0;
