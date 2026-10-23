@@ -1132,12 +1132,13 @@ impl canvas::Program<Message> for Timeline<'_> {
                         closed.map(|track| Message::ToggleTakes(track.id))
                     }
                     (Tool::Comp, Hit::Clip(_) | Hit::Grip(..)) => None,
-                    (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
+                    (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) => {
                         let muted = !clip.muted;
                         state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id] });
                         Some(Message::PaintMute { clip: clip.id, muted })
                     }
-                    (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
+                    // A take lane is the same clip seen per take, so erasing or muting there acts on that piece of the clip.
+                    (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) => {
                         state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
                         Some(Message::PaintDelete(clip.id))
                     }
@@ -1392,7 +1393,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         (Captured, Some(Message::Refresh))
                     }
                     Drag::Paint { muted, touched } => {
-                        let (Hit::Clip(clip) | Hit::Grip(clip, _)) = self.hit(p) else {
+                        let (Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) = self.hit(p) else {
                             return (Captured, None);
                         };
                         if touched.contains(&clip.id) {
@@ -1750,7 +1751,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 mouse::Interaction::Pointer
             }
             (Tool::Razor, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Lane)) => mouse::Interaction::Crosshair,
-            (Tool::Mute | Tool::Delete, Some(Hit::Clip(_) | Hit::Grip(..))) => mouse::Interaction::Pointer,
+            (Tool::Mute | Tool::Delete, Some(Hit::Clip(_) | Hit::Grip(..) | Hit::Take(..))) => mouse::Interaction::Pointer,
             (Tool::Comp, Some(Hit::Clip(_) | Hit::Grip(..))) => mouse::Interaction::Crosshair,
             (Tool::Pencil, Some(Hit::Grip(_, grip))) => grip.pointer(),
             (_, Some(Hit::Edge(..))) => mouse::Interaction::ResizingHorizontally,
@@ -3228,6 +3229,20 @@ mod take_folders {
         let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 60.0));
         let (_, clicked) = canvas::Program::update(&timeline, &mut state, released, CANVAS, cursor(LEFT + 60.0));
         assert!(matches!(clicked, Some(crate::Message::UseTake(_, 3))), "a click on lane 4 did not pick take 4");
+    }
+
+    #[test]
+    fn the_eraser_on_a_take_lane_removes_that_piece_of_the_clip() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        app.tool = Tool::Delete;
+        let clip = app.project.track(vox).unwrap().clips[0].id;
+        let timeline = timeline_of(&app);
+        let mut state = Interaction::default();
+        let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let (_, erased) = canvas::Program::update(&timeline, &mut state, press, CANVAS, mouse::Cursor::Available(Point::new(CANVAS.x + LEFT + 50.0, CANVAS.y + y)));
+        assert!(matches!(erased, Some(crate::Message::PaintDelete(id)) if id == clip), "erasing on a take lane did nothing");
     }
 }
 
