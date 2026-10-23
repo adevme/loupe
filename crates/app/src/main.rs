@@ -1374,7 +1374,6 @@ impl App {
                 self.choose(None);
                 self.seek(at);
             }
-            // Like Reaper: a click moves the cursor and keeps the selection; Escape clears it.
             Message::RulerClicked(at) => self.seek(at),
             Message::SetLoop(range) => self.set_loop(range),
             Message::RangeMade => {
