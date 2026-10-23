@@ -335,6 +335,9 @@ pub enum Command {
     SetStretch { clip: ClipId, stretch: f64 },
     SetTakes { clip: ClipId, offsets: Vec<i64>, active: usize },
     SetTakeMuted { clip: ClipId, take: usize, muted: bool },
+    /// Gives a clip new audio and a new span in one step, then sets its takes as SetTakes does.
+    /// Used to stack a fresh recording onto the takes already there.
+    SetClipAudio { clip: ClipId, source: Arc<Source>, start: Frames, len: Frames, offsets: Vec<i64>, active: usize },
     UseTake { clip: ClipId, take: usize },
     FillStretch { source: Arc<Source>, stretch: f64, stretched: Arc<Source> },
     SetBpm(f64),
@@ -745,6 +748,19 @@ impl Project {
                 target.fade_in.len = target.fade_in.len.min(len);
                 target.fade_out.len = target.fade_out.len.min(len - target.fade_in.len);
                 Ok(Outcome::Done)
+            }
+            Command::SetClipAudio { clip, source, start, len, offsets, active } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                if target.notes.is_some() || len == 0 {
+                    return Err(CommandError::InvalidValue);
+                }
+                target.source = source;
+                target.stretch = 1.0;
+                target.stretched = None;
+                target.start = start;
+                target.len = len;
+                self.apply(Command::SetTakes { clip, offsets, active })
             }
             Command::SetTakes { clip, offsets, active } => {
                 let (t, i) = self.locate(clip)?;
