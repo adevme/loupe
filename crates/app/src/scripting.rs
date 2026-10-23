@@ -10,8 +10,11 @@ const LONGEST_RUN: Duration = Duration::from_secs(5);
 const CHECK_EVERY: u32 = 10_000;
 const MOST_MEMORY: usize = 256 * 1024 * 1024;
 const HIGHEST_KEY: i64 = 127;
+const MOST_FETCHES: usize = 16;
+/// Repeating scripts run at most four times a second.
+const SHORTEST_EVERY: f64 = 0.25;
 
-pub const FUNCTIONS: [(&str, &str); 59] = [
+pub const FUNCTIONS: [(&str, &str); 69] = [
     ("print(...)", "Show text in Loupe's status line"),
     ("bpm()", "The tempo in beats per minute"),
     ("set_bpm(bpm)", "Change the tempo"),
@@ -71,11 +74,28 @@ pub const FUNCTIONS: [(&str, &str); 59] = [
     ("set_instrument(track, name)", "Use \"synth\", \"drums\" or \"sampler\" on a track"),
     ("set_sample(track, file)", "Load a sound into a track's sampler; paths can be relative to the song's folder"),
     ("export(stems)", "Export the song like File > Export once the script ends; pass true to also write stems"),
+    ("is_recording()", "Whether Loupe is recording"),
+    ("record()", "Start recording on the armed tracks once the script ends"),
+    ("stop_recording()", "Stop recording once the script ends; the cursor goes back to where the take started"),
+    ("next_take()", "End this take and record the next one from the same place; starts recording if it was not"),
+    ("track_armed(track)", "Whether a track is armed to record"),
+    ("set_track_armed(track, armed)", "Arm or disarm a track for recording"),
+    ("fetch(url, options)", "Ask a web address in the background and return a number for the request; options can hold method, body and headers. The answer comes back from responses() on a later run"),
+    ("responses()", "Answers to earlier fetch() calls: {id, status, body}; status is 0 when the address could not be reached"),
+    ("keep(key, value)", "Remember a piece of text between runs of a repeating script; nil forgets it"),
+    ("kept(key)", "Text remembered with keep(), or nil"),
 ];
 
+#[derive(Default)]
 pub struct View {
     pub playhead: Frames,
     pub playing: bool,
+    pub recording: bool,
+    pub armed: Vec<TrackId>,
+    pub responses: Vec<Response>,
+    pub kept: std::collections::HashMap<String, String>,
+    /// The number the next fetch() is given, so numbers never repeat while a script repeats.
+    pub next_fetch: u64,
     pub selected: Vec<ClipId>,
     pub plugins: Vec<(String, PathBuf, usize)>,
     pub folder: Option<PathBuf>,
@@ -90,6 +110,33 @@ pub struct Wishes {
     pub tweaks: Vec<(TrackId, usize, usize, f32)>,
     pub looped: Option<Option<(Frames, Frames)>>,
     pub export: Option<bool>,
+    pub record: Option<Record>,
+    pub arm: Vec<(TrackId, bool)>,
+    pub fetches: Vec<Fetch>,
+    pub keep: Vec<(String, Option<String>)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Record {
+    Start,
+    Stop,
+    Next,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Fetch {
+    pub id: u64,
+    pub url: String,
+    pub method: String,
+    pub body: Option<String>,
+    pub headers: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Response {
+    pub id: u64,
+    pub status: u16,
+    pub body: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -220,13 +267,29 @@ fn hosted_readings(h: &mut Host<'_>, track: u64, slot: usize, name: &str) -> mlu
     Ok(readings)
 }
 
-pub fn shortcut_of(source: &str) -> Option<String> {
+fn header_of(source: &str, wanted: &str) -> Option<String> {
     source.lines().take(5).find_map(|line| {
         let rest = line.trim().strip_prefix("--")?.trim();
         let (key, value) = rest.split_once(':')?;
-        key.trim().eq_ignore_ascii_case("shortcut").then(|| value.trim().to_string()).filter(|value| !value.is_empty())
+        key.trim().eq_ignore_ascii_case(wanted).then(|| value.trim().to_string()).filter(|value| !value.is_empty())
     })
 }
+
+/// A script with "-- every: 1" at the top runs again every so many seconds until it is picked again.
+pub fn every_of(source: &str) -> Option<Duration> {
+    let seconds: f64 = header_of(source, "every")?.parse().ok()?;
+    (seconds.is_finite() && seconds > 0.0).then(|| Duration::from_secs_f64(seconds.max(SHORTEST_EVERY)))
+}
+
+/// A repeating script with "-- autostart: yes" starts by itself when Loupe opens.
+pub fn autostarts(source: &str) -> bool {
+    header_of(source, "autostart").is_some_and(|value| matches!(value.to_lowercase().as_str(), "yes" | "true" | "on"))
+}
+
+pub fn shortcut_of(source: &str) -> Option<String> {
+    header_of(source, "shortcut")
+}
+
 
 pub fn run(source: &str, name: &str, project: &mut Project, view: &View, plugins: Option<&mut (dyn Chains + 'static)>) -> Result<Ran, String> {
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::new()).map_err(|why| why.to_string())?;
@@ -290,6 +353,78 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View, plugins
         def!("stop", |_, ()| {
             host.borrow_mut().wishes.play = Some(false);
             Ok(())
+        });
+        def!("is_recording", |_, ()| Ok(host.borrow().view.recording));
+        def!("record", |_, ()| {
+            host.borrow_mut().wishes.record = Some(Record::Start);
+            Ok(())
+        });
+        def!("stop_recording", |_, ()| {
+            host.borrow_mut().wishes.record = Some(Record::Stop);
+            Ok(())
+        });
+        def!("next_take", |_, ()| {
+            host.borrow_mut().wishes.record = Some(Record::Next);
+            Ok(())
+        });
+        def!("track_armed", |_, track: u64| {
+            let h = host.borrow();
+            h.track(track)?;
+            let wished = h.wishes.arm.iter().rev().find(|(id, _)| id.0 == track).map(|(_, armed)| *armed);
+            Ok(wished.unwrap_or_else(|| h.view.armed.contains(&TrackId(track))))
+        });
+        def!("set_track_armed", |_, (track, armed): (u64, bool)| {
+            let mut h = host.borrow_mut();
+            h.track(track)?;
+            h.wishes.arm.push((TrackId(track), armed));
+            Ok(())
+        });
+        def!("fetch", |_, (url, options): (String, Option<Table>)| {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(fail("fetch needs an address starting with http:// or https://"));
+            }
+            let mut h = host.borrow_mut();
+            if h.wishes.fetches.len() >= MOST_FETCHES {
+                return Err(fail(format!("a script can ask at most {MOST_FETCHES} addresses per run")));
+            }
+            let id = h.view.next_fetch + h.wishes.fetches.len() as u64;
+            let mut fetch = Fetch { id, url, method: "GET".into(), ..Fetch::default() };
+            if let Some(options) = options {
+                if let Some(method) = options.get::<Option<String>>("method")? {
+                    fetch.method = method.to_uppercase();
+                }
+                fetch.body = options.get::<Option<String>>("body")?;
+                if let Some(headers) = options.get::<Option<Table>>("headers")? {
+                    for pair in headers.pairs::<String, String>() {
+                        fetch.headers.push(pair?);
+                    }
+                }
+            }
+            h.wishes.fetches.push(fetch);
+            Ok(id)
+        });
+        def!("responses", |lua, ()| {
+            let h = host.borrow();
+            let list = lua.create_table()?;
+            for (at, response) in h.view.responses.iter().enumerate() {
+                let item = lua.create_table()?;
+                item.set("id", response.id)?;
+                item.set("status", response.status)?;
+                item.set("body", response.body.as_str())?;
+                list.set(at + 1, item)?;
+            }
+            Ok(list)
+        });
+        def!("keep", |_, (key, value): (String, Option<String>)| {
+            host.borrow_mut().wishes.keep.push((key, value));
+            Ok(())
+        });
+        def!("kept", |_, key: String| {
+            let h = host.borrow();
+            match h.wishes.keep.iter().rev().find(|(kept, _)| *kept == key) {
+                Some((_, value)) => Ok(value.clone()),
+                None => Ok(h.view.kept.get(&key).cloned()),
+            }
         });
         def!("tracks", |lua, ()| lua.create_sequence_from(host.borrow().project.tracks.iter().map(|t| t.id.0)));
         def!("add_track", |_, name: Option<String>| {
@@ -651,11 +786,48 @@ mod tests {
             selected: Vec::new(),
             plugins: loupe_stock::NAMES.iter().enumerate().map(|(index, name)| (name.to_string(), PathBuf::from(loupe_plugins::BUILT_IN), index)).collect(),
             folder: None,
+            ..View::default()
         }
     }
 
     fn ran(source: &str, project: &mut Project) -> Result<Ran, String> {
         run(source, "test", project, &view(), None)
+    }
+
+    #[test]
+    fn repeating_scripts_read_their_headers() {
+        assert_eq!(every_of("-- every: 1\nprint(1)"), Some(Duration::from_secs(1)));
+        assert_eq!(every_of("-- every: 0.01\n"), Some(Duration::from_secs_f64(SHORTEST_EVERY)), "a script could run flat out");
+        assert_eq!(every_of("print(1)"), None);
+        assert!(autostarts("-- every: 1\n-- autostart: yes\n"));
+        assert!(!autostarts("-- every: 1\n"));
+    }
+
+    #[test]
+    fn a_script_can_ask_for_recording_arming_fetching_and_memory() {
+        let mut project = Project::new(48_000);
+        project.apply(Command::AddTrack { name: "Vox".into() }).unwrap();
+        let source = r#"
+            local vox = loupe.tracks()[1]
+            loupe.set_track_armed(vox, true)
+            assert(loupe.track_armed(vox))
+            assert(not loupe.is_recording())
+            loupe.next_take()
+            local a = loupe.fetch("http://127.0.0.1:9/", {method = "post", body = "hi", headers = {["X-Key"] = "k"}})
+            local b = loupe.fetch("https://example.com/")
+            assert(b == a + 1)
+            loupe.keep("last", "7")
+            assert(loupe.kept("last") == "7")
+            assert(#loupe.responses() == 0)
+        "#;
+        let done = ran(source, &mut project).unwrap();
+        assert_eq!(done.wishes.record, Some(Record::Next));
+        assert_eq!(done.wishes.arm.len(), 1);
+        assert_eq!(done.wishes.fetches.len(), 2);
+        assert_eq!(done.wishes.fetches[0].method, "POST");
+        assert_eq!(done.wishes.fetches[0].headers, vec![("X-Key".to_string(), "k".to_string())]);
+        assert_eq!(done.wishes.keep, vec![("last".to_string(), Some("7".to_string()))]);
+        assert!(ran(r#"loupe.fetch("file:///etc/passwd")"#, &mut project).is_err(), "fetch reached a file");
     }
 
     #[test]

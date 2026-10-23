@@ -77,6 +77,8 @@ use timeline::{LoopRange, Timeline, Tool, View};
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
 const UNDO_STEPS: usize = 200;
 const SETTLE_TICKS: u8 = 6;
+/// How often Loupe looks for repeating scripts whose turn has come.
+const SCRIPT_CHECK_MS: u64 = 100;
 const STATUS_HEIGHT: f32 = 30.0;
 const LOOK_IN_EVERY: u8 = 12;
 pub const MASTER_OWNER: u64 = u64::MAX;
@@ -148,6 +150,7 @@ pub enum Message {
     ToStart,
     Seek(Frames),
     Tick,
+    ScriptsDue,
     LookAround,
     Import,
     Picked(Vec<PathBuf>),
@@ -710,6 +713,8 @@ struct App {
     rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
+    /// Scripts that run again every so often until they are picked again.
+    background: Vec<scripts::Background>,
     snap: bool,
     follow: following::Follow,
     midi_chosen: Vec<String>,
@@ -867,6 +872,7 @@ impl App {
             rec_shown: HashSet::new(),
             copied_clips: None,
             scripts: Vec::new(),
+            background: Vec::new(),
             snap: settings.snap,
             follow: settings.follow,
             midi_chosen: settings.midi_inputs.clone().unwrap_or_default(),
@@ -942,7 +948,8 @@ impl App {
         } else {
             Task::none()
         };
-        (app, Task::batch([task, measure, mixer, hunt, look]))
+        let started = app.autostart_scripts();
+        (app, Task::batch([task, measure, mixer, hunt, look, started]))
     }
 
     #[cfg(test)]
@@ -1079,6 +1086,7 @@ impl App {
             rec_shown: HashSet::new(),
             copied_clips: None,
             scripts: Vec::new(),
+            background: Vec::new(),
             snap: false,
             follow: following::Follow::default(),
             midi_chosen: Vec::new(),
@@ -1788,6 +1796,7 @@ impl App {
                 self.overlay = Overlay::ScriptsMenu;
             }
             Message::RunScript(path) => return self.run_script(&path),
+            Message::ScriptsDue => return self.run_due_scripts(),
             Message::OpenScriptsFolder => self.open_scripts_folder(),
             Message::ScriptKey(key, modifiers) => {
                 if self.overlay == Overlay::None && self.screen == Screen::Song {
@@ -2896,7 +2905,11 @@ impl App {
             Subscription::none()
         };
         let looking_around = iced::time::every(Duration::from_secs(1)).map(|_| Message::LookAround);
-        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around, following])
+        let scripts_due = match self.background.is_empty() {
+            true => Subscription::none(),
+            false => iced::time::every(Duration::from_millis(SCRIPT_CHECK_MS)).map(|_| Message::ScriptsDue),
+        };
+        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around, following, scripts_due])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
