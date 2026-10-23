@@ -142,6 +142,7 @@ const START_SIZE: Size = Size::new(1280.0, 760.0);
 #[derive(Debug, Clone)]
 pub enum Message {
     TogglePlay,
+    Pause,
     ToggleRecord,
     TakeReady { start: i64, keep_from: i64, passes: Option<recording::Passes>, punch: Option<(Frames, Frames)>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
     ToStart,
@@ -615,6 +616,8 @@ struct App {
     selected: Option<ClipId>,
     selection: HashSet<ClipId>,
     playing: bool,
+    /// Where play last started, so Space stops back there like Reaper.
+    play_from: Frames,
     settle: u8,
     playhead: Frames,
     view: View,
@@ -783,6 +786,7 @@ impl App {
             selected: None,
             selection: HashSet::new(),
             playing: false,
+            play_from: 0,
             settle: 0,
             playhead: 0,
             view: View { zoom: EMPTY_SONG_ZOOM, scroll: 0.0, scroll_y: 0.0 },
@@ -994,6 +998,7 @@ impl App {
             selected: None,
             selection: HashSet::new(),
             playing: false,
+            play_from: 0,
             settle: 0,
             playhead: 0,
             view: View { zoom: EMPTY_SONG_ZOOM, scroll: 0.0, scroll_y: 0.0 },
@@ -1238,17 +1243,20 @@ impl App {
                     return self.finish_recording();
                 }
                 if self.playing {
-                    self.engine.stop();
-                    self.playing = false;
-                    self.settle = SETTLE_TICKS;
-                    self.writing = None;
+                    // Like Reaper: Space stops back where play started. Ctrl+Space pauses where it is.
+                    self.stop_playing();
+                    self.seek(self.play_from);
                 } else {
-                    if let Some((from, _)) = self.loop_range {
-                        self.seek(from);
-                    }
-                    self.engine.play();
-                    self.playing = true;
-                    self.start_meters_afresh();
+                    self.start_playing();
+                }
+            }
+            Message::Pause => {
+                if self.recording.is_some() {
+                    return self.finish_recording();
+                }
+                match self.playing {
+                    true => self.stop_playing(),
+                    false => self.start_playing(),
                 }
             }
             Message::ToStart => self.seek(0),
@@ -3368,6 +3376,23 @@ impl App {
         self.cache.clear();
     }
 
+    fn stop_playing(&mut self) {
+        self.engine.stop();
+        self.playing = false;
+        self.settle = SETTLE_TICKS;
+        self.writing = None;
+    }
+
+    fn start_playing(&mut self) {
+        if let Some((from, _)) = self.loop_range {
+            self.seek(from);
+        }
+        self.play_from = self.playhead;
+        self.engine.play();
+        self.playing = true;
+        self.start_meters_afresh();
+    }
+
     fn set_loop(&mut self, range: LoopRange) {
         self.loop_range = range;
         self.engine.set_loop(range);
@@ -4046,6 +4071,7 @@ fn shortcut_while_typing(key: keyboard::Key, modifiers: keyboard::Modifiers) -> 
 fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
     use keyboard::key::Named;
     match key {
+        keyboard::Key::Named(Named::Space) if modifiers.command() => Some(Message::Pause),
         keyboard::Key::Named(Named::Space) => Some(Message::TogglePlay),
         keyboard::Key::Named(Named::Home) => Some(Message::ToStart),
         keyboard::Key::Named(Named::Escape) => Some(Message::CloseOverlay),
@@ -4464,6 +4490,23 @@ mod overlay_window_tests {
         let _ = app.update(Message::SetLoop(Some((120_000, 200_000))));
         let _ = app.update(Message::RangeMade);
         assert_eq!(app.playhead, 48_000, "selecting while playing moved the cursor");
+    }
+
+    #[test]
+    fn space_stops_back_where_play_started_and_ctrl_space_pauses_in_place() {
+        let mut app = App::bare();
+        app.playhead = 10_000;
+        let _ = app.update(Message::TogglePlay);
+        app.playhead = 50_000;
+        let _ = app.update(Message::TogglePlay);
+        assert!(!app.playing);
+        assert_eq!(app.playhead, 10_000, "Space did not go back to where play started");
+        let _ = app.update(Message::Pause);
+        app.playhead = 70_000;
+        let _ = app.update(Message::Pause);
+        assert!(!app.playing);
+        assert_eq!(app.playhead, 70_000, "Ctrl+Space did not pause in place");
+        assert_eq!(shortcut(keyboard::Key::Named(keyboard::key::Named::Space), keyboard::Modifiers::CTRL).map(|m| matches!(m, Message::Pause)), Some(cfg!(not(target_os = "macos"))));
     }
 
     #[test]
