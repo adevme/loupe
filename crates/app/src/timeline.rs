@@ -3235,7 +3235,8 @@ const MOST_WAVE_BOOST: f32 = 8.0;
 
 fn wave_boost(clip: &Clip) -> f32 {
     let (lo, hi) = clip.peak(clip.offset as usize, (clip.offset + clip.len) as usize);
-    let loudest = lo.abs().max(hi.abs()) * clip.gain;
+    // The recording's own peak, not counting clip gain, so turning the gain down still shrinks the waveform.
+    let loudest = lo.abs().max(hi.abs());
     if loudest <= 1e-4 {
         return 1.0;
     }
@@ -3244,6 +3245,24 @@ fn wave_boost(clip: &Clip) -> f32 {
 
 #[cfg(test)]
 mod wave_boost_tests {
+    use std::sync::Arc;
+
+    use loupe_engine::{Command, Outcome, Project, Source};
+
+    use super::wave_boost;
+
+    #[test]
+    fn turning_clip_gain_down_still_shrinks_the_waveform() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[0.125, 0.125]; 4_000]));
+        let Ok(Outcome::Clip(id)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
+        let mut clip = project.clip(id).unwrap().clone();
+        let full = wave_boost(&clip);
+        clip.gain = 0.5;
+        assert_eq!(wave_boost(&clip), full, "gain changed the boost, so the waveform hid the gain change");
+    }
+
     use super::MOST_WAVE_BOOST;
 
     #[test]
