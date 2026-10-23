@@ -106,6 +106,10 @@ pub trait Chains: Send {
         0
     }
 
+    fn master_latency(&self) -> usize {
+        0
+    }
+
     fn follow(&mut self, project: &Project) -> Vec<String> {
         let _ = project;
         Vec::new()
@@ -706,9 +710,15 @@ fn run(
             let closes = automated(project, target, pos + len as Frames, track.gain);
             let (opens, closes) = if silent { (0.0, 0.0) } else { (opens, closes) };
             let ramp = (closes - opens) / len.max(1) as f32;
-            let written_pan = automated(project, crate::envelope::Target::TrackPan(track.id), pos, track.pan);
-            let (left, right) = pan_gains(written_pan);
+            let pan_target = crate::envelope::Target::TrackPan(track.id);
+            let pan_opens = automated(project, pan_target, pos, track.pan);
+            let pan_closes = automated(project, pan_target, pos + len as Frames, track.pan);
+            let pan_ramp = (pan_closes - pan_opens) / len.max(1) as f32;
+            let (mut left, mut right) = pan_gains(pan_opens);
             for (i, frame) in scratch.buffers[index][..len].iter_mut().enumerate() {
+                if pan_ramp != 0.0 {
+                    (left, right) = pan_gains(pan_opens + pan_ramp * (i + 1) as f32);
+                }
                 let gain = opens + ramp * (i + 1) as f32;
                 frame[0] *= gain * left;
                 frame[1] *= gain * right;
@@ -719,17 +729,16 @@ fn run(
                 let Some(target) = project.tracks.iter().position(|t| t.id == send.to) else {
                     continue;
                 };
-                let gain = automated(
-                    project,
-                    crate::envelope::Target::SendGain { from: track.id, to: send.to },
-                    pos,
-                    send.gain,
-                );
+                let send_target = crate::envelope::Target::SendGain { from: track.id, to: send.to };
+                let send_opens = automated(project, send_target, pos, send.gain);
+                let send_closes = automated(project, send_target, pos + len as Frames, send.gain);
+                let send_ramp = (send_closes - send_opens) / len.max(1) as f32;
                 let Mixdown { buffers, sides, pre, lines, .. } = &mut *scratch;
                 let line = &mut lines[first + 1 + which];
                 for i in 0..len {
                     let from = if send.pre_fader { pre[i] } else { buffers[index][i] };
                     let carried = line.step(from);
+                    let gain = send_opens + send_ramp * (i + 1) as f32;
                     let dest = if send.sidechain { &mut sides[target][i] } else { &mut buffers[target][i] };
                     dest[0] += carried[0] * gain;
                     dest[1] += carried[1] * gain;
@@ -847,6 +856,8 @@ fn lay_reading(
     lay_clips(project, track, begin, &mut buffer[into..], only, chains, apart);
 }
 
+const CLIP_CHAIN_TAIL_SECONDS: Frames = 30;
+
 fn lay_clips(
     project: &Project,
     track: &Track,
@@ -868,11 +879,16 @@ fn lay_clips(
             Some(chosen) => clip.id != chosen || clip.muted,
             None => clip.muted,
         };
-        if silenced || clip.end() <= pos || clip.start >= end {
+        let own = !clip.fx.is_empty() && chains.is_some();
+        let rings_until = match own {
+            true => clip.end() + CLIP_CHAIN_TAIL_SECONDS * rate as Frames,
+            false => clip.end(),
+        };
+        if silenced || rings_until <= pos || clip.start >= end {
             continue;
         }
         let from = clip.start.max(pos);
-        let to = clip.end().min(end);
+        let to = clip.end().min(end).max(from);
         let source = clip.audio();
         let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
         let count = match clip.notes {
@@ -880,7 +896,6 @@ fn lay_clips(
             None => ((to - from) as usize).min(source.len() - source_from),
         };
         let gain = clip_automated(project, crate::envelope::Target::ClipGain(clip.id), pos, clip.start, clip.gain);
-        let own = !clip.fx.is_empty() && chains.is_some();
         if own {
             apart.clear();
             apart.resize(out.len(), [0.0; 2]);
@@ -1085,7 +1100,7 @@ mod tests {
         let mut out = vec![[0.0; 2]; 8];
         let mut scratch = Mixdown::default();
         mix_tracks_metered(&p, 1, &mut out, None, None, &mut scratch, None);
-        assert!(out[4][0] > 0.9 && out[4][1] < 0.05, "it should start hard left, got {:?}", out[4]);
+        assert!(out[4][0] > 0.9 && out[4][1] < 0.15, "it should start nearly hard left, got {:?}", out[4]);
         mix_tracks_metered(&p, 199, &mut out, None, None, &mut scratch, None);
         assert!(out[4][1] > 0.9 && out[4][0] < 0.05, "it should end hard right, got {:?}", out[4]);
     }
@@ -1194,6 +1209,46 @@ mod tests {
         assert_eq!(out[50], [100.0, -100.0], "the clip with a chain was not doubled");
         assert_eq!(out[350], [50.0, -50.0], "the clip without a chain changed");
         let _ = plain;
+    }
+
+    struct ClipEcho {
+        held: Vec<[f32; 2]>,
+        at: usize,
+    }
+
+    impl Chains for ClipEcho {
+        fn process(&mut self, _track: TrackId, _audio: &mut [[f32; 2]]) {}
+
+        fn process_clip(&mut self, _clip: ClipId, audio: &mut [[f32; 2]]) {
+            for frame in audio.iter_mut() {
+                let back = self.held[self.at];
+                self.held[self.at] = *frame;
+                self.at = (self.at + 1) % self.held.len();
+                frame[0] += back[0] * 0.5;
+                frame[1] += back[1] * 0.5;
+            }
+        }
+    }
+
+    #[test]
+    fn a_clip_chain_rings_on_after_its_clip_ends() {
+        let mut p = Project::new(48_000);
+        let one = track(&mut p);
+        let mut audio = vec![[0.0f32; 2]; 1_000];
+        audio[900] = [0.8, 0.8];
+        let shout = clip(&mut p, one, Arc::new(Source::from_frames("shout", audio)), 0);
+        let fx = crate::model::Fx { mix: 1.0, path: std::path::PathBuf::from("delay.vst3"), index: 0, name: "Delay".into(), bypassed: false, state: Vec::new(), record: false };
+        p.apply(Command::AddClipFx { clip: shout, fx }).unwrap();
+        let mut racks = ClipEcho { held: vec![[0.0; 2]; 500], at: 0 };
+        let mut scratch = Mixdown::default();
+        let mut heard = Vec::new();
+        for block in 0..8 {
+            let mut out = vec![[0.0; 2]; 256];
+            mix_tracks_metered(&p, block * 256, &mut out, None, None, &mut scratch, Some(&mut racks));
+            heard.extend_from_slice(&out);
+        }
+        assert!((heard[900][0] - 0.8).abs() < 1e-6, "the shout read {:?}", heard[900]);
+        assert!((heard[1_400][0] - 0.4).abs() < 1e-6, "the clip's echo was cut off with the clip: {:?}", heard[1_400]);
     }
 
     struct Placer {

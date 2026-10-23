@@ -893,6 +893,10 @@ impl Chains for Racks {
         }
     }
 
+    fn master_latency(&self) -> usize {
+        self.master.as_ref().map(Rack::latency).unwrap_or(0)
+    }
+
     fn monitor_chain_latency(&self) -> usize {
         self.monitor.as_ref().map(Rack::heard_latency).unwrap_or(0)
     }

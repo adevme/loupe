@@ -2949,11 +2949,18 @@ impl App {
     }
 
     pub(crate) fn gather_fx_state(&mut self) {
+        if crate::touches::racks_must_stay(&self.engine) {
+            return;
+        }
+        self.gather_fx_state_now();
+    }
+
+    pub(crate) fn gather_fx_state_now(&mut self) {
         let bare = self.project.master_fx.is_empty()
             && self.project.monitor_fx.is_empty()
             && self.project.tracks.iter().all(|track| track.fx.is_empty())
             && self.project.tracks.iter().flat_map(|track| track.clips.iter()).all(|clip| clip.fx.is_empty());
-        if bare || crate::touches::racks_must_stay(&self.engine) {
+        if bare {
             return;
         }
         let Some(mut racks) = self.borrow_racks() else { return };

@@ -157,6 +157,11 @@ impl App {
         )
     }
 
+    pub(crate) fn exported_project_file(&mut self) -> String {
+        self.gather_fx_state_now();
+        SavedProject::capture(&self.project, |track| self.heights.get(&track).copied()).to_text()
+    }
+
     pub(crate) fn start_export(&mut self) -> Task<Message> {
         let Some(exports) = self.exports_folder() else {
             return Task::none();
@@ -175,10 +180,7 @@ impl App {
             name: self.path.as_deref().map(crate::home::stem).unwrap_or_else(|| "Untitled".to_string()),
             split: self.export.split,
             range: if self.export_range_only { self.loop_range } else { None },
-            project_file: {
-                self.gather_fx_state();
-                SavedProject::capture(&self.project, |track| self.heights.get(&track).copied()).to_text()
-            },
+            project_file: self.exported_project_file(),
             format: self.export.format,
             dither: self.export.dither(),
             normalise: self.export.normalise,

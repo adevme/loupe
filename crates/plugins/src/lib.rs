@@ -33,3 +33,14 @@ pub trait Plugin: Send {
     fn state(&self) -> Vec<u8>;
     fn restore(&mut self, state: &[u8]) -> Result<(), String>;
 }
+
+pub fn in_pieces(audio: &mut [[f32; CHANNELS]], side: &[[f32; CHANNELS]], most: usize, mut each: impl FnMut(&mut [[f32; CHANNELS]], &[[f32; CHANNELS]], usize)) {
+    let most = most.max(1);
+    let mut from = 0;
+    while from < audio.len() {
+        let to = (from + most).min(audio.len());
+        let beside = &side[from.min(side.len())..to.min(side.len())];
+        each(&mut audio[from..to], beside, from);
+        from = to;
+    }
+}
