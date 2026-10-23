@@ -162,6 +162,7 @@ pub enum Message {
     LaneClicked(Frames),
     RulerClicked(Frames),
     SetLoop(LoopRange),
+    RangeMade,
     ResizeTrack { track: TrackId, height: f32 },
     ResizeLane { target: loupe_engine::Target, height: f32 },
     MoveClip { clip: ClipId, track: TrackId, start: Frames },
@@ -1378,6 +1379,12 @@ impl App {
                 self.seek(at);
             }
             Message::SetLoop(range) => self.set_loop(range),
+            Message::RangeMade => {
+                // Like Reaper: a new time selection puts the cursor at its start, unless the song is playing.
+                if let (Some((start, _)), false) = (self.loop_range, self.playing) {
+                    self.seek(start);
+                }
+            }
             Message::ResizeLane { target, height } => {
                 self.edit(Some(Run::LaneHeight(target)), Command::SizeEnvelopeLane { target, height: Some(height) });
             }
@@ -4437,6 +4444,18 @@ mod overlay_window_tests {
         let _ = app.update(Message::PointerAt(mixer, Point::new(20.0, 20.0)));
         let _ = app.update(Message::OpenRouting(track));
         assert!(app.overlay_is_in(main), "hovering the mixer moved the sheet out of the main window");
+    }
+
+    #[test]
+    fn a_new_selection_puts_the_cursor_at_its_start_unless_playing() {
+        let mut app = App::bare();
+        let _ = app.update(Message::SetLoop(Some((48_000, 96_000))));
+        let _ = app.update(Message::RangeMade);
+        assert_eq!(app.playhead, 48_000, "the cursor did not jump to the selection start");
+        app.playing = true;
+        let _ = app.update(Message::SetLoop(Some((120_000, 200_000))));
+        let _ = app.update(Message::RangeMade);
+        assert_eq!(app.playhead, 48_000, "selecting while playing moved the cursor");
     }
 
     #[test]

@@ -1442,6 +1442,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     (Captured, Some(message))
                 }
                 Some(Drag::Range { anchor, moving: false, .. }) => (Captured, Some(Message::RulerClicked(anchor))),
+                Some(Drag::Range { moving: true, .. }) => (Captured, Some(Message::RangeMade)),
                 Some(
                     Drag::Clip { moving: true, .. }
                     | Drag::Grip { .. }
