@@ -2712,8 +2712,6 @@ fn off_unity(db: f32) -> bool {
     db.abs() > GAIN_UNITY_SLACK_DB
 }
 
-/// Like Reaper: unity and any boost rest on the top edge, out of the waveform's way;
-/// turning a clip down lowers the line, reaching the floor at twice the span.
 fn gain_y(db: f32, top: f32, height: f32) -> f32 {
     let down = (-db / (GAIN_LINE_SPAN_DB * 2.0)).clamp(0.0, 1.0);
     (top + height * down).clamp(top + 0.5, top + height - 1.5)
