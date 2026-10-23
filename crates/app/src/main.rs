@@ -1374,10 +1374,8 @@ impl App {
                 self.choose(None);
                 self.seek(at);
             }
-            Message::RulerClicked(at) => {
-                self.set_loop(None);
-                self.seek(at);
-            }
+            // Like Reaper: a click moves the cursor and keeps the selection; Escape clears it.
+            Message::RulerClicked(at) => self.seek(at),
             Message::SetLoop(range) => self.set_loop(range),
             Message::RangeMade => {
                 if let (Some((start, _)), false) = (self.loop_range, self.playing) {
@@ -1533,6 +1531,7 @@ impl App {
                 }
                 if self.overlay == Overlay::None && self.went_wrong().is_none() {
                     self.choose(None);
+                    self.set_loop(None);
                 }
                 self.problem = None;
                 self.startup_problem = None;
@@ -4443,6 +4442,17 @@ mod overlay_window_tests {
         let _ = app.update(Message::PointerAt(mixer, Point::new(20.0, 20.0)));
         let _ = app.update(Message::OpenRouting(track));
         assert!(app.overlay_is_in(main), "hovering the mixer moved the sheet out of the main window");
+    }
+
+    #[test]
+    fn clicking_the_ruler_keeps_the_selection_and_escape_clears_it() {
+        let mut app = App::bare();
+        let _ = app.update(Message::SetLoop(Some((48_000, 96_000))));
+        let _ = app.update(Message::RulerClicked(60_000));
+        assert_eq!(app.playhead, 60_000, "the click did not move the cursor");
+        assert_eq!(app.loop_range, Some((48_000, 96_000)), "the click cleared the selection");
+        let _ = app.update(Message::CloseOverlay);
+        assert_eq!(app.loop_range, None, "Escape did not clear the selection");
     }
 
     #[test]
