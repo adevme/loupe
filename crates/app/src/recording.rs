@@ -216,7 +216,6 @@ impl App {
             return;
         }
         let start = (start + cut as i64) as Frames;
-        // Like Reaper: a take recorded over clips already on the track joins them as the next take.
         let mut stacks = Vec::new();
         let mut loose = Vec::new();
         for (track, source) in sources {
@@ -579,8 +578,6 @@ impl App {
     }
 }
 
-/// Lays a new take beside the takes of an existing clip in one file, so both can live in one clip.
-/// Old takes keep their offsets; the clip grows to cover both; the new take goes last.
 pub(crate) struct Stacked {
     pub frames: Vec<[f32; 2]>,
     pub start: Frames,
@@ -608,7 +605,6 @@ pub(crate) fn stacked(old: &[[f32; 2]], old_start: Frames, old_len: Frames, old_
 }
 
 impl App {
-    /// The clip a new take on `track` should join: the audio clip it overlaps most.
     fn stack_onto(&self, track: TrackId, start: Frames, cut: Frames, source: &Arc<Source>) -> Option<Result<Command, String>> {
         let new = source.frames.get(cut as usize..)?;
         let end = start + new.len() as Frames;

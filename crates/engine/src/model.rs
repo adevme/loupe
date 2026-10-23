@@ -335,8 +335,6 @@ pub enum Command {
     SetStretch { clip: ClipId, stretch: f64 },
     SetTakes { clip: ClipId, offsets: Vec<i64>, active: usize },
     SetTakeMuted { clip: ClipId, take: usize, muted: bool },
-    /// Gives a clip new audio and a new span in one step, then sets its takes as SetTakes does.
-    /// Used to stack a fresh recording onto the takes already there.
     SetClipAudio { clip: ClipId, source: Arc<Source>, start: Frames, len: Frames, offsets: Vec<i64>, active: usize },
     UseTake { clip: ClipId, take: usize },
     FillStretch { source: Arc<Source>, stretch: f64, stretched: Arc<Source> },
