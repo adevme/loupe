@@ -113,7 +113,6 @@ impl App {
         self.playing = false;
         self.settle = SETTLE_TICKS;
         self.cache.clear();
-        // Like Reaper and FL: stopping goes back to where the take started, so the next take records over the same spot.
         self.seek(recording.from);
         let mut recording = recording;
         recording.taped.extend(self.engine.taped_keys());
