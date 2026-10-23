@@ -313,12 +313,7 @@ impl App {
         match wishes.record {
             Some(Record::Start) if self.recording.is_none() => tasks.push(self.toggle_recording()),
             Some(Record::Stop) if self.recording.is_some() => tasks.push(self.finish_recording()),
-            Some(Record::Next) => {
-                if self.recording.is_some() {
-                    tasks.push(self.finish_recording());
-                }
-                tasks.push(self.toggle_recording());
-            }
+            Some(Record::Next) => tasks.push(self.next_take()),
             _ => {}
         }
         if let Some(stems) = wishes.export {

@@ -370,6 +370,7 @@ pub enum Message {
     Refresh,
     PaintMute { clip: ClipId, muted: bool },
     PaintMuteTake { clip: ClipId, take: usize, muted: bool },
+    SlideTake { clip: ClipId, take: usize, offset: i64 },
     PaintDelete(ClipId),
     TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
     StretchClip { clip: ClipId, start: Frames, len: Frames },
@@ -480,6 +481,7 @@ enum Run {
     Point(loupe_engine::Target),
     LaneHeight(loupe_engine::Target),
     Notes(ClipId),
+    Slide(ClipId),
     Sampler(TrackId),
 }
 
@@ -713,6 +715,8 @@ struct App {
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
     background: Vec<scripts::Background>,
+    /// Set by next_take so the loop pass it interrupts is not kept.
+    drop_cut_pass: bool,
     snap: bool,
     follow: following::Follow,
     midi_chosen: Vec<String>,
@@ -871,6 +875,7 @@ impl App {
             copied_clips: None,
             scripts: Vec::new(),
             background: Vec::new(),
+            drop_cut_pass: false,
             snap: settings.snap,
             follow: settings.follow,
             midi_chosen: settings.midi_inputs.clone().unwrap_or_default(),
@@ -1085,6 +1090,7 @@ impl App {
             copied_clips: None,
             scripts: Vec::new(),
             background: Vec::new(),
+            drop_cut_pass: false,
             snap: false,
             follow: following::Follow::default(),
             midi_chosen: Vec::new(),
@@ -2053,6 +2059,26 @@ impl App {
             }
             Message::Refresh => {}
             Message::PaintMute { clip, muted } => self.mute_clips(self.affected_by(clip), muted),
+            Message::SlideTake { clip, take, offset } => {
+                let Some(found) = self.project.clip(clip) else { return Task::none() };
+                let mut offsets: Vec<i64> = match found.takes.len() > 1 {
+                    true => found.takes.iter().map(|shift| found.offset as i64 + shift).collect(),
+                    false => vec![found.offset as i64],
+                };
+                let active = found.take;
+                let muted = found.take_muted(take);
+                if offsets.get(take).is_some_and(|was| *was != offset) {
+                    offsets[take] = offset;
+                    // SetTakes finds muted takes by where they start, so a slid take is muted again here.
+                    self.transact(Some(Run::Slide(clip)), |project| {
+                        project.apply(Command::SetTakes { clip, offsets, active })?;
+                        if muted {
+                            project.apply(Command::SetTakeMuted { clip, take, muted: true })?;
+                        }
+                        Ok(Outcome::Done)
+                    });
+                }
+            }
             Message::PaintMuteTake { clip, take, muted } => {
                 self.edit(Some(Run::Paint), Command::SetTakeMuted { clip, take, muted });
             }
