@@ -2712,9 +2712,11 @@ fn off_unity(db: f32) -> bool {
     db.abs() > GAIN_UNITY_SLACK_DB
 }
 
+/// Like Reaper: unity and any boost rest on the top edge, out of the waveform's way;
+/// turning a clip down lowers the line, reaching the floor at twice the span.
 fn gain_y(db: f32, top: f32, height: f32) -> f32 {
-    let along = (db / GAIN_LINE_SPAN_DB).clamp(-1.0, 1.0);
-    (top + height * (1.0 - along) / 2.0).clamp(top + 0.5, top + height - 1.5)
+    let down = (-db / (GAIN_LINE_SPAN_DB * 2.0)).clamp(0.0, 1.0);
+    (top + height * down).clamp(top + 0.5, top + height - 1.5)
 }
 
 fn gain_figure_width(db: f32) -> f32 {
@@ -2833,22 +2835,16 @@ mod gain {
     }
 
     #[test]
-    fn unity_sits_on_the_centre_of_the_waveform() {
-        assert_eq!(y(0.0), WAVE_TOP + WAVE_HEIGHT / 2.0);
+    fn unity_and_boosts_rest_on_the_top_edge_like_reaper() {
+        assert_eq!(y(0.0), WAVE_TOP + 0.5);
+        assert_eq!(y(MAX_GAIN_DB), y(0.0), "a boost stays on the top edge; the figure says how much");
     }
 
     #[test]
-    fn louder_reads_higher_and_quieter_reads_lower() {
-        assert!(y(6.0) < y(0.0), "a boosted clip draws above the middle");
-        assert!(y(-6.0) > y(0.0), "a pulled clip draws below the middle");
-        assert_eq!(y(6.0) - y(0.0), y(0.0) - y(-6.0), "the mapping is even either side of unity");
-    }
-
-    #[test]
-    fn the_span_clamps_at_twelve_decibels_either_way() {
-        assert_eq!(y(MAX_GAIN_DB), y(GAIN_LINE_SPAN_DB));
-        assert_eq!(y(MIN_GAIN_DB), y(-GAIN_LINE_SPAN_DB));
-        assert_eq!(y(-18.0), y(-GAIN_LINE_SPAN_DB), "anything under the span rests on the floor");
+    fn quieter_reads_lower_and_bottoms_out() {
+        assert!(y(-6.0) > y(0.0), "a pulled clip draws below the top");
+        assert!(y(-12.0) > y(-6.0));
+        assert_eq!(y(MIN_GAIN_DB.min(-GAIN_LINE_SPAN_DB * 2.0)), WAVE_TOP + WAVE_HEIGHT - 1.5, "the quietest rests on the floor");
     }
 
     #[test]
