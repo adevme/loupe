@@ -48,6 +48,8 @@ pub struct Clip {
     pub stretched: Option<Arc<Source>>,
     pub takes: Vec<i64>,
     pub take: usize,
+    /// Takes muted on their own lane. When the playing take is one of them, this piece is silent.
+    pub muted_takes: Vec<usize>,
     pub name: Option<String>,
 }
 
@@ -89,6 +91,15 @@ impl Clip {
 
     pub fn has_takes(&self) -> bool {
         self.takes.len() > 1
+    }
+
+    /// Whether this piece is heard: muted as a whole, or its playing take muted on its lane, silences it.
+    pub fn is_silent(&self) -> bool {
+        self.muted || self.muted_takes.contains(&self.take)
+    }
+
+    pub fn take_muted(&self, take: usize) -> bool {
+        self.muted_takes.contains(&take)
     }
 
     pub fn take_offset(&self, take: usize) -> Option<Frames> {
@@ -325,6 +336,7 @@ pub enum Command {
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetStretch { clip: ClipId, stretch: f64 },
     SetTakes { clip: ClipId, offsets: Vec<i64>, active: usize },
+    SetTakeMuted { clip: ClipId, take: usize, muted: bool },
     UseTake { clip: ClipId, take: usize },
     FillStretch { source: Arc<Source>, stretch: f64, stretched: Arc<Source> },
     SetBpm(f64),
@@ -620,6 +632,7 @@ impl Project {
                     stretched: None,
                     takes: Vec::new(),
                     take: 0,
+                    muted_takes: Vec::new(),
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -657,6 +670,7 @@ impl Project {
                     stretched: None,
                     takes: Vec::new(),
                     take: 0,
+                    muted_takes: Vec::new(),
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -743,9 +757,28 @@ impl Project {
                 if target.notes.is_some() || chosen < 0 {
                     return Err(CommandError::InvalidValue);
                 }
+                // Muted takes follow their recordings, found by where each one starts.
+                let muted_at: Vec<i64> = target.muted_takes.iter().filter_map(|take| target.takes.get(*take).map(|shift| target.offset as i64 + shift)).collect();
+                target.muted_takes = offsets.iter().enumerate().filter(|(_, at)| muted_at.contains(at)).map(|(take, _)| take).collect();
+                if offsets.len() < 2 {
+                    target.muted_takes.clear();
+                }
                 target.offset = chosen as Frames;
                 target.takes = if offsets.len() > 1 { offsets.iter().map(|offset| offset - chosen).collect() } else { Vec::new() };
                 target.take = if offsets.len() > 1 { active } else { 0 };
+                Ok(Outcome::Done)
+            }
+            Command::SetTakeMuted { clip, take, muted } => {
+                let (t, i) = self.locate(clip)?;
+                let target = &mut self.tracks[t].clips[i];
+                if take >= target.takes.len() {
+                    return Err(CommandError::InvalidValue);
+                }
+                target.muted_takes.retain(|other| *other != take);
+                if muted {
+                    target.muted_takes.push(take);
+                    target.muted_takes.sort_unstable();
+                }
                 Ok(Outcome::Done)
             }
             Command::UseTake { clip, take } => {

@@ -367,6 +367,7 @@ pub enum Message {
     SetTool(Tool),
     Refresh,
     PaintMute { clip: ClipId, muted: bool },
+    PaintMuteTake { clip: ClipId, take: usize, muted: bool },
     PaintDelete(ClipId),
     TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
     StretchClip { clip: ClipId, start: Frames, len: Frames },
@@ -2047,6 +2048,9 @@ impl App {
             }
             Message::Refresh => {}
             Message::PaintMute { clip, muted } => self.mute_clips(self.affected_by(clip), muted),
+            Message::PaintMuteTake { clip, take, muted } => {
+                self.edit(Some(Run::Paint), Command::SetTakeMuted { clip, take, muted });
+            }
             Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
