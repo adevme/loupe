@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use crate::ceiling::{Ceiling, Seat};
 use crate::sandbox::{Ran, Sandbox};
@@ -8,6 +10,25 @@ use crate::wire::{Ask, Region, Reply, Song};
 const SETTLING_BLOCKS: usize = 24;
 const SETTLING_WAIT: std::time::Duration = std::time::Duration::from_millis(2);
 const BLOCKS_BEFORE_WAITING: usize = 4;
+/// When `WATCH_SLOW_SLOTS` is set, every plugin round trip slower than this is noted by name,
+/// for `loupe bench` to list.
+const SLOW_SLOT: std::time::Duration = std::time::Duration::from_micros(1_000);
+pub static WATCH_SLOW_SLOTS: AtomicBool = AtomicBool::new(false);
+static SLOW_SLOTS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+fn note_slow_slot(name: &str, took: std::time::Duration) {
+    if let Ok(mut slow) = SLOW_SLOTS.lock() {
+        if slow.len() < 100_000 {
+            slow.push((name.to_string(), took.as_micros() as u64));
+        }
+    }
+}
+
+/// Takes the slow round trips noted so far: plugin name and microseconds, in order.
+pub fn take_slow_slots() -> Vec<(String, u64)> {
+    SLOW_SLOTS.lock().map(|mut slow| std::mem::take(&mut *slow)).unwrap_or_default()
+}
+
 const GRACE_IN_BLOCKS: u32 = 2;
 const LEAST_GRACE: std::time::Duration = std::time::Duration::from_millis(5);
 pub const QUIET: f32 = 1.0e-7;
@@ -760,10 +781,17 @@ impl Rack {
             }
             let Some(host) = slot.host.as_mut() else { continue };
             let within = deadline.unwrap_or_else(|| host.patience());
+            let clock = WATCH_SLOW_SLOTS.load(Ordering::Relaxed).then(Instant::now);
             let ran = match at {
                 Some(at) if slot.ara => host.run_within(audio, &[], Some(at), within),
                 _ => host.run_within(audio, side, None, within),
             };
+            if let Some(clock) = clock {
+                let took = clock.elapsed();
+                if took > SLOW_SLOT {
+                    note_slow_slot(&slot.name, took);
+                }
+            }
             match ran {
                 Ok(Ran::InTime) => {
                     match blending {

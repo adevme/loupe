@@ -1,15 +1,35 @@
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::ceiling::{Ceiling, Seat};
-use crate::wire::{next_line, read_block_or_line, write_block, Ask, Came, Link, Reply};
+use crate::wire::{read_block_or_line, write_block, Ask, Came, Link, Reply};
 
+/// Round trips to the plugin hosts, counted for `loupe bench`: how many, their total time,
+/// the slowest one, and how many came back late.
+pub static EXCHANGES: AtomicU64 = AtomicU64::new(0);
+pub static EXCHANGE_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static EXCHANGE_SLOWEST_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static EXCHANGES_LATE: AtomicU64 = AtomicU64::new(0);
+
+pub fn exchanges() -> (u64, u64, u64, u64) {
+    (
+        EXCHANGES.load(Ordering::Relaxed),
+        EXCHANGE_NANOS.load(Ordering::Relaxed),
+        EXCHANGE_SLOWEST_NANOS.load(Ordering::Relaxed),
+        EXCHANGES_LATE.load(Ordering::Relaxed),
+    )
+}
+
+/// How long the audio thread spins for a block to come back before it sleeps on it. A host
+/// answers most blocks within a few hundred microseconds, and being woken from a sleep costs
+/// the audio thread as much again.
+const SPIN_FOR_A_REPLY: Duration = Duration::from_millis(2);
 const PATIENCE: Duration = Duration::from_secs(20);
 const BLOCK_PATIENCE: Duration = Duration::from_millis(2_000);
 const SILENT_FOR_TOO_LONG: Duration = Duration::from_secs(20);
@@ -74,6 +94,8 @@ pub struct Sandbox {
     child: Child,
     writing: ChildStdin,
     wants: Option<Sender<Want>>,
+    outgoing: Vec<u8>,
+    pending: Vec<u8>,
     gets: Receiver<Got>,
     moved: Receiver<(usize, usize)>,
     reader: Option<JoinHandle<()>>,
@@ -127,6 +149,8 @@ impl Sandbox {
             child,
             writing,
             wants: Some(wants),
+            outgoing: Vec::with_capacity(1 << 16),
+            pending: Vec::new(),
             gets,
             moved,
             reader: Some(reader),
@@ -140,14 +164,22 @@ impl Sandbox {
         })
     }
 
+    /// A word the host needs no answer to, such as the time. It rides down the pipe with the
+    /// next ask instead of waking the host on its own.
     pub fn tell(&mut self, ask: Ask) -> Result<(), String> {
         if self.lost {
             return Err("the plugin host is gone".into());
         }
-        if ask.write(&mut self.writing).is_err() {
-            return Err(self.give_up("the plugin host stopped listening"));
-        }
+        let _ = ask.write(&mut self.pending);
         Ok(())
+    }
+
+    fn write_with_pending(&mut self, ask: &Ask) -> std::io::Result<()> {
+        self.outgoing.clear();
+        self.outgoing.append(&mut self.pending);
+        ask.write(&mut self.outgoing)?;
+        self.writing.write_all(&self.outgoing)?;
+        self.writing.flush()
     }
 
     pub fn ask(&mut self, ask: Ask) -> Result<Reply, String> {
@@ -192,7 +224,7 @@ impl Sandbox {
     }
 
     fn send_the_ask(&mut self, ask: &Ask, want: Want) -> Result<(), String> {
-        if ask.write(&mut self.writing).is_err() {
+        if self.write_with_pending(ask).is_err() {
             return Err(self.give_up("the plugin host stopped listening"));
         }
         if self.wants.as_ref().is_none_or(|w| w.send(want).is_err()) {
@@ -255,6 +287,19 @@ impl Sandbox {
     }
 
     fn exchange(&mut self, ask: Ask, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], within: Duration) -> Result<Ran, String> {
+        let clock = Instant::now();
+        let went = self.exchange_now(ask, audio, side, within);
+        let took = clock.elapsed().as_nanos() as u64;
+        EXCHANGES.fetch_add(1, Ordering::Relaxed);
+        EXCHANGE_NANOS.fetch_add(took, Ordering::Relaxed);
+        EXCHANGE_SLOWEST_NANOS.fetch_max(took, Ordering::Relaxed);
+        if matches!(went, Ok(Ran::Late)) {
+            EXCHANGES_LATE.fetch_add(1, Ordering::Relaxed);
+        }
+        went
+    }
+
+    fn exchange_now(&mut self, ask: Ask, audio: &mut Vec<[f32; 2]>, side: &[[f32; 2]], within: Duration) -> Result<Ran, String> {
         if self.lost {
             return Err("the plugin host is gone".into());
         }
@@ -263,17 +308,22 @@ impl Sandbox {
             self.fell_behind()?;
             return Ok(Ran::Late);
         }
-        if ask.write(&mut self.writing).is_err() || write_block(&mut self.writing, audio).is_err() {
-            return Err(self.give_up("the plugin host stopped listening"));
+        // The ask and its audio go down the pipe in one write, so the host wakes once.
+        self.outgoing.clear();
+        self.outgoing.append(&mut self.pending);
+        let _ = ask.write(&mut self.outgoing);
+        let _ = write_block(&mut self.outgoing, audio);
+        if !side.is_empty() {
+            let _ = write_block(&mut self.outgoing, side);
         }
-        if !side.is_empty() && write_block(&mut self.writing, side).is_err() {
+        if self.writing.write_all(&self.outgoing).is_err() || self.writing.flush().is_err() {
             return Err(self.give_up("the plugin host stopped listening"));
         }
         if self.wants.as_ref().is_none_or(|w| w.send(Want::Block).is_err()) {
             return Err(self.give_up("the plugin host stopped listening"));
         }
         self.ran = true;
-        match self.gets.recv_timeout(within) {
+        match self.reply_within(within) {
             Ok(Got::Block(came)) => {
                 self.late_since = None;
                 audio.clear();
@@ -289,6 +339,18 @@ impl Sandbox {
             }
             Err(RecvTimeoutError::Disconnected) => Err(self.give_up("the plugin crashed")),
         }
+    }
+
+    fn reply_within(&mut self, within: Duration) -> Result<Got, RecvTimeoutError> {
+        let began = Instant::now();
+        while began.elapsed() < SPIN_FOR_A_REPLY.min(within) {
+            match self.gets.try_recv() {
+                Ok(got) => return Ok(got),
+                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+                Err(TryRecvError::Empty) => std::hint::spin_loop(),
+            }
+        }
+        self.gets.recv_timeout(within.saturating_sub(began.elapsed()))
     }
 
     fn take_what_came_late(&mut self) -> Result<(), String> {
@@ -391,21 +453,18 @@ impl Sandbox {
     }
 }
 
-fn read_for(out: impl Read, asked: Receiver<Want>, sends: Sender<Got>, tells: Sender<(usize, usize)>) {
+/// Reads everything the host says as it says it, so the reader is already waiting on the pipe
+/// when a block comes back, instead of first being woken to ask for it. A block starts with
+/// the mark byte and a reply line never does, so nothing needs to know which is due.
+fn read_for(out: impl Read, _asked: Receiver<Want>, sends: Sender<Got>, tells: Sender<(usize, usize)>) {
     let mut reading = BufReader::new(out);
     let mut audio = Vec::new();
-    while let Ok(want) = asked.recv() {
+    loop {
         let got = loop {
-            let came = match want {
-                Want::Line => match next_line(&mut reading) {
-                    Some(line) => Got::Line(line),
-                    None => Got::Gone,
-                },
-                Want::Block => match read_block_or_line(&mut reading, &mut audio) {
-                    Ok(Came::Block) => Got::Block(std::mem::take(&mut audio)),
-                    Ok(Came::Line(line)) => Got::Line(line),
-                    Err(_) => Got::Gone,
-                },
+            let came = match read_block_or_line(&mut reading, &mut audio) {
+                Ok(Came::Block) => Got::Block(std::mem::take(&mut audio)),
+                Ok(Came::Line(line)) => Got::Line(line),
+                Err(_) => Got::Gone,
             };
             if let Got::Line(line) = &came {
                 match Reply::read(line) {
@@ -431,7 +490,7 @@ impl Sandbox {
         if self.lost || self.said_bye {
             return;
         }
-        let _ = Ask::Quit.write(&mut self.writing);
+        let _ = self.write_with_pending(&Ask::Quit);
         self.said_bye = true;
         self.seat.take();
     }
@@ -477,9 +536,9 @@ impl Drop for Sandbox {
             }
         }
         self.wants.take();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
+        // The reader ends when the pipe does. A host that leaves a child holding the pipe open
+        // would hold this thread too, so it is let go rather than waited for.
+        self.reader.take();
     }
 }
 

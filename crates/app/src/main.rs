@@ -8,6 +8,7 @@ mod clip_window;
 mod clipboard;
 mod closing;
 mod crash;
+mod crew;
 mod crash_reports;
 mod exporting;
 mod files;
@@ -95,6 +96,12 @@ fn main() -> iced::Result {
     let asked = cli::asked_for(&typed);
     if asked != cli::Asked::Gui {
         std::process::exit(cli::run(asked));
+    }
+    // On Windows wgpu tends to pick Vulkan, which flickers on AMD cards and on PCs with
+    // two GPUs. DirectX 12 presents through the Windows compositor. WGPU_BACKEND still wins.
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_BACKEND").is_none() {
+        std::env::set_var("WGPU_BACKEND", "dx12");
     }
     let shift_at_start = safe_mode::shift_held();
     crash::keep_a_record();

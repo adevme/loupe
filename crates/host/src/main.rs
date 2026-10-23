@@ -6,7 +6,7 @@ mod window;
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -213,12 +213,6 @@ enum ForMain {
     Done,
 }
 
-enum ForAudio {
-    Run { ask: Ask, seat: usize, audio: Vec<[f32; 2]>, side: Vec<[f32; 2]> },
-    Time(Song),
-    Turn { seat: usize, knob: usize, value: f32 },
-}
-
 struct Seated {
     open: Open,
     name: String,
@@ -317,7 +311,11 @@ impl Out {
     }
 
     fn hand_back(&self, audio: &[[f32; 2]]) -> bool {
-        write_block(&mut *self.open(), audio).is_ok()
+        // One write up the pipe per block, so Loupe's reader wakes once.
+        let mut bytes = Vec::with_capacity(8 + audio.len() * 8);
+        let _ = write_block(&mut bytes, audio);
+        let mut open = self.open();
+        open.write_all(&bytes).is_ok() && open.flush().is_ok()
     }
 
     fn flush(&self) {
@@ -351,7 +349,9 @@ fn blocks_after(ask: &Ask) -> usize {
     }
 }
 
-fn read_asks(to_main: Sender<ForMain>, to_audio: Sender<ForAudio>, out: Arc<Out>, touches: Arc<Touches>, bell: Arc<waking::Bell>) {
+/// Reads asks off the pipe and runs the audio ones right here: a block is processed and handed
+/// back on the thread that read it, with no second thread to wake in between.
+fn read_asks(to_main: Sender<ForMain>, seats: Arc<Mutex<Seats>>, out: Arc<Out>, touches: Arc<Touches>, bell: Arc<waking::Bell>) {
     waking::hurry_this_thread();
     let tell_main = |item: ForMain| {
         let sent = to_main.send(item).is_ok();
@@ -360,6 +360,10 @@ fn read_asks(to_main: Sender<ForMain>, to_audio: Sender<ForAudio>, out: Arc<Out>
     };
     let mut input = BufReader::new(std::io::stdin());
     let mut seat = 0;
+    let mut audio = Vec::new();
+    let mut side = Vec::new();
+    let timing_file = std::env::var_os("LOUPE_HOST_TIMING");
+    let (mut blocks_timed, mut spent_ns, mut most_ns) = (0u64, 0u64, 0u64);
     while let Some(line) = next_line(&mut input) {
         let Some(ask) = Ask::read(&line) else {
             if !tell_main(ForMain::Mumble(line.trim().to_string())) {
@@ -369,19 +373,53 @@ fn read_asks(to_main: Sender<ForMain>, to_audio: Sender<ForAudio>, out: Arc<Out>
         };
         let blocks = blocks_after(&ask);
         if blocks > 0 {
-            let mut audio = Vec::new();
-            let mut side = Vec::new();
             if read_block(&mut input, &mut audio).is_err() || (blocks > 1 && read_block(&mut input, &mut side).is_err()) {
                 break;
             }
-            if to_audio.send(ForAudio::Run { ask, seat, audio, side }).is_err() {
+            if blocks == 1 {
+                side.clear();
+            }
+            let clock = std::time::Instant::now();
+            {
+                let mut held = hold(&seats);
+                match &ask {
+                    Ask::Chain { links, .. } => held.run(links, &mut audio, &side),
+                    Ask::ProcessAt(at) => held.process(seat, &mut audio, &side, Some(*at)),
+                    _ => held.process(seat, &mut audio, &side, None),
+                }
+            }
+            let took = clock.elapsed().as_nanos() as u64;
+            blocks_timed += 1;
+            spent_ns += took;
+            most_ns = most_ns.max(took);
+            if !out.hand_back(&audio) {
                 return;
             }
             continue;
         }
+        if matches!(ask, Ask::Quit) {
+            if let Some(path) = timing_file.as_ref() {
+                if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+                    let _ = writeln!(file, "{} {blocks_timed} {spent_ns} {most_ns}", std::process::id());
+                }
+            }
+        }
         let sent = match ask {
-            Ask::Timing(song) => to_audio.send(ForAudio::Time(song)).is_ok(),
-            Ask::Turn { knob, value } => to_audio.send(ForAudio::Turn { seat, knob, value }).is_ok(),
+            Ask::Timing(song) => {
+                hold(&seats).tell_the_time(song);
+                true
+            }
+            Ask::Turn { knob, value } => {
+                {
+                    let mut held = hold(&seats);
+                    if let Some(seated) = held.at(seat) {
+                        seated.open.turn(knob, value);
+                    }
+                    say_if_it_moved(&mut held, seat, &out);
+                }
+                out.say(&Reply::Fine);
+                true
+            }
             Ask::Seat(to) => {
                 seat = to;
                 out.say(&Reply::Fine);
@@ -400,38 +438,6 @@ fn read_asks(to_main: Sender<ForMain>, to_audio: Sender<ForAudio>, out: Arc<Out>
     tell_main(ForMain::Done);
 }
 
-fn play(jobs: Receiver<ForAudio>, seats: Arc<Mutex<Seats>>, out: Arc<Out>) {
-    waking::hurry_this_thread();
-    while let Ok(job) = jobs.recv() {
-        match job {
-            ForAudio::Run { ask, seat, mut audio, side } => {
-                {
-                    let mut held = hold(&seats);
-                    match ask {
-                        Ask::Chain { links, .. } => held.run(&links, &mut audio, &side),
-                        Ask::ProcessAt(at) => held.process(seat, &mut audio, &side, Some(at)),
-                        _ => held.process(seat, &mut audio, &side, None),
-                    }
-                }
-                if !out.hand_back(&audio) {
-                    return;
-                }
-            }
-            ForAudio::Time(song) => hold(&seats).tell_the_time(song),
-            ForAudio::Turn { seat, knob, value } => {
-                {
-                    let mut held = hold(&seats);
-                    if let Some(seated) = held.at(seat) {
-                        seated.open.turn(knob, value);
-                    }
-                    say_if_it_moved(&mut held, seat, &out);
-                }
-                out.say(&Reply::Fine);
-            }
-        }
-    }
-}
-
 type Showing = Option<(std::rc::Rc<loupe_plugins::editor::Editor>, window::Window, usize)>;
 
 fn main() {
@@ -443,14 +449,9 @@ fn main() {
     let touches = Arc::new(Touches::default());
     let bell = Arc::new(waking::Bell::new());
     let (to_main, came) = mpsc::channel::<ForMain>();
-    let (to_audio, jobs) = mpsc::channel::<ForAudio>();
     {
-        let (out, touches, bell) = (out.clone(), touches.clone(), bell.clone());
-        std::thread::spawn(move || read_asks(to_main, to_audio, out, touches, bell));
-    }
-    {
-        let (seats, out) = (seats.clone(), out.clone());
-        std::thread::spawn(move || play(jobs, seats, out));
+        let (seats, out, touches, bell) = (seats.clone(), out.clone(), touches.clone(), bell.clone());
+        std::thread::spawn(move || read_asks(to_main, seats, out, touches, bell));
     }
 
     let mut editor: Showing = None;

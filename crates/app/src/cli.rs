@@ -13,6 +13,7 @@ usage:
   loupe tracks <project.lp>                     print the track list
   loupe render <project.lp> <out.wav>           render the master bus to one wav
   loupe render <project.lp> <folder> --stems    render one wav per track into that folder
+  loupe bench <project.lp> [frames] [seconds] [from]   time the live mix through the plugins, no window
   loupe --help                                  print this";
 
 const OPENS_WITHIN: Duration = Duration::from_secs(90);
@@ -30,6 +31,7 @@ pub enum Asked {
     Wrong(String),
     Tracks(PathBuf),
     Render { project: PathBuf, out: PathBuf, stems: bool },
+    Bench { project: PathBuf, frames: usize, seconds: f64, from: f64, pause: f64 },
 }
 
 pub fn asked_for(args: &[String]) -> Asked {
@@ -40,6 +42,19 @@ pub fn asked_for(args: &[String]) -> Asked {
         "tracks" => match &args[1..] {
             [project] => Asked::Tracks(PathBuf::from(project)),
             _ => Asked::Wrong("tracks takes one project file".into()),
+        },
+        "bench" => match &args[1..] {
+            [project, rest @ ..] => {
+                let mut got = [256.0, 10.0, 0.0, 0.0];
+                for (slot, text) in got.iter_mut().zip(rest) {
+                    match text.parse::<f64>() {
+                        Ok(number) if number >= 0.0 => *slot = number,
+                        _ => return Asked::Wrong(format!("bench does not understand {text}")),
+                    }
+                }
+                Asked::Bench { project: PathBuf::from(project), frames: got[0] as usize, seconds: got[1], from: got[2], pause: got[3] }
+            }
+            _ => Asked::Wrong("bench takes a project file, then optionally frames a block, seconds to run, where to start in seconds, and a pause in seconds (paced like play, stop, play again)".into()),
         },
         "render" => {
             let mut stems = false;
@@ -98,6 +113,16 @@ pub fn run(asked: Asked) -> i32 {
             2
         }
         Asked::Tracks(project) => match listing(&project) {
+            Ok(told) => {
+                print!("{told}");
+                0
+            }
+            Err(why) => {
+                eprintln!("loupe: {why}");
+                1
+            }
+        },
+        Asked::Bench { project, frames, seconds, from, pause } => match benching(&project, frames, seconds, from, pause) {
             Ok(told) => {
                 print!("{told}");
                 0
@@ -264,6 +289,141 @@ fn rendering(file: &Path, out: &Path, stems: bool) -> Result<Vec<PathBuf>, Strin
     });
     drop(racks);
     went
+}
+
+/// Runs the live mix the way the audio thread does, block after block, through the real
+/// plugin hosts, and reports where the time goes. No window, no sound card.
+fn benching(file: &Path, frames: usize, seconds: f64, from: f64, pause: f64) -> Result<String, String> {
+    let text = std::fs::read_to_string(file).map_err(|why| format!("{}: {why}", file.display()))?;
+    let rate = SavedProject::parse(&text)?.rate;
+    let opened = crate::files::read_text(&text, rate)?;
+    for audio in opened.missing() {
+        eprintln!("loupe: audio not found: {audio}");
+    }
+    let (project, _) = opened.build(rate);
+    let frames = frames.clamp(16, 4096);
+    let mut racks: Box<dyn Chains> =
+        Box::new(racks::Racks::new(rate, racks::CHAIN_BLOCK, racks::Peeks::default(), racks::PluginsOff::default(), racks::Falls::default()));
+    racks.follow(&project);
+    let opening = Instant::now();
+    opened_in_time(racks.as_mut())?;
+    let opening = opening.elapsed();
+    for (_, name, why) in racks.troubles() {
+        eprintln!("loupe: {name}: {why}");
+    }
+    let start = (from * rate as f64) as loupe_engine::Frames;
+    let mut scratch = loupe_engine::Mixdown::default();
+    racks.takes_its_time(true);
+    let priming = Instant::now();
+    scratch.get_ready(&project, start, None, None, frames, Some(racks.as_mut()), None);
+    let priming = priming.elapsed();
+    racks.takes_its_time(false);
+    scratch.hurries();
+    let blocks = ((seconds * rate as f64) / frames as f64).max(1.0) as usize;
+    let budget = Duration::from_secs_f64(frames as f64 / rate as f64);
+    let mut out = vec![[0.0f32; 2]; frames];
+    let mut spent: Vec<u64> = Vec::with_capacity(blocks);
+    let (count_before, nanos_before, _, late_before) = loupe_plugins::sandbox::exchanges();
+    let (waves_before, wave_nanos_before) = racks::wave_timing();
+    loupe_plugins::rack::WATCH_SLOW_SLOTS.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = loupe_plugins::rack::take_slow_slots();
+    let paced = pause > 0.0;
+    let cycles = if paced { 3 } else { 1 };
+    let mut starts: Vec<(usize, usize, u64)> = Vec::new();
+    let began = Instant::now();
+    let mut pos = start;
+    for cycle in 0..cycles {
+        if cycle > 0 {
+            racks.song_goes(loupe_engine::Song::where_it_is(&project, pos, false, false));
+            std::thread::sleep(Duration::from_secs_f64(pause));
+            pos = start;
+        }
+        let cycle_began = Instant::now();
+        for block in 0..blocks {
+            if paced {
+                let due = cycle_began + budget * block as u32;
+                let now = Instant::now();
+                if due > now {
+                    std::thread::sleep(due - now);
+                }
+            }
+            racks.song_goes(loupe_engine::Song::where_it_is(&project, pos, true, false));
+            let one = Instant::now();
+            loupe_engine::render_through(&project, pos, &mut out, &mut scratch, Some(racks.as_mut()));
+            let took = one.elapsed().as_micros() as u64;
+            spent.push(took);
+            if paced && Duration::from_micros(took) > budget {
+                starts.push((cycle, block, took));
+            }
+            pos += frames as loupe_engine::Frames;
+        }
+    }
+    let whole = began.elapsed();
+    loupe_plugins::rack::WATCH_SLOW_SLOTS.store(false, std::sync::atomic::Ordering::Relaxed);
+    let slow = loupe_plugins::rack::take_slow_slots();
+    let (count, nanos, slowest, late) = loupe_plugins::sandbox::exchanges();
+    let (waves, wave_nanos) = racks::wave_timing();
+    let spending = racks.plugin_spending();
+    let mut sorted = spent.clone();
+    sorted.sort_unstable();
+    let at = |share: f64| sorted[((sorted.len() - 1) as f64 * share) as usize];
+    let over = spent.iter().filter(|us| Duration::from_micros(**us) > budget).count();
+    let exchanges = count - count_before;
+    let exchange_us = (nanos - nanos_before) as f64 / 1000.0;
+    let scoped = waves - waves_before;
+    let scope_us = (wave_nanos - wave_nanos_before) as f64 / 1000.0;
+    let mut told = String::new();
+    told.push_str(&format!("Loupe bench: {} blocks of {frames} frames at {rate} Hz from {from:.1} s
+
+", spent.len()));
+    told.push_str(&format!("plugins    {} running, {} held back, opened in {:.1} s, primed in {:.3} s
+", spending.running, spending.held_back, opening.as_secs_f64(), priming.as_secs_f64()));
+    told.push_str(&format!("budget     {:>8.0} us a block
+", budget.as_secs_f64() * 1e6));
+    told.push_str(&format!("block      {:>8} us median  {:>8} us p90  {:>8} us p99  {:>8} us worst
+", at(0.5), at(0.9), at(0.99), at(1.0)));
+    told.push_str(&format!("over       {over} of {} blocks took longer than the budget
+", spent.len()));
+    told.push_str(&format!("whole      {:.3} s for {:.3} s of song ({:.2}x real time)
+
+", whole.as_secs_f64(), spent.len() as f64 * frames as f64 / rate as f64, (spent.len() as f64 * frames as f64 / rate as f64) / whole.as_secs_f64().max(1e-9)));
+    told.push_str(&format!("exchanges  {exchanges} round trips, {:.1} a block, {:.0} us each on average, {:.0} us slowest, {} late
+", exchanges as f64 / spent.len().max(1) as f64, exchange_us / exchanges.max(1) as f64, slowest as f64 / 1000.0, late - late_before));
+    told.push_str(&format!("           {:.0} us a block inside the hosts' round trips, {} late replies the racks counted
+", exchange_us / spent.len().max(1) as f64, spending.late_replies));
+    told.push_str(&format!("waves      {} waves, {} on scoped threads, {:.0} us a block inside those scopes, up to {} tracks at once
+", spending.waves, scoped, scope_us / spent.len().max(1) as f64, spending.at_once));
+    told.push_str(&format!("plugins    {:.0} us a block in process_wave/master/monitor overall
+", spending.nanoseconds as f64 / 1000.0 / spent.len().max(1) as f64));
+    if paced {
+        told.push_str(&format!("
+over budget while paced (cycle, block, us), {} in all:
+", starts.len()));
+        for (cycle, block, us) in starts.iter().take(60) {
+            told.push_str(&format!("  {cycle} {block:>5} {us:>6}
+"));
+        }
+    }
+    let mut by_name: Vec<(String, usize, u64)> = Vec::new();
+    for (name, us) in &slow {
+        match by_name.iter_mut().find(|(known, _, _)| known == name) {
+            Some((_, count, worst)) => {
+                *count += 1;
+                *worst = (*worst).max(*us);
+            }
+            None => by_name.push((name.clone(), 1, *us)),
+        }
+    }
+    by_name.sort_by(|a, b| b.1.cmp(&a.1));
+    told.push_str(&format!("
+slow round trips (over 1 ms), {} in all, by plugin: count, worst us
+", slow.len()));
+    for (name, count, worst) in by_name.iter().take(30) {
+        told.push_str(&format!("  {count:>5} {worst:>7}  {name}
+"));
+    }
+    drop(racks);
+    Ok(told)
 }
 
 fn opened_in_time(racks: &mut dyn Chains) -> Result<(), String> {

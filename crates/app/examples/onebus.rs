@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use loupe_engine::{Chains, Command, SavedProject, Source};
 
+#[path = "../src/crew.rs"]
+mod crew;
 #[path = "../src/racks.rs"]
 mod racks;
 

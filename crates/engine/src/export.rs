@@ -1317,6 +1317,7 @@ mod tests {
         pacer.spent_on_files(Duration::from_millis(1));
         pacer.saw_the_plugins(crate::render::PluginSpending {
             nanoseconds: 130_000_000,
+            slowest_nanoseconds: 0,
             running: 7,
             held_back: 3,
             waves: 4,
