@@ -616,7 +616,6 @@ struct App {
     selected: Option<ClipId>,
     selection: HashSet<ClipId>,
     playing: bool,
-    /// Where play last started, so Space stops back there like Reaper.
     play_from: Frames,
     settle: u8,
     playhead: Frames,
@@ -1243,7 +1242,6 @@ impl App {
                     return self.finish_recording();
                 }
                 if self.playing {
-                    // Like Reaper: Space stops back where play started. Ctrl+Space pauses where it is.
                     self.stop_playing();
                     self.seek(self.play_from);
                 } else {

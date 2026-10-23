@@ -1137,7 +1137,6 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id] });
                         Some(Message::PaintMute { clip: clip.id, muted })
                     }
-                    // A take lane is the same clip seen per take, so erasing or muting there acts on that piece of the clip.
                     (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) => {
                         state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
                         Some(Message::PaintDelete(clip.id))
