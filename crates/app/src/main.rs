@@ -76,6 +76,7 @@ use timeline::{LoopRange, Timeline, Tool, View};
 
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
 const UNDO_STEPS: usize = 200;
+const FADE_BEFORE_CLOSING_THE_OUTPUT: std::time::Duration = std::time::Duration::from_millis(40);
 const SETTLE_TICKS: u8 = 6;
 const SCRIPT_CHECK_MS: u64 = 100;
 const STATUS_HEIGHT: f32 = 30.0;
@@ -145,7 +146,7 @@ pub enum Message {
     TogglePlay,
     Pause,
     ToggleRecord,
-    TakeReady { start: i64, keep_from: i64, passes: Option<recording::Passes>, punch: Option<(Frames, Frames)>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
+    TakeReady { start: i64, keep_from: i64, retake: bool, passes: Option<recording::Passes>, punch: Option<(Frames, Frames)>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
     ToStart,
     Seek(Frames),
     Tick,
@@ -1245,9 +1246,9 @@ impl App {
         }
         match message {
             Message::ToggleRecord => return self.toggle_recording(),
-            Message::TakeReady { start, keep_from, passes, punch, warning, result } => {
+            Message::TakeReady { start, keep_from, retake, passes, punch, warning, result } => {
                 let printing = result.as_ref().ok().and_then(|(_, trouble)| trouble.clone());
-                self.place_take(start, keep_from, passes, punch, result.map(|(sources, _)| sources));
+                self.place_take(start, keep_from, retake, passes, punch, result.map(|(sources, _)| sources));
                 if let Some(why) = printing {
                     self.problem = Some(format!("The take is kept dry, the Rec plugins could not be printed: {why}"));
                 }
@@ -3599,7 +3600,16 @@ impl App {
         }
     }
 
+    fn silence_the_interface(&mut self) {
+        self.engine.stop();
+        std::thread::sleep(FADE_BEFORE_CLOSING_THE_OUTPUT);
+        self.engine.stop_hearing();
+        self.input = None;
+        self.engine.close_output();
+    }
+
     fn shut_down(&mut self) -> Task<Message> {
+        self.silence_the_interface();
         self.going = true;
         self.overlay = Overlay::None;
         let mixer = self.mixer_window.take();

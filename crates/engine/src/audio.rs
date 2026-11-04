@@ -1103,6 +1103,14 @@ impl Engine {
         self.output_failure.as_ref()
     }
 
+    pub fn close_output(&mut self) {
+        self.quit.store(true, Ordering::Relaxed);
+        if let Some(host) = self.host.take() {
+            host.thread().unpark();
+            let _ = host.join();
+        }
+    }
+
     pub fn set_project(&mut self, project: &Project) {
         let heard = with_tracks_quiet(project, &self.quiet_tracks);
         self.send(Msg::Project(Arc::new(heard)));
@@ -1292,11 +1300,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.quit.store(true, Ordering::Relaxed);
-        if let Some(host) = self.host.take() {
-            host.thread().unpark();
-            let _ = host.join();
-        }
+        self.close_output();
     }
 }
 
@@ -1584,6 +1588,15 @@ mod tests {
         assert!(heard.track(vocal).unwrap().clips.iter().all(|clip| clip.is_silent()), "the old take still plays");
         assert!(heard.track(beat).unwrap().clips.iter().all(|clip| !clip.is_silent()), "the beat went quiet too");
         assert!(song.track(vocal).unwrap().clips.iter().all(|clip| !clip.is_silent()), "the song itself was muted");
+    }
+
+    #[test]
+    fn the_output_closes_before_the_engine_goes_and_the_engine_still_takes_orders() {
+        let mut engine = Engine::start(Output::Silent);
+        engine.close_output();
+        assert!(engine.host.is_none(), "the sound thread is still running");
+        engine.stop();
+        engine.close_output();
     }
 
     #[test]
