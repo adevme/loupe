@@ -916,6 +916,23 @@ mod routing_round_trip {
     use crate::source::Source;
 
     #[test]
+    fn a_stacked_take_saves_with_its_own_audio_and_not_the_first_file_in_the_song() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(beat)) = p.apply(Command::AddTrack { name: "Beat".into() }) else { panic!() };
+        let Ok(Outcome::Track(vox)) = p.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let tune = Arc::new(Source::from_frames("beat", vec![[0.1, 0.1]; 100]));
+        let first = Arc::new(Source::from_frames("first", vec![[0.2, 0.2]; 100]));
+        let joined = Arc::new(Source::from_frames("joined", vec![[0.3, 0.3]; 200]));
+        p.apply(Command::AddClip { track: beat, source: tune, start: 0 }).unwrap();
+        let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track: vox, source: first, start: 0 }) else { panic!() };
+        p.apply(Command::SetClipAudio { clip, source: joined.clone(), start: 0, len: 100, offsets: vec![0, 100], active: 1 }).unwrap();
+        let text = SavedProject::capture(&p, |_| None).to_text();
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&p.sources, 48_000);
+        assert_eq!(back.tracks[1].clips[0].audio()[0][0], 0.3, "the stacked vocal came back as another file");
+        assert!(p.sources.iter().any(|kept| Arc::ptr_eq(kept, &joined)), "the joined file is not in the song");
+    }
+
+    #[test]
     fn takes_follow_trims_and_splits_and_survive_a_save_and_open() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };

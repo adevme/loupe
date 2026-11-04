@@ -756,6 +756,7 @@ impl Project {
                 Ok(Outcome::Done)
             }
             Command::SetClipAudio { clip, source, start, len, offsets, active } => {
+                self.keep(&source);
                 let (t, i) = self.locate(clip)?;
                 let target = &mut self.tracks[t].clips[i];
                 if target.notes.is_some() || len == 0 {
