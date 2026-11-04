@@ -301,6 +301,8 @@ impl Timeline<'_> {
         if reach <= 0.0 {
             return;
         }
+        let loudest_so_far = self.taking_shape.iter().fold(0.0f32, |most, level| most.max(*level));
+        let boost = if loudest_so_far <= 1e-4 { 1.0 } else { (1.0 / loudest_so_far).clamp(1.0, MOST_WAVE_BOOST) };
         let began = from as f64 / self.rate();
         for (index, loudest) in self.taking_shape.iter().enumerate() {
             let at = self.x_of(((began + index as f64 * step) * self.rate()).max(0.0));
@@ -309,7 +311,7 @@ impl Timeline<'_> {
                 continue;
             }
             let wide = (next - at).max(1.0);
-            let tall = (loudest * reach).max(1.0);
+            let tall = (loudest * boost * reach).clamp(1.0, reach);
             overlay.fill_rectangle(Point::new(at.max(left), middle - tall), Size::new(wide, tall * 2.0), theme::alpha(p.text, 0.65));
         }
     }
@@ -855,7 +857,7 @@ impl Timeline<'_> {
         }
         let take = row as usize;
         let at = self.frames_at(p.x);
-        let found = track.clips.iter().rev().find(|clip| clip.takes.len() > take && at >= clip.start as f64 && at < clip.end() as f64);
+        let found = track.clips.iter().rev().find(|clip| clip.takes.len() > take && !clip.take_erased(take) && at >= clip.start as f64 && at < clip.end() as f64);
         Some(found.map_or(Hit::Lane, |clip| Hit::Take(clip, take)))
     }
 
@@ -984,7 +986,7 @@ impl Timeline<'_> {
             return Hit::Lane;
         }
         let at = self.frames_at(p.x);
-        let Some(clip) = track.clips.iter().rev().find(|c| at >= c.start as f64 && at < c.end() as f64) else {
+        let Some(clip) = track.clips.iter().rev().find(|c| !c.take_erased(c.take) && at >= c.start as f64 && at < c.end() as f64) else {
             return Hit::Lane;
         };
         let left = self.x_of(clip.start as f64);
@@ -1061,6 +1063,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                     Hit::Envelope(target, Some(which), ..) => Some(Message::DropPoint { target, which }),
                     Hit::Envelope(..) => None,
                     Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Edge(clip, _) => Some(Message::DeleteClip(clip.id)),
+                    Hit::Take(clip, take) => Some(Message::EraseTake { clip: clip.id, take }),
+                    Hit::TakeHeader(track, take) => Some(Message::TakeMenu { track: track.id, take, at: Point::new(bounds.x + p.x, bounds.y + p.y) }),
                     _ if self.meter_at(p).is_some() => self.meter_at(p).map(|track| Message::MeterMenu { track, at: Some(Point::new(bounds.x + p.x, bounds.y + p.y)) }),
                     _ => self.track_header_at(p).map(|track| Message::TrackMenu {
                         track: track.id,
@@ -1148,7 +1152,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id], take: None });
                         Some(Message::PaintMute { clip: clip.id, muted })
                     }
-                    (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) => {
+                    (Tool::Delete, Hit::Take(clip, take)) => {
+                        state.drag = Some(Drag::Paint { muted: None, touched: vec![clip.id], take: Some(take) });
+                        Some(Message::PaintEraseTake { clip: clip.id, take })
+                    }
+                    (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
                         state.drag = Some(Drag::Paint { muted: None, touched: Vec::new(), take: None });
                         Some(Message::PaintDelete(clip.id))
                     }
@@ -1406,6 +1414,16 @@ impl canvas::Program<Message> for Timeline<'_> {
                         *to = p;
                         (Captured, Some(Message::Refresh))
                     }
+                    Drag::Paint { muted: None, touched, take: Some(lane) } => {
+                        let Hit::Take(clip, take) = self.hit(p) else {
+                            return (Captured, None);
+                        };
+                        if take != *lane || touched.contains(&clip.id) {
+                            return (Captured, None);
+                        }
+                        touched.push(clip.id);
+                        (Captured, Some(Message::PaintEraseTake { clip: clip.id, take }))
+                    }
                     Drag::Paint { muted, touched, take: Some(lane) } => {
                         let Hit::Take(clip, take) = self.hit(p) else {
                             return (Captured, None);
@@ -1655,7 +1673,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                 if self.armed.contains(&track.id) && right > left && bottom > top {
                     let taken = Size::new(right - left, bottom - top);
                     overlay.fill_rectangle(Point::new(left, top), taken, theme::alpha(p.danger, 0.3));
-                    self.draw_taking_shape(&mut overlay, left, right, top, bottom, from);
+                    let row_bottom = (self.track_top(i) + self.clips_height(track)).min(bottom);
+                    self.draw_taking_shape(&mut overlay, left, right, top, row_bottom, from);
                 }
             }
         }
@@ -1844,7 +1863,7 @@ impl Timeline<'_> {
             let track_colour = if track.muted { p.text_faint } else { self.colour_of(i) };
             let clips_height = self.clips_height(track);
             let badges = self.take_badges(i);
-            for clip in &track.clips {
+            for clip in track.clips.iter().filter(|clip| !clip.take_erased(clip.take)) {
                 let colour = if clip.is_silent() { p.text_faint } else { track_colour };
                 self.draw_clip(frame, size, clip, top, clips_height, colour, &badges);
             }
@@ -2138,7 +2157,7 @@ impl Timeline<'_> {
             frame.fill_rectangle(Point::new(0.0, top + tall - 1.0), Size::new(size.width, 1.0), p.line);
             let box_top = top + TAKE_LANE_INSET;
             let box_height = tall - TAKE_LANE_INSET * 2.0;
-            for clip in track.clips.iter().filter(|clip| clip.takes.len() > take && !clip.is_notes()) {
+            for clip in track.clips.iter().filter(|clip| clip.takes.len() > take && !clip.is_notes() && !clip.take_erased(take)) {
                 let left = self.x_of(clip.start as f64) - self.lanes_left();
                 let right = self.x_of(clip.end() as f64) - self.lanes_left();
                 if right < 0.0 || left > size.width {
@@ -3296,7 +3315,7 @@ mod take_folders {
     }
 
     #[test]
-    fn the_eraser_on_a_take_lane_removes_that_piece_of_the_clip() {
+    fn the_eraser_on_a_take_lane_removes_that_take_from_that_piece_and_leaves_the_other_takes() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
         app.tool = Tool::Delete;
@@ -3306,7 +3325,64 @@ mod take_folders {
         let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
         let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
         let (_, erased) = canvas::Program::update(&timeline, &mut state, press, CANVAS, mouse::Cursor::Available(Point::new(CANVAS.x + LEFT + 50.0, CANVAS.y + y)));
-        assert!(matches!(erased, Some(crate::Message::PaintDelete(id)) if id == clip), "erasing on a take lane did nothing");
+        assert!(matches!(erased, Some(crate::Message::PaintEraseTake { clip: id, take: 2 }) if id == clip), "erasing on a take lane did not pick that lane");
+        let _ = app.update(erased.unwrap());
+        let found = app.project.clip(clip).expect("the whole piece was deleted");
+        assert!(found.take_erased(2), "take 3 was not erased");
+        assert!((0..found.takes.len()).filter(|take| *take != 2).all(|take| !found.take_erased(take)), "other takes were erased too");
+        let _ = app.update(crate::Message::Undo);
+        assert!(!app.project.clip(clip).unwrap().take_erased(2), "undo did not bring the take back");
+    }
+
+    #[test]
+    fn cutting_a_part_out_with_the_takes_open_leaves_the_other_takes_there() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        let clip = app.project.track(vox).unwrap().clips[0].clone();
+        let Some(Outcome::Clip(part)) = app.transact(None, |project| project.apply(Command::SplitClip { clip: clip.id, at: clip.start + clip.len / 2 })) else { panic!("the cut failed") };
+        let _ = app.update(crate::Message::DeleteClip(part));
+        let found = app.project.clip(part).expect("the cut part went from every take");
+        assert!(found.take_erased(found.take), "the playing take still has the part");
+        assert!(found.is_silent(), "the erased part still sounds");
+        assert_eq!((0..found.takes.len()).filter(|take| found.take_erased(*take)).count(), 1, "more than one take lost the part");
+        let left = app.project.clip(clip.id).unwrap();
+        assert!(!left.take_erased(left.take), "the part before the cut was erased too");
+    }
+
+    #[test]
+    fn with_the_takes_folded_the_cut_part_goes_whole() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let clip = app.project.track(vox).unwrap().clips[0].clone();
+        let Some(Outcome::Clip(part)) = app.transact(None, |project| project.apply(Command::SplitClip { clip: clip.id, at: clip.start + clip.len / 2 })) else { panic!("the cut failed") };
+        let _ = app.update(crate::Message::DeleteClip(part));
+        assert!(app.project.clip(part).is_none(), "a folded stack kept the deleted part");
+    }
+
+
+    #[test]
+    fn an_erased_part_is_a_gap_nothing_can_land_on_and_it_stops_being_selected() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        let clip = app.project.track(vox).unwrap().clips[0].clone();
+        app.choose([clip.id]);
+        let _ = app.update(crate::Message::Delete);
+        assert!(app.selection.is_empty(), "the erased part stayed selected");
+        let lane = TOP + TALL + clip.take as f32 * TALL + TALL / 2.0;
+        let comp_row = TOP + TALL / 2.0 + 8.0;
+        let other = TOP + TALL + ((clip.take + 1) % clip.takes.len()) as f32 * TALL + TALL / 2.0;
+        let timeline = timeline_of(&app);
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, lane)), Hit::Lane), "the erased lane still answers as a take");
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, comp_row)), Hit::Lane), "the comp row still answers as a clip");
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, other)), Hit::Take(..)), "the other take went too");
+    }
+    #[test]
+    fn erasing_every_take_of_a_part_removes_the_part() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let clip = app.project.track(vox).unwrap().clips[0].clone();
+        for take in 0..clip.takes.len() {
+            app.erase_take(clip.id, take, None);
+        }
+        assert!(app.project.clip(clip.id).is_none());
     }
 }
 

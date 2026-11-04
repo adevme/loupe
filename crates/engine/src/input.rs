@@ -316,7 +316,10 @@ fn drain(
         for file in files.iter_mut() {
             file.keep(frame).map_err(|why| named(&file.path, why))?;
         }
-        let loudest = frame.iter().fold(0.0f32, |most, sample| most.max(sample.abs()));
+        let loudest = files.first().map_or(0.0, |file| {
+            let [left, right] = file.channels.heard(frame);
+            ((left + right) * 0.5).abs()
+        });
         shaping.loudest = shaping.loudest.max(loudest);
         shaping.counted += 1;
         if shaping.counted >= per_step {
@@ -789,6 +792,21 @@ mod tests {
         assert!(near(tone_of(&read.frames, 0), practice_tone(0)), "input 1 is recorded");
         assert!(input.finish_takes().is_err(), "there is no take left to finish");
         fs::remove_dir_all(file.parent().unwrap().parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_shape_of_a_take_shows_only_the_input_being_recorded() {
+        let (mut producer, mut queue) = RingBuffer::new(64);
+        for _ in 0..4 {
+            producer.push(0.25).unwrap();
+            producer.push(0.9).unwrap();
+        }
+        let file = scratch("one-input");
+        let mut files = vec![TakeFile::create(&file, InputChannels::Mono(0), 1_000).unwrap()];
+        let shape = Arc::new(Mutex::new(Vec::new()));
+        drain(&mut files, &mut queue, 2, &mut Vec::new(), &shape, &mut Shaping::default(), 4).unwrap();
+        assert_eq!(*shape.lock().unwrap(), vec![0.25], "the other input drew on the take");
+        fs::remove_dir_all(file.parent().unwrap().parent().unwrap()).ok();
     }
 
     #[test]

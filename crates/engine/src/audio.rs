@@ -1026,10 +1026,21 @@ impl Rt {
     }
 }
 
+fn with_tracks_quiet(project: &Project, quiet: &[TrackId]) -> Project {
+    let mut heard = project.clone();
+    for track in heard.tracks.iter_mut().filter(|track| quiet.contains(&track.id)) {
+        for clip in &mut track.clips {
+            clip.muted = true;
+        }
+    }
+    heard
+}
+
 pub struct Engine {
     remote: Remote,
     rate: u32,
     heard_tracks: bool,
+    quiet_tracks: Vec<TrackId>,
     fed: bool,
     running: Option<Running>,
     output_error: Option<String>,
@@ -1066,6 +1077,7 @@ impl Engine {
             remote: ready.remote,
             rate: ready.rate,
             heard_tracks: false,
+            quiet_tracks: Vec::new(),
             fed: false,
             running: ready.running,
             output_error: ready.error,
@@ -1091,8 +1103,26 @@ impl Engine {
         self.output_failure.as_ref()
     }
 
+    pub fn close_output(&mut self) {
+        self.quit.store(true, Ordering::Relaxed);
+        if let Some(host) = self.host.take() {
+            host.thread().unpark();
+            let _ = host.join();
+        }
+    }
+
     pub fn set_project(&mut self, project: &Project) {
-        self.send(Msg::Project(Arc::new(project.clone())));
+        let heard = with_tracks_quiet(project, &self.quiet_tracks);
+        self.send(Msg::Project(Arc::new(heard)));
+    }
+
+    pub fn keep_quiet_while_recording(&mut self, tracks: &[TrackId], project: &Project) {
+        self.quiet_tracks = tracks.to_vec();
+        self.set_project(project);
+    }
+
+    pub fn is_kept_quiet(&self, track: TrackId) -> bool {
+        self.quiet_tracks.contains(&track)
     }
 
     pub fn play(&mut self) {
@@ -1270,11 +1300,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.quit.store(true, Ordering::Relaxed);
-        if let Some(host) = self.host.take() {
-            host.thread().unpark();
-            let _ = host.join();
-        }
+        self.close_output();
     }
 }
 
@@ -1549,6 +1575,28 @@ mod tests {
         let source = Arc::new(Source::from_frames("one", vec![[1.0, 1.0]; len]));
         p.apply(Command::AddClip { track, source, start: 0 }).unwrap();
         p
+    }
+
+    #[test]
+    fn a_track_kept_quiet_plays_nothing_and_the_other_tracks_and_the_song_stay_as_they_were() {
+        let mut song = steady(64);
+        let beat = song.tracks[0].id;
+        let Ok(Outcome::Track(vocal)) = song.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[1.0, 1.0]; 64]));
+        song.apply(Command::AddClip { track: vocal, source, start: 0 }).unwrap();
+        let heard = with_tracks_quiet(&song, &[vocal]);
+        assert!(heard.track(vocal).unwrap().clips.iter().all(|clip| clip.is_silent()), "the old take still plays");
+        assert!(heard.track(beat).unwrap().clips.iter().all(|clip| !clip.is_silent()), "the beat went quiet too");
+        assert!(song.track(vocal).unwrap().clips.iter().all(|clip| !clip.is_silent()), "the song itself was muted");
+    }
+
+    #[test]
+    fn the_output_closes_before_the_engine_goes_and_the_engine_still_takes_orders() {
+        let mut engine = Engine::start(Output::Silent);
+        engine.close_output();
+        assert!(engine.host.is_none(), "the sound thread is still running");
+        engine.stop();
+        engine.close_output();
     }
 
     #[test]

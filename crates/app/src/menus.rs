@@ -43,6 +43,7 @@ impl App {
             Overlay::ScriptsMenu => self.floating(self.under_the_bar(SCRIPTS_MENU_LEFT), self.scripts_menu()),
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
+            Overlay::TakeMenu { track, take, at } => self.floating(*at, self.take_menu(*track, *take)),
             Overlay::MixerMenu { at } => self.floating(*at, self.mixer_menu()),
             Overlay::MeterMenu { track, at } => self.floating(*at, self.meter_menu(*track)),
             Overlay::Exported(folder, note) => self.centred(self.exported_sheet(folder, note.as_deref())),
@@ -214,6 +215,10 @@ impl App {
         self.menu(items)
     }
 
+
+    fn take_menu(&self, track: TrackId, take: usize) -> Element<'_, Message> {
+        self.menu(vec![self.item("Pull out to its own track", "", Some(Message::PullOutTake(track, take)))])
+    }
 
     fn track_menu(&self, track: TrackId) -> Element<'_, Message> {
         let inside = self.project.tracks.iter().find(|t| t.id == track).and_then(|t| t.parent).is_some();

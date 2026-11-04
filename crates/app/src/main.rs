@@ -76,6 +76,7 @@ use timeline::{LoopRange, Timeline, Tool, View};
 
 const AUDIO_TYPES: [&str; 8] = ["wav", "mp3", "flac", "m4a", "aac", "ogg", "aif", "aiff"];
 const UNDO_STEPS: usize = 200;
+const FADE_BEFORE_CLOSING_THE_OUTPUT: std::time::Duration = std::time::Duration::from_millis(40);
 const SETTLE_TICKS: u8 = 6;
 const SCRIPT_CHECK_MS: u64 = 100;
 const STATUS_HEIGHT: f32 = 30.0;
@@ -145,7 +146,7 @@ pub enum Message {
     TogglePlay,
     Pause,
     ToggleRecord,
-    TakeReady { start: i64, keep_from: i64, passes: Option<recording::Passes>, punch: Option<(Frames, Frames)>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
+    TakeReady { start: i64, keep_from: i64, retake: bool, passes: Option<recording::Passes>, punch: Option<(Frames, Frames)>, warning: Option<String>, result: Result<(Vec<(TrackId, Arc<Source>)>, Option<String>), String> },
     ToStart,
     Seek(Frames),
     Tick,
@@ -195,6 +196,7 @@ pub enum Message {
     CloseOverlay,
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
+    TakeMenu { track: TrackId, take: usize, at: Point },
     MixerMenu { at: Point },
     StopExport,
     MeterMenu { track: TrackId, at: Option<Point> },
@@ -229,6 +231,7 @@ pub enum Message {
     EntryEntered,
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
+    PullOutTake(TrackId, usize),
     ToggleMixer,
     MixerToItsOwnWindow,
     MixerBackUnderTheSong,
@@ -373,6 +376,8 @@ pub enum Message {
     PaintMuteTake { clip: ClipId, take: usize, muted: bool },
     SlideTake { clip: ClipId, take: usize, offset: i64 },
     PaintDelete(ClipId),
+    PaintEraseTake { clip: ClipId, take: usize },
+    EraseTake { clip: ClipId, take: usize },
     TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
     StretchClip { clip: ClipId, start: Frames, len: Frames },
     Stretched { source: Arc<Source>, stretch: f64, made: Option<Arc<Source>> },
@@ -496,6 +501,7 @@ pub enum Overlay {
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
+    TakeMenu { track: TrackId, take: usize, at: Point },
     Exported(PathBuf, Option<String>),
     MixerMenu { at: Point },
     MeterMenu { track: TrackId, at: Point },
@@ -544,6 +550,7 @@ impl Overlay {
                 | Overlay::ViewMenu
                 | Overlay::ScriptsMenu
                 | Overlay::TrackMenu { .. }
+                | Overlay::TakeMenu { .. }
                 | Overlay::MixerMenu { .. }
                 | Overlay::MeterMenu { .. }
         )
@@ -1243,9 +1250,9 @@ impl App {
         }
         match message {
             Message::ToggleRecord => return self.toggle_recording(),
-            Message::TakeReady { start, keep_from, passes, punch, warning, result } => {
+            Message::TakeReady { start, keep_from, retake, passes, punch, warning, result } => {
                 let printing = result.as_ref().ok().and_then(|(_, trouble)| trouble.clone());
-                self.place_take(start, keep_from, passes, punch, result.map(|(sources, _)| sources));
+                self.place_take(start, keep_from, retake, passes, punch, result.map(|(sources, _)| sources));
                 if let Some(why) = printing {
                     self.problem = Some(format!("The take is kept dry, the Rec plugins could not be printed: {why}"));
                 }
@@ -1436,7 +1443,7 @@ impl App {
             Message::Delete => {
                 let chosen: Vec<ClipId> = self.selection.iter().copied().collect();
                 if !chosen.is_empty() {
-                    self.delete_clips(chosen, None);
+                    self.delete_parts(chosen, None);
                 }
             }
             Message::Undo => {
@@ -1754,8 +1761,10 @@ impl App {
                     self.problem = Some(format!("Could not open the folder: {why}"));
                 }
             }
-            Message::DeleteClip(clip) => self.delete_clips(self.affected_by(clip), None),
+            Message::DeleteClip(clip) => self.delete_parts(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
+            Message::TakeMenu { track, take, at } => self.overlay = Overlay::TakeMenu { track, take, at },
+            Message::PullOutTake(track, take) => self.pull_out_take(track, take),
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
             Message::MeterMenu { track, at } => {
                 let at = at.unwrap_or(if self.mixer_window.is_some() { self.mixer_pointer } else { self.pointer });
@@ -2084,7 +2093,9 @@ impl App {
             Message::PaintMuteTake { clip, take, muted } => {
                 self.edit(Some(Run::Paint), Command::SetTakeMuted { clip, take, muted });
             }
-            Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
+            Message::PaintDelete(clip) => self.delete_parts(self.affected_by(clip), Some(Run::Paint)),
+            Message::PaintEraseTake { clip, take } => self.erase_take(clip, take, Some(Run::Paint)),
+            Message::EraseTake { clip, take } => self.erase_take(clip, take, None),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
             Message::ChainName(spot, typed) => {
@@ -3595,7 +3606,16 @@ impl App {
         }
     }
 
+    fn silence_the_interface(&mut self) {
+        self.engine.stop();
+        std::thread::sleep(FADE_BEFORE_CLOSING_THE_OUTPUT);
+        self.engine.stop_hearing();
+        self.input = None;
+        self.engine.close_output();
+    }
+
     fn shut_down(&mut self) -> Task<Message> {
+        self.silence_the_interface();
         self.going = true;
         self.overlay = Overlay::None;
         let mixer = self.mixer_window.take();
