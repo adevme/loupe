@@ -38,6 +38,26 @@ impl App {
         let takes = if removed == 1 { "take" } else { "takes" };
         self.notice = Some(format!("Deleted {removed} unused {takes}. The recordings stay in the Audio folder."));
     }
+
+    pub(crate) fn pull_out_take(&mut self, track: TrackId, take: usize) {
+        self.overlay = crate::Overlay::None;
+        self.gather_fx_state();
+        let height = self.heights.get(&track).copied();
+        let mut made = None;
+        self.transact(None, |project| {
+            made = Some(pull_out_take(project, track, take)?);
+            Ok(Outcome::Done)
+        });
+        match made {
+            Some(copy) => {
+                if let Some(height) = height {
+                    self.heights.insert(copy, height);
+                }
+                self.notice = Some(format!("Take {} is on its own track. The song sounds the same, and Ctrl+Z puts it back.", take + 1));
+            }
+            None => self.notice = Some("That take could not be pulled out.".into()),
+        }
+    }
 }
 
 struct TakeFolder {
@@ -68,6 +88,48 @@ fn take_folders(track: &Track) -> Vec<TakeFolder> {
             folder
         })
         .collect()
+}
+
+pub fn pull_out_take(project: &mut Project, track: TrackId, take: usize) -> Result<TrackId, CommandError> {
+    let found = project.track(track).ok_or(CommandError::InvalidValue)?;
+    let name = format!("{} take {}", found.name, take + 1);
+    let pieces: Vec<ClipId> = found.clips.iter().map(|clip| clip.id).collect();
+    if !found.clips.iter().any(|clip| clip.takes.len() > take && !clip.take_erased(take)) {
+        return Err(CommandError::InvalidValue);
+    }
+    let Outcome::Track(copy) = project.apply(Command::DuplicateTrack(track))? else {
+        return Err(CommandError::InvalidValue);
+    };
+    project.apply(Command::RenameTrack { track: copy, name })?;
+    project.apply(Command::SetTakesOpen { track: copy, open: false })?;
+    let copies: Vec<ClipId> = project.track(copy).map(|made| made.clips.iter().map(|clip| clip.id).collect()).unwrap_or_default();
+    for (piece, pulled) in pieces.into_iter().zip(copies) {
+        let Some(clip) = project.clip(piece).cloned() else { continue };
+        let was_playing = clip.take == take;
+        match clip.take_offset(take).filter(|_| clip.takes.len() > take && !clip.take_erased(take)) {
+            Some(offset) => {
+                project.apply(Command::SetTakes { clip: pulled, offsets: vec![offset as i64], active: 0 })?;
+                project.apply(Command::SetClipMuted { clip: pulled, muted: clip.muted || !was_playing })?;
+            }
+            None => {
+                project.apply(Command::DeleteClip(pulled))?;
+            }
+        }
+        if clip.takes.len() > take {
+            let mut offsets: Vec<i64> = clip.takes.iter().map(|shift| clip.offset as i64 + shift).collect();
+            offsets.remove(take);
+            let active = match clip.take {
+                playing if playing == take => take.saturating_sub(1).min(offsets.len().saturating_sub(1)),
+                playing if playing > take => playing - 1,
+                playing => playing,
+            };
+            project.apply(Command::SetTakes { clip: piece, offsets, active })?;
+            if was_playing {
+                project.apply(Command::SetClipMuted { clip: piece, muted: true })?;
+            }
+        }
+    }
+    Ok(copy)
 }
 
 pub fn unused_takes(track: &Track) -> usize {
@@ -185,6 +247,42 @@ mod tests {
         assert!(project.track(track).unwrap().clips.is_empty(), "a range over everything clears everything");
     }
 
+
+    #[test]
+    fn pulling_out_a_take_gives_it_its_own_track_and_leaves_the_set_and_the_sound_alone() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let passes: Vec<[f32; 2]> = (0..3_000).map(|at| [(at / 1_000) as f32 / 4.0 + 0.25, 0.0]).collect();
+        let source = Arc::new(Source::from_frames("Vox (take 1)", passes));
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 500 }) else { panic!() };
+        project.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
+        project.apply(Command::SetTakes { clip, offsets: vec![0, 1_000, 2_000], active: 2 }).unwrap();
+        let copy = pull_out_take(&mut project, track, 1).unwrap();
+        let set = &project.track(track).unwrap().clips[0];
+        assert_eq!(set.takes.len(), 2, "the other takes left the set");
+        assert_eq!(set.audio()[set.offset as usize][0], 0.75, "the set stopped playing the same take");
+        assert!(!set.is_silent(), "the set went quiet");
+        let made = project.track(copy).unwrap();
+        assert_eq!(made.name, "Vox take 2");
+        let pulled = &made.clips[0];
+        assert!(pulled.takes.is_empty(), "the pulled take is still a stack");
+        assert_eq!((pulled.start, pulled.len), (500, 1_000), "the take moved in the song");
+        assert_eq!(pulled.audio()[pulled.offset as usize][0], 0.5, "the wrong take came out");
+        assert!(pulled.is_silent(), "a take that was not playing would double the vocal");
+    }
+
+    #[test]
+    fn pulling_out_the_playing_take_moves_the_sound_with_it_and_does_not_double_it() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("Vox (take 1)", vec![[0.5, 0.5]; 2_000]));
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
+        project.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
+        project.apply(Command::SetTakes { clip, offsets: vec![0, 1_000], active: 1 }).unwrap();
+        let copy = pull_out_take(&mut project, track, 1).unwrap();
+        assert!(!project.track(copy).unwrap().clips[0].is_silent(), "the pulled take stopped sounding");
+        assert!(project.track(track).unwrap().clips[0].is_silent(), "the set doubles the pulled take");
+    }
     #[test]
     fn a_swipe_cuts_the_clip_and_plays_that_take_between_the_cuts() {
         let mut project = Project::new(48_000);

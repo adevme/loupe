@@ -196,6 +196,7 @@ pub enum Message {
     CloseOverlay,
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
+    TakeMenu { track: TrackId, take: usize, at: Point },
     MixerMenu { at: Point },
     StopExport,
     MeterMenu { track: TrackId, at: Option<Point> },
@@ -230,6 +231,7 @@ pub enum Message {
     EntryEntered,
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
+    PullOutTake(TrackId, usize),
     ToggleMixer,
     MixerToItsOwnWindow,
     MixerBackUnderTheSong,
@@ -499,6 +501,7 @@ pub enum Overlay {
     ScriptsMenu,
     About,
     TrackMenu { track: TrackId, at: Point },
+    TakeMenu { track: TrackId, take: usize, at: Point },
     Exported(PathBuf, Option<String>),
     MixerMenu { at: Point },
     MeterMenu { track: TrackId, at: Point },
@@ -547,6 +550,7 @@ impl Overlay {
                 | Overlay::ViewMenu
                 | Overlay::ScriptsMenu
                 | Overlay::TrackMenu { .. }
+                | Overlay::TakeMenu { .. }
                 | Overlay::MixerMenu { .. }
                 | Overlay::MeterMenu { .. }
         )
@@ -1759,6 +1763,8 @@ impl App {
             }
             Message::DeleteClip(clip) => self.delete_parts(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
+            Message::TakeMenu { track, take, at } => self.overlay = Overlay::TakeMenu { track, take, at },
+            Message::PullOutTake(track, take) => self.pull_out_take(track, take),
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
             Message::MeterMenu { track, at } => {
                 let at = at.unwrap_or(if self.mixer_window.is_some() { self.mixer_pointer } else { self.pointer });

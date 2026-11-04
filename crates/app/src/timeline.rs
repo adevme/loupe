@@ -1064,6 +1064,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                     Hit::Envelope(..) => None,
                     Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Edge(clip, _) => Some(Message::DeleteClip(clip.id)),
                     Hit::Take(clip, take) => Some(Message::EraseTake { clip: clip.id, take }),
+                    Hit::TakeHeader(track, take) => Some(Message::TakeMenu { track: track.id, take, at: Point::new(bounds.x + p.x, bounds.y + p.y) }),
                     _ if self.meter_at(p).is_some() => self.meter_at(p).map(|track| Message::MeterMenu { track, at: Some(Point::new(bounds.x + p.x, bounds.y + p.y)) }),
                     _ => self.track_header_at(p).map(|track| Message::TrackMenu {
                         track: track.id,
