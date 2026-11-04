@@ -855,7 +855,7 @@ impl Timeline<'_> {
         }
         let take = row as usize;
         let at = self.frames_at(p.x);
-        let found = track.clips.iter().rev().find(|clip| clip.takes.len() > take && at >= clip.start as f64 && at < clip.end() as f64);
+        let found = track.clips.iter().rev().find(|clip| clip.takes.len() > take && !clip.take_erased(take) && at >= clip.start as f64 && at < clip.end() as f64);
         Some(found.map_or(Hit::Lane, |clip| Hit::Take(clip, take)))
     }
 
@@ -984,7 +984,7 @@ impl Timeline<'_> {
             return Hit::Lane;
         }
         let at = self.frames_at(p.x);
-        let Some(clip) = track.clips.iter().rev().find(|c| at >= c.start as f64 && at < c.end() as f64) else {
+        let Some(clip) = track.clips.iter().rev().find(|c| !c.take_erased(c.take) && at >= c.start as f64 && at < c.end() as f64) else {
             return Hit::Lane;
         };
         let left = self.x_of(clip.start as f64);
@@ -1859,7 +1859,7 @@ impl Timeline<'_> {
             let track_colour = if track.muted { p.text_faint } else { self.colour_of(i) };
             let clips_height = self.clips_height(track);
             let badges = self.take_badges(i);
-            for clip in &track.clips {
+            for clip in track.clips.iter().filter(|clip| !clip.take_erased(clip.take)) {
                 let colour = if clip.is_silent() { p.text_faint } else { track_colour };
                 self.draw_clip(frame, size, clip, top, clips_height, colour, &badges);
             }
@@ -2153,7 +2153,7 @@ impl Timeline<'_> {
             frame.fill_rectangle(Point::new(0.0, top + tall - 1.0), Size::new(size.width, 1.0), p.line);
             let box_top = top + TAKE_LANE_INSET;
             let box_height = tall - TAKE_LANE_INSET * 2.0;
-            for clip in track.clips.iter().filter(|clip| clip.takes.len() > take && !clip.is_notes()) {
+            for clip in track.clips.iter().filter(|clip| clip.takes.len() > take && !clip.is_notes() && !clip.take_erased(take)) {
                 let left = self.x_of(clip.start as f64) - self.lanes_left();
                 let right = self.x_of(clip.end() as f64) - self.lanes_left();
                 if right < 0.0 || left > size.width {
@@ -2167,7 +2167,7 @@ impl Timeline<'_> {
                 if chosen {
                     frame.stroke(&Path::rectangle(Point::new(from_x, box_top), span), Stroke::default().with_color(colour).with_width(1.0));
                 }
-                if let Some(offset) = clip.take_offset(take).filter(|_| !clip.take_erased(take)) {
+                if let Some(offset) = clip.take_offset(take) {
                     let tone = if chosen { colour } else { theme::mix(p.background, colour, 0.45) };
                     self.draw_waveform(frame, clip, offset, left, from_x, to_x, box_top + 1.0, box_height - 2.0, tone);
                 }
@@ -3354,6 +3354,23 @@ mod take_folders {
         assert!(app.project.clip(part).is_none(), "a folded stack kept the deleted part");
     }
 
+
+    #[test]
+    fn an_erased_part_is_a_gap_nothing_can_land_on_and_it_stops_being_selected() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        let clip = app.project.track(vox).unwrap().clips[0].clone();
+        app.choose([clip.id]);
+        let _ = app.update(crate::Message::Delete);
+        assert!(app.selection.is_empty(), "the erased part stayed selected");
+        let lane = TOP + TALL + clip.take as f32 * TALL + TALL / 2.0;
+        let comp_row = TOP + TALL / 2.0 + 8.0;
+        let other = TOP + TALL + ((clip.take + 1) % clip.takes.len()) as f32 * TALL + TALL / 2.0;
+        let timeline = timeline_of(&app);
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, lane)), Hit::Lane), "the erased lane still answers as a take");
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, comp_row)), Hit::Lane), "the comp row still answers as a clip");
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, other)), Hit::Take(..)), "the other take went too");
+    }
     #[test]
     fn erasing_every_take_of_a_part_removes_the_part() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();

@@ -17,7 +17,7 @@ impl App {
 
     pub(crate) fn forget_gone_clips(&mut self) {
         let still_here: Vec<ClipId> =
-            self.selection.iter().copied().filter(|clip| self.project.clip(*clip).is_some()).collect();
+            self.selection.iter().copied().filter(|clip| self.project.clip(*clip).is_some_and(|found| !found.take_erased(found.take))).collect();
         if still_here.len() != self.selection.len() {
             self.choose(still_here);
         }
