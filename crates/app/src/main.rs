@@ -197,6 +197,7 @@ pub enum Message {
     DeleteClip(ClipId),
     TrackMenu { track: TrackId, at: Point },
     TakeMenu { track: TrackId, take: usize, at: Point },
+    TakesMenu { track: TrackId, at: Point },
     MixerMenu { at: Point },
     StopExport,
     MeterMenu { track: TrackId, at: Option<Point> },
@@ -232,6 +233,7 @@ pub enum Message {
     ColourPicked(TrackId, Option<[u8; 3]>),
     DuplicateTrack(TrackId),
     PullOutTake(TrackId, usize),
+    MoveAllTakes(TrackId),
     ToggleMixer,
     MixerToItsOwnWindow,
     MixerBackUnderTheSong,
@@ -321,7 +323,7 @@ pub enum Message {
     TogglePrintTakes(TrackId),
     StartInputs(TrackId),
     UseInput(TrackId, InputChannels),
-    UseTake(ClipId, usize),
+    UseTake(ClipId),
     UseTakeOnTrack(TrackId, usize),
     DeleteTake(TrackId, usize),
     Comp { track: TrackId, take: usize, from: Frames, to: Frames },
@@ -373,11 +375,9 @@ pub enum Message {
     SetTool(Tool),
     Refresh,
     PaintMute { clip: ClipId, muted: bool },
-    PaintMuteTake { clip: ClipId, take: usize, muted: bool },
-    SlideTake { clip: ClipId, take: usize, offset: i64 },
+    SlideTake { clip: ClipId, offset: i64 },
     PaintDelete(ClipId),
-    PaintEraseTake { clip: ClipId, take: usize },
-    EraseTake { clip: ClipId, take: usize },
+    EraseTake(ClipId),
     TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
     StretchClip { clip: ClipId, start: Frames, len: Frames },
     Stretched { source: Arc<Source>, stretch: f64, made: Option<Arc<Source>> },
@@ -401,7 +401,7 @@ pub enum Message {
     AudioRateChosen(audio_settings::Rate),
     AudioBufferChosen(audio_settings::Buffer),
     Reopened(Result<files::Opened, String>),
-    Slice { cuts: Vec<(TrackId, Frames)> },
+    Slice { cuts: Vec<(TrackId, Frames)>, lane: Option<usize> },
     TrackGain(TrackId, f32),
     TogglePool,
     PlaceSource(usize),
@@ -502,6 +502,7 @@ pub enum Overlay {
     About,
     TrackMenu { track: TrackId, at: Point },
     TakeMenu { track: TrackId, take: usize, at: Point },
+    TakesMenu { track: TrackId, at: Point },
     Exported(PathBuf, Option<String>),
     MixerMenu { at: Point },
     MeterMenu { track: TrackId, at: Point },
@@ -551,6 +552,7 @@ impl Overlay {
                 | Overlay::ScriptsMenu
                 | Overlay::TrackMenu { .. }
                 | Overlay::TakeMenu { .. }
+                | Overlay::TakesMenu { .. }
                 | Overlay::MixerMenu { .. }
                 | Overlay::MeterMenu { .. }
         )
@@ -1585,58 +1587,9 @@ impl App {
             Message::PickSample(track) => return self.pick_sample(track),
             Message::SampleFile(track, path) => return self.load_sample(track, path),
             Message::SampleLoaded(track, result) => self.sample_loaded(track, result),
-            Message::UseTake(clip, take) => {
-                if self.project.clip(clip).is_some_and(|found| found.take != take) {
-                    self.edit(None, Command::UseTake { clip, take });
-                }
-            }
-            Message::DeleteTake(track, take) => {
-                let changes: Vec<(ClipId, Vec<i64>, usize)> = self
-                    .project
-                    .track(track)
-                    .map(|found| {
-                        found
-                            .clips
-                            .iter()
-                            .filter(|clip| clip.takes.len() > take)
-                            .map(|clip| {
-                                let mut offsets: Vec<i64> = clip.takes.iter().map(|shift| clip.offset as i64 + shift).collect();
-                                offsets.remove(take);
-                                let active = match clip.take {
-                                    t if t == take => take.saturating_sub(1).min(offsets.len().saturating_sub(1)),
-                                    t if t > take => t - 1,
-                                    t => t,
-                                };
-                                (clip.id, offsets, active)
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !changes.is_empty() {
-                    self.transact(None, |project| {
-                        for (clip, offsets, active) in changes {
-                            project.apply(Command::SetTakes { clip, offsets, active })?;
-                        }
-                        Ok(Outcome::Done)
-                    });
-                    self.notice = Some(format!("Deleted take {}. Ctrl+Z brings it back.", take + 1));
-                }
-            }
-            Message::UseTakeOnTrack(track, take) => {
-                let clips: Vec<ClipId> = self
-                    .project
-                    .track(track)
-                    .map(|found| found.clips.iter().filter(|clip| clip.takes.len() > take && clip.take != take).map(|clip| clip.id).collect())
-                    .unwrap_or_default();
-                if !clips.is_empty() {
-                    self.transact(None, |project| {
-                        for clip in clips {
-                            project.apply(Command::UseTake { clip, take })?;
-                        }
-                        Ok(Outcome::Done)
-                    });
-                }
-            }
+            Message::UseTake(clip) => self.use_clip_take(clip),
+            Message::DeleteTake(track, take) => self.delete_take(track, take),
+            Message::UseTakeOnTrack(track, take) => self.use_take_on_track(track, take),
             Message::Comp { track, take, from, to } => self.comp(track, take, from, to),
             Message::ToggleTakes(track) => {
                 self.overlay = Overlay::None;
@@ -1763,6 +1716,8 @@ impl App {
             }
             Message::DeleteClip(clip) => self.delete_parts(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
+            Message::TakesMenu { track, at } => self.overlay = Overlay::TakesMenu { track, at },
+            Message::MoveAllTakes(track) => self.move_all_takes(track),
             Message::TakeMenu { track, take, at } => self.overlay = Overlay::TakeMenu { track, take, at },
             Message::PullOutTake(track, take) => self.pull_out_take(track, take),
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
@@ -2071,31 +2026,15 @@ impl App {
             }
             Message::Refresh => {}
             Message::PaintMute { clip, muted } => self.mute_clips(self.affected_by(clip), muted),
-            Message::SlideTake { clip, take, offset } => {
+            Message::SlideTake { clip, offset } => {
                 let Some(found) = self.project.clip(clip) else { return Task::none() };
-                let mut offsets: Vec<i64> = match found.takes.len() > 1 {
-                    true => found.takes.iter().map(|shift| found.offset as i64 + shift).collect(),
-                    false => vec![found.offset as i64],
-                };
-                let active = found.take;
-                let muted = found.take_muted(take);
-                if offsets.get(take).is_some_and(|was| *was != offset) {
-                    offsets[take] = offset;
-                    self.transact(Some(Run::Slide(clip)), |project| {
-                        project.apply(Command::SetTakes { clip, offsets, active })?;
-                        if muted {
-                            project.apply(Command::SetTakeMuted { clip, take, muted: true })?;
-                        }
-                        Ok(Outcome::Done)
-                    });
+                let len = found.len;
+                if found.offset as i64 != offset && offset >= 0 {
+                    self.edit(Some(Run::Slide(clip)), Command::TrimClip { clip, offset: offset as Frames, len });
                 }
             }
-            Message::PaintMuteTake { clip, take, muted } => {
-                self.edit(Some(Run::Paint), Command::SetTakeMuted { clip, take, muted });
-            }
             Message::PaintDelete(clip) => self.delete_parts(self.affected_by(clip), Some(Run::Paint)),
-            Message::PaintEraseTake { clip, take } => self.erase_take(clip, take, Some(Run::Paint)),
-            Message::EraseTake { clip, take } => self.erase_take(clip, take, None),
+            Message::EraseTake(clip) => self.delete_parts(vec![clip], None),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
             Message::ChainName(spot, typed) => {
@@ -2182,12 +2121,12 @@ impl App {
                     });
                 }
             }
-            Message::Slice { cuts } => {
+            Message::Slice { cuts, lane } => {
                 let splits: Vec<(ClipId, Frames)> = cuts
                     .iter()
                     .filter_map(|(track, at)| self.project.track(*track).map(|track| (track, *at)))
                     .flat_map(|(track, at)| track.clips.iter().map(move |clip| (clip, at)))
-                    .filter(|(clip, at)| *at > clip.start && *at < clip.end())
+                    .filter(|(clip, at)| *at > clip.start && *at < clip.end() && (lane.is_none() || clip.lane == lane))
                     .map(|(clip, at)| (clip.id, at))
                     .collect();
                 if !splits.is_empty() {

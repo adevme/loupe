@@ -1,6 +1,5 @@
+use loupe_engine::{Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Outcome, Project, Source, Track, TrackId};
 use std::sync::Arc;
-
-use loupe_engine::{ClipId, Command, CommandError, Edge, Fade, Frames, Outcome, Project, Track, TrackId};
 
 use crate::App;
 
@@ -8,7 +7,7 @@ const COMP_FADE_SECONDS: f64 = 0.004;
 
 impl App {
     pub(crate) fn comp(&mut self, track: TrackId, take: usize, from: Frames, to: Frames) {
-        let fade = Fade { len: (COMP_FADE_SECONDS * self.project.rate as f64) as Frames, curve: 0.0 };
+        let fade = short_fade(self.project.rate);
         let mut chosen = Vec::new();
         self.transact(None, |project| {
             chosen = comp(project, track, take, from, to, fade)?;
@@ -16,6 +15,40 @@ impl App {
         });
         if chosen.is_empty() {
             self.notice = Some("Nothing to comp there.".into());
+        }
+    }
+
+    pub(crate) fn use_clip_take(&mut self, clip: ClipId) {
+        let fade = short_fade(self.project.rate);
+        if self.project.clip(clip).is_some_and(|found| found.lane.is_some() && !found.lane_on) {
+            self.transact(None, |project| {
+                sound_only(project, clip, fade)?;
+                Ok(Outcome::Done)
+            });
+        }
+    }
+
+    pub(crate) fn use_take_on_track(&mut self, track: TrackId, take: usize) {
+        let fade = short_fade(self.project.rate);
+        let waiting = self.project.track(track).is_some_and(|found| found.clips.iter().any(|clip| clip.lane == Some(take) && !clip.lane_on));
+        if waiting {
+            self.transact(None, |project| {
+                use_take_on_track(project, track, take, fade)?;
+                Ok(Outcome::Done)
+            });
+        }
+    }
+
+    pub(crate) fn delete_take(&mut self, track: TrackId, take: usize) {
+        let fade = short_fade(self.project.rate);
+        let there = self.project.track(track).is_some_and(|found| found.clips.iter().any(|clip| clip.lane == Some(take)));
+        if there {
+            self.transact(None, |project| {
+                delete_take(project, track, take, fade)?;
+                Ok(Outcome::Done)
+            });
+            self.forget_gone_clips();
+            self.notice = Some(format!("Deleted take {}. Ctrl+Z brings it back.", take + 1));
         }
     }
 
@@ -35,6 +68,7 @@ impl App {
             removed = delete_unused_takes(project, track)?;
             Ok(Outcome::Done)
         });
+        self.forget_gone_clips();
         let takes = if removed == 1 { "take" } else { "takes" };
         self.notice = Some(format!("Deleted {removed} unused {takes}. The recordings stay in the Audio folder."));
     }
@@ -53,48 +87,101 @@ impl App {
                 if let Some(height) = height {
                     self.heights.insert(copy, height);
                 }
+                self.forget_gone_clips();
                 self.notice = Some(format!("Take {} is on its own track. The song sounds the same, and Ctrl+Z puts it back.", take + 1));
             }
-            None => self.notice = Some("That take could not be pulled out.".into()),
+            None => self.notice = Some("That take could not be moved.".into()),
         }
     }
-}
 
-struct TakeFolder {
-    clips: Vec<ClipId>,
-    count: usize,
-    used: Vec<usize>,
-}
-
-fn take_folders(track: &Track) -> Vec<TakeFolder> {
-    let mut folders: Vec<(&Arc<loupe_engine::Source>, TakeFolder)> = Vec::new();
-    for clip in track.clips.iter().filter(|clip| clip.has_takes() && !clip.is_notes()) {
-        let count = clip.takes.len();
-        let at = folders.iter().position(|(source, folder)| Arc::ptr_eq(source, &clip.source) && folder.count == count);
-        let at = at.unwrap_or_else(|| {
-            folders.push((&clip.source, TakeFolder { clips: Vec::new(), count, used: Vec::new() }));
-            folders.len() - 1
+    pub(crate) fn move_all_takes(&mut self, track: TrackId) {
+        self.overlay = crate::Overlay::None;
+        self.gather_fx_state();
+        let height = self.heights.get(&track).copied();
+        let mut made = Vec::new();
+        let mut moved = false;
+        self.transact(None, |project| {
+            made = move_all_takes(project, track)?;
+            moved = true;
+            Ok(Outcome::Done)
         });
-        let folder = &mut folders[at].1;
-        folder.clips.push(clip.id);
-        if !folder.used.contains(&clip.take) {
-            folder.used.push(clip.take);
+        if !moved {
+            self.notice = Some("Those takes could not be moved.".into());
+            return;
+        }
+        if let Some(height) = height {
+            for copy in &made {
+                self.heights.insert(*copy, height);
+            }
+        }
+        self.forget_gone_clips();
+        self.notice = Some(format!("{} takes are on their own tracks. The song sounds the same, and Ctrl+Z puts them back.", made.len() + 1));
+    }
+}
+
+pub fn take_count(track: &Track) -> usize {
+    let mut lanes: Vec<usize> = track.clips.iter().filter_map(|clip| clip.lane).collect();
+    lanes.sort_unstable();
+    lanes.dedup();
+    lanes.len()
+}
+
+pub fn lane_rows(track: &Track) -> usize {
+    track.clips.iter().filter_map(|clip| clip.lane).max().map_or(0, |last| last + 1)
+}
+
+pub fn lay_take(project: &mut Project, track: TrackId, source: Arc<Source>, start: Frames, len: Frames, offsets: &[i64], active: usize) -> Result<ClipId, CommandError> {
+    let end = start + len;
+    let found = project.track(track).ok_or(CommandError::NoSuchTrack)?;
+    let under: Vec<Clip> = found.clips.iter().filter(|clip| !clip.is_notes() && clip.start < end && clip.end() > start).cloned().collect();
+    let mut next = lane_rows(found);
+    let plain: Vec<ClipId> = under.iter().filter(|clip| clip.lane.is_none()).map(|clip| clip.id).collect();
+    let becomes_lanes = offsets.len() > 1 || !under.is_empty();
+    if !plain.is_empty() {
+        for clip in plain {
+            project.apply(Command::SetClipLane { clip, lane: Some(next), on: false })?;
+        }
+        next += 1;
+    }
+    for clip in under.iter().filter(|clip| clip.lane.is_some() && clip.lane_on) {
+        project.apply(Command::SetClipLane { clip: clip.id, lane: clip.lane, on: false })?;
+    }
+    let mut playing = None;
+    for (pass, offset) in offsets.iter().enumerate() {
+        let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source: source.clone(), start })? else {
+            return Err(CommandError::NoSuchClip);
+        };
+        project.apply(Command::TrimClip { clip, offset: (*offset).max(0) as Frames, len })?;
+        if becomes_lanes {
+            project.apply(Command::SetClipLane { clip, lane: Some(next + pass), on: pass == active })?;
+        }
+        if pass == active {
+            playing = Some(clip);
         }
     }
-    folders
-        .into_iter()
-        .map(|(_, mut folder)| {
-            folder.used.sort_unstable();
-            folder
-        })
-        .collect()
+    playing.ok_or(CommandError::InvalidValue)
+}
+
+fn clear_lane(project: &mut Project, track: TrackId, take: usize) -> Result<(), CommandError> {
+    let clips: Vec<Clip> = project.track(track).ok_or(CommandError::NoSuchTrack)?.clips.clone();
+    for clip in clips {
+        match clip.lane {
+            Some(lane) if lane == take => {
+                project.apply(Command::DeleteClip(clip.id))?;
+            }
+            Some(lane) if lane > take => {
+                project.apply(Command::SetClipLane { clip: clip.id, lane: Some(lane - 1), on: clip.lane_on })?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub fn pull_out_take(project: &mut Project, track: TrackId, take: usize) -> Result<TrackId, CommandError> {
-    let found = project.track(track).ok_or(CommandError::InvalidValue)?;
+    let found = project.track(track).ok_or(CommandError::NoSuchTrack)?;
     let name = format!("{} take {}", found.name, take + 1);
-    let pieces: Vec<ClipId> = found.clips.iter().map(|clip| clip.id).collect();
-    if !found.clips.iter().any(|clip| clip.takes.len() > take && !clip.take_erased(take)) {
+    if !found.clips.iter().any(|clip| clip.lane == Some(take)) {
         return Err(CommandError::InvalidValue);
     }
     let Outcome::Track(copy) = project.apply(Command::DuplicateTrack(track))? else {
@@ -102,53 +189,75 @@ pub fn pull_out_take(project: &mut Project, track: TrackId, take: usize) -> Resu
     };
     project.apply(Command::RenameTrack { track: copy, name })?;
     project.apply(Command::SetTakesOpen { track: copy, open: false })?;
-    let copies: Vec<ClipId> = project.track(copy).map(|made| made.clips.iter().map(|clip| clip.id).collect()).unwrap_or_default();
-    for (piece, pulled) in pieces.into_iter().zip(copies) {
-        let Some(clip) = project.clip(piece).cloned() else { continue };
-        let was_playing = clip.take == take;
-        match clip.take_offset(take).filter(|_| clip.takes.len() > take && !clip.take_erased(take)) {
-            Some(offset) => {
-                project.apply(Command::SetTakes { clip: pulled, offsets: vec![offset as i64], active: 0 })?;
-                project.apply(Command::SetClipMuted { clip: pulled, muted: clip.muted || !was_playing })?;
-            }
-            None => {
-                project.apply(Command::DeleteClip(pulled))?;
-            }
-        }
-        if clip.takes.len() > take {
-            let mut offsets: Vec<i64> = clip.takes.iter().map(|shift| clip.offset as i64 + shift).collect();
-            offsets.remove(take);
-            let active = match clip.take {
-                playing if playing == take => take.saturating_sub(1).min(offsets.len().saturating_sub(1)),
-                playing if playing > take => playing - 1,
-                playing => playing,
-            };
-            project.apply(Command::SetTakes { clip: piece, offsets, active })?;
-            if was_playing {
-                project.apply(Command::SetClipMuted { clip: piece, muted: true })?;
-            }
+    let copies: Vec<Clip> = project.track(copy).ok_or(CommandError::NoSuchTrack)?.clips.clone();
+    for clip in copies {
+        if clip.lane == Some(take) {
+            project.apply(Command::SetClipMuted { clip: clip.id, muted: clip.is_silent() })?;
+            project.apply(Command::SetClipLane { clip: clip.id, lane: None, on: false })?;
+        } else {
+            project.apply(Command::DeleteClip(clip.id))?;
         }
     }
+    clear_lane(project, track, take)?;
     Ok(copy)
 }
 
+pub fn move_all_takes(project: &mut Project, track: TrackId) -> Result<Vec<TrackId>, CommandError> {
+    let found = project.track(track).ok_or(CommandError::NoSuchTrack)?;
+    if take_count(found) < 2 {
+        return Err(CommandError::InvalidValue);
+    }
+    let rows = lane_rows(found);
+    let first = found.clips.iter().filter_map(|clip| clip.lane).min().unwrap_or(0);
+    let mut made = Vec::new();
+    for take in (first + 1..rows).rev() {
+        let there = project.track(track).ok_or(CommandError::NoSuchTrack)?.clips.iter().any(|clip| clip.lane == Some(take));
+        if there {
+            made.insert(0, pull_out_take(project, track, take)?);
+        }
+    }
+    let left: Vec<Clip> = project.track(track).ok_or(CommandError::NoSuchTrack)?.clips.iter().filter(|clip| clip.lane.is_some()).cloned().collect();
+    for clip in left {
+        project.apply(Command::SetClipMuted { clip: clip.id, muted: clip.is_silent() })?;
+        project.apply(Command::SetClipLane { clip: clip.id, lane: None, on: false })?;
+    }
+    project.apply(Command::SetTakesOpen { track, open: false })?;
+    Ok(made)
+}
+
+fn used_lane(track: &Track, take: usize) -> bool {
+    track.clips.iter().any(|clip| clip.lane == Some(take) && clip.lane_on)
+}
+
 pub fn unused_takes(track: &Track) -> usize {
-    take_folders(track).iter().map(|folder| folder.count - folder.used.len()).sum()
+    (0..lane_rows(track)).filter(|take| track.clips.iter().any(|clip| clip.lane == Some(*take)) && !used_lane(track, *take)).count()
 }
 
 pub fn delete_unused_takes(project: &mut Project, track: TrackId) -> Result<usize, CommandError> {
-    let folders = take_folders(project.track(track).ok_or(CommandError::NoSuchTrack)?);
-    let mut removed = 0;
-    for folder in folders.iter().filter(|folder| folder.used.len() < folder.count) {
-        for id in &folder.clips {
-            let clip = project.clip(*id).ok_or(CommandError::NoSuchClip)?;
-            let offsets: Vec<i64> = folder.used.iter().map(|take| clip.offset as i64 + clip.takes[*take]).collect();
-            let active = folder.used.iter().position(|take| *take == clip.take).ok_or(CommandError::InvalidValue)?;
-            project.apply(Command::SetTakes { clip: *id, offsets, active })?;
-        }
-        removed += folder.count - folder.used.len();
+    let found = project.track(track).ok_or(CommandError::NoSuchTrack)?;
+    let unused: Vec<usize> = (0..lane_rows(found)).filter(|take| found.clips.iter().any(|clip| clip.lane == Some(*take)) && !used_lane(found, *take)).collect();
+    for take in unused.iter().rev() {
+        clear_lane(project, track, *take)?;
     }
-    Ok(removed)
+    Ok(unused.len())
+}
+
+pub fn delete_take(project: &mut Project, track: TrackId, take: usize, fade: Fade) -> Result<(), CommandError> {
+    let spans: Vec<(Frames, Frames)> = project.track(track).ok_or(CommandError::NoSuchTrack)?.clips.iter().filter(|clip| clip.lane == Some(take) && clip.lane_on).map(|clip| (clip.start, clip.end())).collect();
+    clear_lane(project, track, take)?;
+    let fallback = take.saturating_sub(1);
+    for (from, to) in spans {
+        comp(project, track, fallback, from, to, fade)?;
+    }
+    Ok(())
+}
+
+pub fn use_take_on_track(project: &mut Project, track: TrackId, take: usize, fade: Fade) -> Result<(), CommandError> {
+    let chosen: Vec<ClipId> = project.track(track).ok_or(CommandError::NoSuchTrack)?.clips.iter().filter(|clip| clip.lane == Some(take)).map(|clip| clip.id).collect();
+    for clip in chosen {
+        sound_only(project, clip, fade)?;
+    }
+    Ok(())
 }
 
 fn middle_of(
@@ -182,21 +291,41 @@ fn middle_of(
     Ok(middle)
 }
 
+fn sound_only(project: &mut Project, clip: ClipId, fade: Fade) -> Result<(), CommandError> {
+    let track = project.track_of(clip).ok_or(CommandError::NoSuchClip)?.id;
+    let chosen = project.clip(clip).ok_or(CommandError::NoSuchClip)?;
+    let (lane, from, to) = (chosen.lane, chosen.start, chosen.end());
+    let others: Vec<ClipId> = project
+        .track(track)
+        .ok_or(CommandError::NoSuchTrack)?
+        .clips
+        .iter()
+        .filter(|other| other.id != clip && other.lane.is_some() && other.lane != lane && other.lane_on && other.start < to && other.end() > from)
+        .map(|other| other.id)
+        .collect();
+    for other in others {
+        let middle = middle_of(project, other, from, to, fade, false)?;
+        let lane = project.clip(middle).and_then(|found| found.lane);
+        project.apply(Command::SetClipLane { clip: middle, lane, on: false })?;
+    }
+    project.apply(Command::SetClipLane { clip, lane, on: true })?;
+    Ok(())
+}
+
 pub fn comp(project: &mut Project, track: TrackId, take: usize, from: Frames, to: Frames, fade: Fade) -> Result<Vec<ClipId>, CommandError> {
     let touched: Vec<ClipId> = project
         .track(track)
         .ok_or(CommandError::NoSuchTrack)?
         .clips
         .iter()
-        .filter(|clip| clip.take_offset(take).is_some() && clip.start < to && clip.end() > from)
+        .filter(|clip| clip.lane == Some(take) && clip.start < to && clip.end() > from)
         .map(|clip| clip.id)
         .collect();
     let mut chosen = Vec::new();
     for clip in touched {
         let middle = middle_of(project, clip, from, to, fade, true)?;
-        if project.apply(Command::UseTake { clip: middle, take }).is_ok() {
-            chosen.push(middle);
-        }
+        sound_only(project, middle, fade)?;
+        chosen.push(middle);
     }
     Ok(chosen)
 }
@@ -251,37 +380,77 @@ mod tests {
     #[test]
     fn pulling_out_a_take_gives_it_its_own_track_and_leaves_the_set_and_the_sound_alone() {
         let mut project = Project::new(48_000);
-        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
-        let passes: Vec<[f32; 2]> = (0..3_000).map(|at| [(at / 1_000) as f32 / 4.0 + 0.25, 0.0]).collect();
-        let source = Arc::new(Source::from_frames("Vox (take 1)", passes));
-        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 500 }) else { panic!() };
-        project.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
-        project.apply(Command::SetTakes { clip, offsets: vec![0, 1_000, 2_000], active: 2 }).unwrap();
+        let (track, _) = stepped_takes(&mut project, 2);
         let copy = pull_out_take(&mut project, track, 1).unwrap();
-        let set = &project.track(track).unwrap().clips[0];
-        assert_eq!(set.takes.len(), 2, "the other takes left the set");
-        assert_eq!(set.audio()[set.offset as usize][0], 0.75, "the set stopped playing the same take");
-        assert!(!set.is_silent(), "the set went quiet");
+        let set = &project.track(track).unwrap().clips;
+        assert_eq!(set.len(), 2, "the other takes left the set");
+        assert_eq!(set[1].lane, Some(1), "the take above did not close the gap");
+        assert!(!set[1].is_silent() && set[1].audio()[set[1].offset as usize][0] == 0.75, "the set stopped playing the same take");
         let made = project.track(copy).unwrap();
         assert_eq!(made.name, "Vox take 2");
         let pulled = &made.clips[0];
-        assert!(pulled.takes.is_empty(), "the pulled take is still a stack");
+        assert!(pulled.lane.is_none(), "the moved take is still a take");
         assert_eq!((pulled.start, pulled.len), (500, 1_000), "the take moved in the song");
         assert_eq!(pulled.audio()[pulled.offset as usize][0], 0.5, "the wrong take came out");
         assert!(pulled.is_silent(), "a take that was not playing would double the vocal");
     }
 
     #[test]
+    fn moving_all_takes_makes_one_track_per_take_and_the_song_sounds_the_same() {
+        let mut project = Project::new(48_000);
+        let (track, _) = stepped_takes(&mut project, 1);
+        let made = move_all_takes(&mut project, track).unwrap();
+        assert_eq!(made.len(), 2, "three takes should make two new tracks beside the first");
+        let names: Vec<String> = made.iter().map(|id| project.track(*id).unwrap().name.clone()).collect();
+        assert_eq!(names, ["Vox take 2", "Vox take 3"]);
+        let first = &project.track(track).unwrap().clips[0];
+        assert!(first.lane.is_none(), "the first track is still takes");
+        assert_eq!(first.audio()[first.offset as usize][0], 0.25, "the first track holds the wrong take");
+        let sounding: Vec<f32> = project.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| !c.is_silent()).map(|c| c.audio()[c.offset as usize][0]).collect();
+        assert_eq!(sounding, [0.5], "the song should still play only the take it played");
+        let order: Vec<TrackId> = project.tracks.iter().map(|t| t.id).collect();
+        assert_eq!(order, [track, made[0], made[1]], "the takes are out of order");
+    }
+
+    #[test]
+    fn moving_all_takes_after_deleting_some_makes_a_track_for_each_one_left() {
+        let mut project = Project::new(48_000);
+        let (track, _) = stepped_takes(&mut project, 2);
+        delete_take(&mut project, track, 0, Fade::NONE).unwrap();
+        let made = move_all_takes(&mut project, track).unwrap();
+        assert_eq!(made.len(), 1, "two takes left should make one new track beside the first");
+        assert_eq!(project.tracks.len(), 2);
+        assert!(project.tracks.iter().all(|t| t.clips.len() == 1 && t.clips[0].lane.is_none()));
+    }
+
+    #[test]
     fn pulling_out_the_playing_take_moves_the_sound_with_it_and_does_not_double_it() {
         let mut project = Project::new(48_000);
-        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
-        let source = Arc::new(Source::from_frames("Vox (take 1)", vec![[0.5, 0.5]; 2_000]));
-        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
-        project.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
-        project.apply(Command::SetTakes { clip, offsets: vec![0, 1_000], active: 1 }).unwrap();
+        let (track, _) = stepped_takes(&mut project, 1);
         let copy = pull_out_take(&mut project, track, 1).unwrap();
-        assert!(!project.track(copy).unwrap().clips[0].is_silent(), "the pulled take stopped sounding");
-        assert!(project.track(track).unwrap().clips[0].is_silent(), "the set doubles the pulled take");
+        assert!(!project.track(copy).unwrap().clips[0].is_silent(), "the moved take stopped sounding");
+        assert!(project.track(track).unwrap().clips.iter().all(|clip| clip.is_silent()), "the set doubles the moved take");
+    }
+
+    fn stepped_takes(project: &mut Project, active: usize) -> (TrackId, ClipId) {
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let passes: Vec<[f32; 2]> = (0..3_000).map(|at| [(at / 1_000) as f32 / 4.0 + 0.25, 0.0]).collect();
+        let source = Arc::new(Source::from_frames("Vox (take 1)", passes));
+        let clip = lay_take(project, track, source, 500, 1_000, &[0, 1_000, 2_000], active).unwrap();
+        (track, clip)
+    }
+
+    #[test]
+    fn cutting_or_stretching_one_take_leaves_the_others_alone() {
+        let mut project = Project::new(48_000);
+        let (track, playing) = stepped_takes(&mut project, 2);
+        let other = project.track(track).unwrap().clips[0].id;
+        project.apply(Command::SplitClip { clip: other, at: 900 }).unwrap();
+        project.apply(Command::SetStretch { clip: other, stretch: 1.5 }).unwrap();
+        let clips = &project.track(track).unwrap().clips;
+        assert_eq!(clips.iter().filter(|clip| clip.lane == Some(0)).count(), 2, "the take was not cut");
+        assert!(clips.iter().filter(|clip| clip.lane != Some(0)).all(|clip| clip.len == 1_000 && clip.stretch == 1.0), "another take was changed");
+        assert!(!project.clip(playing).unwrap().is_silent());
     }
     #[test]
     fn a_swipe_cuts_the_clip_and_plays_that_take_between_the_cuts() {
@@ -289,22 +458,20 @@ mod tests {
         let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
         let passes: Vec<[f32; 2]> = (0..3_000).map(|at| [(at / 1_000) as f32, 0.0]).collect();
         let source = Arc::new(Source::from_frames("Vocal (take 1)", passes));
-        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
-        project.apply(Command::TrimClip { clip, offset: 2_000, len: 1_000 }).unwrap();
-        project.apply(Command::SetTakes { clip, offsets: vec![0, 1_000, 2_000], active: 2 }).unwrap();
+        lay_take(&mut project, track, source, 0, 1_000, &[0, 1_000, 2_000], 2).unwrap();
         let fade = Fade { len: 4, curve: 0.0 };
         let chosen = comp(&mut project, track, 0, 300, 600, fade).unwrap();
         assert_eq!(chosen.len(), 1);
         let pieces = &project.track(track).unwrap().clips;
-        let mut spans: Vec<(Frames, Frames, usize)> = pieces.iter().map(|piece| (piece.start, piece.end(), piece.take)).collect();
+        let mut spans: Vec<(Frames, Frames, Option<usize>)> = pieces.iter().filter(|piece| !piece.is_silent()).map(|piece| (piece.start, piece.end(), piece.lane)).collect();
         spans.sort();
-        assert_eq!(spans, vec![(0, 300, 2), (300, 600, 0), (600, 1_000, 2)]);
+        assert_eq!(spans, vec![(0, 300, Some(2)), (300, 600, Some(0)), (600, 1_000, Some(2))]);
         let middle = project.clip(chosen[0]).unwrap();
-        assert_eq!(middle.audio()[middle.offset as usize][0], 0.0, "the first pass plays in the middle");
+        assert_eq!(middle.audio()[middle.offset as usize + 299][0], 0.0, "the first pass plays in the middle");
         assert_eq!((middle.fade_in.len, middle.fade_out.len), (4, 4));
         let again = comp(&mut project, track, 1, 0, 1_000, fade).unwrap();
-        assert_eq!(again.len(), 3, "a swipe across the pieces switches them all");
-        assert!(project.track(track).unwrap().clips.iter().all(|piece| piece.take == 1));
+        assert_eq!(again.len(), 1, "a swipe over a whole take picks that whole take");
+        assert!(project.track(track).unwrap().clips.iter().filter(|piece| !piece.is_silent()).all(|piece| piece.lane == Some(1)));
         assert!(comp(&mut project, track, 9, 0, 1_000, fade).unwrap().is_empty());
     }
 
@@ -321,11 +488,8 @@ mod tests {
 
     fn a_looped_vocal(project: &mut Project, passes: Arc<Source>) -> (TrackId, ClipId) {
         let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
-        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source: passes, start: 0 }) else { panic!() };
-        let last = (PASSES - 1) as Frames * PASS;
-        project.apply(Command::TrimClip { clip, offset: last, len: PASS }).unwrap();
-        let offsets = (0..PASSES).map(|pass| pass as i64 * PASS as i64).collect();
-        project.apply(Command::SetTakes { clip, offsets, active: PASSES - 1 }).unwrap();
+        let offsets: Vec<i64> = (0..PASSES).map(|pass| pass as i64 * PASS as i64).collect();
+        let clip = lay_take(project, track, passes, 0, PASS, &offsets, PASSES - 1).unwrap();
         (track, clip)
     }
 
@@ -338,7 +502,7 @@ mod tests {
     fn comped(app: &mut App, track: TrackId) {
         app.comp(track, 0, 500, 1_500);
         app.comp(track, 2, 2_500, 3_500);
-        let used: Vec<usize> = app.project.track(track).unwrap().clips.iter().map(|piece| piece.take).collect();
+        let used: Vec<usize> = app.project.track(track).unwrap().clips.iter().filter(|piece| !piece.is_silent()).filter_map(|piece| piece.lane).collect();
         assert!(used.contains(&0) && used.contains(&2) && used.contains(&(PASSES - 1)), "the comp did not use the takes it was asked for: {used:?}");
     }
 
@@ -375,17 +539,14 @@ mod tests {
         let (track, _) = a_looped_vocal(&mut app.project, recorded);
         comped(&mut app, track);
         let before = heard(&app.project);
-        let pieces_before = app.project.track(track).unwrap().clips.len();
         assert_eq!(unused_takes(app.project.track(track).unwrap()), 2, "takes 2 and 4 are not in the comp");
         let _ = app.update(Message::DeleteUnusedTakes(track));
-        let pieces = &app.project.track(track).unwrap().clips;
-        assert_eq!(pieces.len(), pieces_before, "deleting takes cut or removed comp pieces");
-        assert!(pieces.iter().all(|piece| piece.takes.len() == 3), "every piece keeps the three takes the comp uses");
+        assert_eq!(take_count(app.project.track(track).unwrap()), 3, "the three takes the comp uses should be left");
         assert_eq!(unused_takes(app.project.track(track).unwrap()), 0);
         assert_eq!(heard(&app.project), before, "the comp sounds different after deleting the unused takes");
         assert!(file.exists(), "the recording was deleted from disk");
         let _ = app.update(Message::Undo);
-        assert!(app.project.track(track).unwrap().clips.iter().all(|piece| piece.takes.len() == PASSES), "undo did not bring the takes back");
+        assert_eq!(take_count(app.project.track(track).unwrap()), PASSES, "undo did not bring the takes back");
         assert_eq!(heard(&app.project), before);
         let _ = std::fs::remove_dir_all(&folder);
     }
@@ -396,8 +557,7 @@ mod tests {
         let (track, clip) = a_looped_vocal(&mut project, Arc::new(Source::from_frames("Vox (take 1)", passes_of())));
         let before = heard(&project);
         assert_eq!(delete_unused_takes(&mut project, track).unwrap(), PASSES - 1);
-        let kept = project.clip(clip).unwrap();
-        assert!(!kept.has_takes() && kept.take == 0);
+        assert!(project.clip(clip).is_some());
         assert_eq!(heard(&project), before);
         let mut app = App::bare();
         let (track, _) = a_looped_vocal(&mut app.project, Arc::new(Source::from_frames("Vox (take 1)", passes_of())));

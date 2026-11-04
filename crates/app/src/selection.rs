@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use loupe_engine::{ClipId, Command, CommandError, Frames, Outcome, Source, TrackId};
+use loupe_engine::{ClipId, Command, Fade, Frames, Outcome, Source, TrackId};
 
 use crate::{App, Run};
 
@@ -17,7 +17,7 @@ impl App {
 
     pub(crate) fn forget_gone_clips(&mut self) {
         let still_here: Vec<ClipId> =
-            self.selection.iter().copied().filter(|clip| self.project.clip(*clip).is_some_and(|found| !found.take_erased(found.take))).collect();
+            self.selection.iter().copied().filter(|clip| self.project.clip(*clip).is_some()).collect();
         if still_here.len() != self.selection.len() {
             self.choose(still_here);
         }
@@ -44,22 +44,14 @@ impl App {
     pub(crate) fn delete_parts(&mut self, clips: Vec<ClipId>, run: Option<Run>) {
         self.transact(run, |project| {
             for clip in clips {
-                let shown_as_lanes = project.track_of(clip).is_some_and(|track| track.takes_open) && project.clip(clip).is_some_and(|found| found.has_takes());
-                match (shown_as_lanes, project.clip(clip).map(|found| found.take)) {
-                    (true, Some(take)) => erase_take_from_piece(project, clip, take)?,
+                let folded = project.track_of(clip).filter(|track| !track.takes_open).map(|track| track.id);
+                match (folded, project.clip(clip).filter(|found| found.lane.is_some()).map(|found| (found.start, found.end()))) {
+                    (Some(track), Some((from, to))) => crate::takes::clear_between(project, track, from, to, Fade::NONE)?,
                     _ => {
                         project.apply(Command::DeleteClip(clip))?;
                     }
                 }
             }
-            Ok(Outcome::Done)
-        });
-        self.forget_gone_clips();
-    }
-
-    pub(crate) fn erase_take(&mut self, clip: ClipId, take: usize, run: Option<Run>) {
-        self.transact(run, |project| {
-            erase_take_from_piece(project, clip, take)?;
             Ok(Outcome::Done)
         });
         self.forget_gone_clips();
@@ -196,11 +188,3 @@ fn unused_file(folder: &std::path::Path, name: &str) -> PathBuf {
         .unwrap_or(first)
 }
 
-fn erase_take_from_piece(project: &mut loupe_engine::Project, clip: ClipId, take: usize) -> Result<(), CommandError> {
-    project.apply(Command::SetTakeErased { clip, take, erased: true })?;
-    let nothing_left = project.clip(clip).is_some_and(|found| (0..found.takes.len()).all(|lane| found.take_erased(lane)));
-    if nothing_left {
-        project.apply(Command::DeleteClip(clip))?;
-    }
-    Ok(())
-}

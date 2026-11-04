@@ -252,7 +252,6 @@ impl App {
         }
         let start = (start + cut as i64) as Frames;
         let beat = bar_frames(self.project.bpm, self.project.rate) / 4;
-        let mut stacks = Vec::new();
         let mut loose = Vec::new();
         let mut cut_short = Vec::new();
         for (track, source) in sources {
@@ -264,15 +263,7 @@ impl App {
                     continue;
                 }
             }
-            let part = Part { frames: new, start, len: new.len() as Frames, offsets: vec![0] };
-            match self.stack_onto(track, part, 0, &source.path) {
-                Some(Ok(stack)) => stacks.push(stack),
-                Some(Err(why)) => {
-                    self.problem = Some(format!("Could not add the take to the stack, so it is on its own: {why}"));
-                    loose.push((track, source));
-                }
-                None => loose.push((track, source)),
-            }
+            loose.push((track, source));
         }
         let mut placed = Vec::new();
         self.transact(None, |project| {
@@ -280,23 +271,11 @@ impl App {
                 let offset = project.clip(clip).map_or(0, |found| found.offset);
                 project.apply(Command::TrimClip { clip, offset, len: keep })?;
             }
-            for command in stacks {
-                if let Command::SetClipAudio { clip, .. } = &command {
-                    placed.push(*clip);
-                }
-                project.apply(command)?;
-            }
             for (track, source) in loose {
                 if project.track(track).is_none() {
                     continue;
                 }
-                let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source, start })? else {
-                    return Err(CommandError::NoSuchClip);
-                };
-                if cut > 0 {
-                    project.apply(Command::TrimClip { clip, offset: cut, len: whole - cut })?;
-                }
-                placed.push(clip);
+                placed.push(crate::takes::lay_take(project, track, source, start, whole - cut, &[cut as i64], 0)?);
             }
             Ok(Outcome::Done)
         });
@@ -392,19 +371,14 @@ mod tests {
     }
 
     #[test]
-    fn a_new_take_sits_beside_the_old_ones_and_each_plays_at_its_own_time() {
-        let old = [[1.0, 1.0]; 4];
-        let new = [[2.0, 2.0]; 3];
-        let laid = stacked(Part { frames: &old, start: 100, len: 4, offsets: vec![0] }, Part { frames: &new, start: 102, len: 3, offsets: vec![0] });
-        assert_eq!((laid.start, laid.len), (100, 5), "the clip grows to cover both");
-        assert_eq!(laid.offsets, vec![0, 5]);
-        assert_eq!(laid.frames[0][0], 1.0, "the old take still starts the clip");
-        assert_eq!(laid.frames[4][0], 0.0, "the old take does not run into the new one");
-        assert_eq!(laid.frames[5 + 1][0], 0.0, "the new take is silent before it began");
-        assert_eq!(laid.frames[5 + 2][0], 2.0, "the new take starts at the time it was recorded");
-        let earlier = stacked(Part { frames: &old, start: 100, len: 4, offsets: vec![0] }, Part { frames: &new, start: 98, len: 3, offsets: vec![0] });
-        assert_eq!((earlier.start, earlier.len), (98, 6));
-        assert_eq!(earlier.frames[earlier.offsets[0] as usize + 2][0], 1.0, "the old take moved with the clip start");
+    fn a_new_take_goes_on_its_own_lane_at_the_time_it_was_recorded_and_the_old_one_stays_put() {
+        let mut project = loupe_engine::Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let old = crate::takes::lay_take(&mut project, track, Arc::new(Source::from_frames("old", vec![[1.0, 1.0]; 4])), 100, 4, &[0], 0).unwrap();
+        let new = crate::takes::lay_take(&mut project, track, Arc::new(Source::from_frames("new", vec![[2.0, 2.0]; 3])), 102, 3, &[0], 0).unwrap();
+        let (old, new) = (project.clip(old).unwrap(), project.clip(new).unwrap());
+        assert_eq!((old.start, old.len, old.lane, old.is_silent()), (100, 4, Some(0), true), "the old take moved or still plays");
+        assert_eq!((new.start, new.len, new.lane, new.is_silent()), (102, 3, Some(1), false), "the new take is not where it was recorded");
     }
 
     #[test]
@@ -423,8 +397,9 @@ mod tests {
         let loop_passes = Passes { from: 2_000, len: 1_000, pad: 0, offsets: vec![0, 1_000, 2_000], active: 2 };
         app.place_take(2_000, 0, false, Some(loop_passes), None, Ok(vec![(track, passes)]));
         let found = app.project.track(track).unwrap();
-        assert_eq!(found.clips.len(), 1, "the loop takes made their own clip");
-        assert_eq!((found.clips[0].takes.len(), found.clips[0].take), (4, 3), "the three passes did not join after the first take");
+        assert_eq!(found.clips.len(), 4, "every pass and the first take should be a clip");
+        let playing: Vec<Option<usize>> = found.clips.iter().filter(|clip| !clip.is_silent()).map(|clip| clip.lane).collect();
+        assert_eq!(playing, [Some(3)], "the last whole pass should be the one playing");
         std::fs::remove_dir_all(&folder).ok();
     }
 
@@ -443,9 +418,9 @@ mod tests {
         app.place_take(2_000, 0, false, None, None, Ok(vec![(track, one)]));
         app.place_take(2_000, 0, false, None, None, Ok(vec![(track, two)]));
         let found = app.project.track(track).unwrap();
-        assert_eq!(found.clips.len(), 1, "the second take made its own clip");
-        let clip = &found.clips[0];
-        assert_eq!((clip.takes.len(), clip.take), (2, 1), "the new take is not the playing one in the stack");
+        assert_eq!(found.clips.len(), 2, "each take should be a clip");
+        let clip = found.clips.iter().find(|clip| !clip.is_silent()).unwrap();
+        assert_eq!(clip.lane, Some(1), "the new take is not the playing one");
         assert_eq!(clip.audio()[clip.offset as usize][0], 0.5, "the stack does not play the new take");
         std::fs::remove_dir_all(&folder).ok();
     }
@@ -566,9 +541,9 @@ mod tests {
         app.place_take(240_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 480_000))]));
         let clips = &app.project.track(track).unwrap().clips;
         assert_eq!(clips.len(), 2, "the next segment joined the last one as a take");
-        let mut spans: Vec<(Frames, Frames, usize)> = clips.iter().map(|clip| (clip.start, clip.end(), clip.takes.len())).collect();
+        let mut spans: Vec<(Frames, Frames, Option<usize>)> = clips.iter().map(|clip| (clip.start, clip.end(), clip.lane)).collect();
         spans.sort();
-        assert_eq!(spans, vec![(0, 240_000, 0), (240_000, 720_000, 0)]);
+        assert_eq!(spans, vec![(0, 240_000, None), (240_000, 720_000, None)]);
         std::fs::remove_dir_all(&folder).ok();
     }
 
@@ -581,7 +556,7 @@ mod tests {
         app.place_take(0, 0, false, None, None, Ok(vec![(track, a_take(&folder, "one.wav", 480_000))]));
         app.place_take(240_000, 0, true, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 480_000))]));
         let clips = &app.project.track(track).unwrap().clips;
-        assert_eq!((clips.len(), clips[0].takes.len()), (1, 2));
+        assert_eq!(clips.iter().filter_map(|clip| clip.lane).collect::<Vec<_>>(), [0, 1]);
         std::fs::remove_dir_all(&folder).ok();
     }
 
@@ -594,7 +569,7 @@ mod tests {
         app.place_take(96_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "one.wav", 96_000))]));
         app.place_take(48_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 96_000))]));
         let clips = &app.project.track(track).unwrap().clips;
-        assert_eq!((clips.len(), clips[0].takes.len()), (1, 2), "recording from before the clip did not join it");
+        assert_eq!(clips.iter().filter_map(|clip| clip.lane).collect::<Vec<_>>(), [0, 1], "recording from before the clip did not join it");
         std::fs::remove_dir_all(&folder).ok();
     }
 
@@ -607,8 +582,7 @@ mod tests {
         let passes = Passes { from: 0, len: 1_000, pad: 0, offsets: vec![0, 1_000, 2_000, 3_000], active: 3 };
         app.place_passes(passes, vec![(track, source)]);
         let found = app.project.track(track).unwrap();
-        assert_eq!(found.clips.len(), 1);
-        assert_eq!(found.clips[0].takes.len(), 4);
+        assert_eq!(found.clips.len(), 4);
         assert!(!found.takes_open, "the new takes came in unfolded");
     }
 
@@ -674,38 +648,14 @@ impl App {
     fn place_passes(&mut self, passes: Passes, sources: Vec<(TrackId, Arc<Source>)>) {
         let Passes { from, len, offsets, active, .. } = passes;
         let count = offsets.len();
-        let mut stacks = Vec::new();
-        let mut loose = Vec::new();
-        for (track, source) in sources {
-            let part = Part { frames: &source.frames, start: from, len, offsets: offsets.clone() };
-            match self.stack_onto(track, part, active, &source.path) {
-                Some(Ok(stack)) => stacks.push(stack),
-                Some(Err(why)) => {
-                    self.problem = Some(format!("Could not add the takes to the stack, so they are on their own: {why}"));
-                    loose.push((track, source));
-                }
-                None => loose.push((track, source)),
-            }
-        }
         let mut placed = Vec::new();
         self.transact(None, |project| {
-            for command in stacks {
-                if let Command::SetClipAudio { clip, .. } = &command {
-                    placed.push(*clip);
-                }
-                project.apply(command)?;
-            }
-            for (track, source) in loose {
+            for (track, source) in sources {
                 if project.track(track).is_none() {
                     continue;
                 }
-                let Outcome::Clip(clip) = project.apply(Command::AddClip { track, source, start: from })? else {
-                    return Err(CommandError::NoSuchClip);
-                };
-                project.apply(Command::TrimClip { clip, offset: offsets[active].max(0) as Frames, len })?;
-                project.apply(Command::SetTakes { clip, offsets: offsets.clone(), active })?;
+                placed.push(crate::takes::lay_take(project, track, source, from, len, &offsets, active)?);
                 project.apply(Command::SetTakesOpen { track, open: false })?;
-                placed.push(clip);
             }
             Ok(Outcome::Done)
         });
@@ -756,37 +706,6 @@ impl App {
     }
 }
 
-pub(crate) struct Stacked {
-    pub frames: Vec<[f32; 2]>,
-    pub start: Frames,
-    pub len: Frames,
-    pub offsets: Vec<i64>,
-}
-
-pub(crate) struct Part<'a> {
-    pub frames: &'a [[f32; 2]],
-    pub start: Frames,
-    pub len: Frames,
-    pub offsets: Vec<i64>,
-}
-
-pub(crate) fn stacked(old: Part<'_>, new: Part<'_>) -> Stacked {
-    let start = old.start.min(new.start);
-    let end = (old.start + old.len).max(new.start + new.len);
-    let len = end - start;
-    let mut frames: Vec<[f32; 2]> = Vec::new();
-    let mut offsets = Vec::new();
-    for part in [&old, &new] {
-        let base = frames.len();
-        let front = (part.start - start) as usize;
-        frames.resize(base + front, [0.0; 2]);
-        frames.extend_from_slice(part.frames);
-        let furthest = part.offsets.iter().copied().max().unwrap_or(0).max(0) as usize + len as usize;
-        frames.resize(frames.len().max(base + furthest), [0.0; 2]);
-        offsets.extend(part.offsets.iter().map(|offset| base as i64 + offset.max(&0)));
-    }
-    Stacked { frames, start, len, offsets }
-}
 
 impl App {
     fn moved_on_from(&self, track: TrackId, start: Frames, len: Frames, beat: Frames) -> Option<(loupe_engine::ClipId, Frames)> {
@@ -796,7 +715,7 @@ impl App {
             .track(track)?
             .clips
             .iter()
-            .filter(|clip| !clip.is_notes() && !clip.is_stretched())
+            .filter(|clip| !clip.is_notes() && !clip.is_stretched() && (clip.lane.is_none() || clip.lane_on))
             .map(|clip| (clip, clip.end().min(end).saturating_sub(clip.start.max(start))))
             .filter(|(_, overlap)| *overlap > 0)
             .max_by_key(|(_, overlap)| *overlap)
@@ -804,32 +723,4 @@ impl App {
         (start > under.start + beat).then(|| (under.id, start - under.start))
     }
 
-    fn stack_onto(&self, track: TrackId, new: Part<'_>, active: usize, path: &Path) -> Option<Result<Command, String>> {
-        let end = new.start + new.len;
-        let found = self.project.track(track)?;
-        let under = found
-            .clips
-            .iter()
-            .filter(|clip| !clip.is_notes() && !clip.is_stretched())
-            .map(|clip| (clip, clip.end().min(end).saturating_sub(clip.start.max(new.start))))
-            .filter(|(_, overlap)| *overlap > 0)
-            .max_by_key(|(_, overlap)| *overlap)
-            .map(|(clip, _)| clip)?;
-        let old_offsets: Vec<i64> = match under.takes.len() > 1 {
-            true => under.takes.iter().map(|shift| under.offset as i64 + shift).collect(),
-            false => vec![under.offset as i64],
-        };
-        let old_count = old_offsets.len();
-        let laid = stacked(Part { frames: &under.source.frames, start: under.start, len: under.len, offsets: old_offsets }, new);
-        let rate = self.project.rate;
-        let written = loupe_engine::write_frames(path, &laid.frames, rate).map_err(|why| format!("{}: {why}", path.display()));
-        Some(written.and_then(|()| Source::load(path, rate)).map(|joined| Command::SetClipAudio {
-            clip: under.id,
-            source: Arc::new(joined),
-            start: laid.start,
-            len: laid.len,
-            active: old_count + active,
-            offsets: laid.offsets,
-        }))
-    }
 }

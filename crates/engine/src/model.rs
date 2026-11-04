@@ -46,10 +46,8 @@ pub struct Clip {
     pub notes: Option<Arc<Vec<Note>>>,
     pub stretch: f64,
     pub stretched: Option<Arc<Source>>,
-    pub takes: Vec<i64>,
-    pub take: usize,
-    pub muted_takes: Vec<usize>,
-    pub erased_takes: Vec<usize>,
+    pub lane: Option<usize>,
+    pub lane_on: bool,
     pub name: Option<String>,
 }
 
@@ -89,25 +87,8 @@ impl Clip {
         self.start + self.len
     }
 
-    pub fn has_takes(&self) -> bool {
-        self.takes.len() > 1
-    }
-
     pub fn is_silent(&self) -> bool {
-        self.muted || self.muted_takes.contains(&self.take) || self.erased_takes.contains(&self.take)
-    }
-
-    pub fn take_muted(&self, take: usize) -> bool {
-        self.muted_takes.contains(&take)
-    }
-
-    pub fn take_erased(&self, take: usize) -> bool {
-        self.erased_takes.contains(&take)
-    }
-
-    pub fn take_offset(&self, take: usize) -> Option<Frames> {
-        let shifted = self.offset as i64 + self.takes.get(take)?;
-        (shifted >= 0).then_some(shifted as Frames)
+        self.muted || (self.lane.is_some() && !self.lane_on)
     }
 
     pub fn is_notes(&self) -> bool {
@@ -338,11 +319,7 @@ pub enum Command {
     SetClipMuted { clip: ClipId, muted: bool },
     SetClipFade { clip: ClipId, edge: Edge, fade: Fade },
     SetStretch { clip: ClipId, stretch: f64 },
-    SetTakes { clip: ClipId, offsets: Vec<i64>, active: usize },
-    SetTakeMuted { clip: ClipId, take: usize, muted: bool },
-    SetTakeErased { clip: ClipId, take: usize, erased: bool },
-    SetClipAudio { clip: ClipId, source: Arc<Source>, start: Frames, len: Frames, offsets: Vec<i64>, active: usize },
-    UseTake { clip: ClipId, take: usize },
+    SetClipLane { clip: ClipId, lane: Option<usize>, on: bool },
     FillStretch { source: Arc<Source>, stretch: f64, stretched: Arc<Source> },
     SetBpm(f64),
     SetMasterGain(f32),
@@ -516,6 +493,28 @@ impl Project {
         found
     }
 
+    pub fn spread_takes(&mut self, clip: ClipId, offsets: &[i64], active: usize, muted: &[usize], erased: &[usize]) -> Result<(), CommandError> {
+        let (t, i) = self.locate(clip)?;
+        let base = self.tracks[t].clips.remove(i);
+        let available = base.audio_len();
+        let mut at = i;
+        for (lane, offset) in offsets.iter().enumerate() {
+            let Ok(offset) = Frames::try_from(*offset) else { continue };
+            if erased.contains(&lane) || (available > 0 && offset >= available) {
+                continue;
+            }
+            let mut piece = base.clone();
+            piece.id = if lane == active { base.id } else { ClipId(self.fresh()) };
+            piece.offset = offset;
+            piece.lane = Some(lane);
+            piece.lane_on = lane == active;
+            piece.muted = base.muted || muted.contains(&lane);
+            self.tracks[t].clips.insert(at, piece);
+            at += 1;
+        }
+        Ok(())
+    }
+
     pub fn apply(&mut self, command: Command) -> Result<Outcome, CommandError> {
         match command {
             Command::AddTrack { name } => {
@@ -635,10 +634,8 @@ impl Project {
                     notes: None,
                     stretch: 1.0,
                     stretched: None,
-                    takes: Vec::new(),
-                    take: 0,
-                    muted_takes: Vec::new(),
-                    erased_takes: Vec::new(),
+                    lane: None,
+                    lane_on: false,
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -648,6 +645,8 @@ impl Project {
                     return Err(CommandError::InvalidValue);
                 }
                 clip.id = ClipId(self.fresh());
+                clip.lane = None;
+                clip.lane_on = false;
                 self.keep(&clip.source);
                 let id = clip.id;
                 self.tracks[t].clips.push(clip);
@@ -674,10 +673,8 @@ impl Project {
                     notes: Some(Arc::new(tidy(notes))),
                     stretch: 1.0,
                     stretched: None,
-                    takes: Vec::new(),
-                    take: 0,
-                    muted_takes: Vec::new(),
-                    erased_takes: Vec::new(),
+                    lane: None,
+                    lane_on: false,
                 });
                 Ok(Outcome::Clip(id))
             }
@@ -711,6 +708,9 @@ impl Project {
                 } else {
                     let mut moved = self.tracks[from].clips.remove(i);
                     moved.start = start;
+                    moved.muted = moved.is_silent();
+                    moved.lane = None;
+                    moved.lane_on = false;
                     self.tracks[to].clips.push(moved);
                 }
                 Ok(Outcome::Done)
@@ -755,83 +755,14 @@ impl Project {
                 target.fade_out.len = target.fade_out.len.min(len - target.fade_in.len);
                 Ok(Outcome::Done)
             }
-            Command::SetClipAudio { clip, source, start, len, offsets, active } => {
-                self.keep(&source);
+            Command::SetClipLane { clip, lane, on } => {
                 let (t, i) = self.locate(clip)?;
                 let target = &mut self.tracks[t].clips[i];
-                if target.notes.is_some() || len == 0 {
+                if target.notes.is_some() {
                     return Err(CommandError::InvalidValue);
                 }
-                target.source = source;
-                target.stretch = 1.0;
-                target.stretched = None;
-                target.start = start;
-                target.len = len;
-                self.apply(Command::SetTakes { clip, offsets, active })
-            }
-            Command::SetTakes { clip, offsets, active } => {
-                let (t, i) = self.locate(clip)?;
-                let target = &mut self.tracks[t].clips[i];
-                let Some(chosen) = offsets.get(active).copied() else {
-                    return Err(CommandError::InvalidValue);
-                };
-                if target.notes.is_some() || chosen < 0 {
-                    return Err(CommandError::InvalidValue);
-                }
-                let muted_at: Vec<i64> = target.muted_takes.iter().filter_map(|take| target.takes.get(*take).map(|shift| target.offset as i64 + shift)).collect();
-                let erased_at: Vec<i64> = target.erased_takes.iter().filter_map(|take| target.takes.get(*take).map(|shift| target.offset as i64 + shift)).collect();
-                target.muted_takes = offsets.iter().enumerate().filter(|(_, at)| muted_at.contains(at)).map(|(take, _)| take).collect();
-                target.erased_takes = offsets.iter().enumerate().filter(|(_, at)| erased_at.contains(at)).map(|(take, _)| take).collect();
-                if offsets.len() < 2 {
-                    target.muted_takes.clear();
-                    target.erased_takes.clear();
-                }
-                target.offset = chosen as Frames;
-                target.takes = if offsets.len() > 1 { offsets.iter().map(|offset| offset - chosen).collect() } else { Vec::new() };
-                target.take = if offsets.len() > 1 { active } else { 0 };
-                Ok(Outcome::Done)
-            }
-            Command::SetTakeErased { clip, take, erased } => {
-                let (t, i) = self.locate(clip)?;
-                let target = &mut self.tracks[t].clips[i];
-                if take >= target.takes.len() {
-                    return Err(CommandError::InvalidValue);
-                }
-                target.erased_takes.retain(|other| *other != take);
-                if erased {
-                    target.erased_takes.push(take);
-                    target.erased_takes.sort_unstable();
-                }
-                Ok(Outcome::Done)
-            }
-            Command::SetTakeMuted { clip, take, muted } => {
-                let (t, i) = self.locate(clip)?;
-                let target = &mut self.tracks[t].clips[i];
-                if take >= target.takes.len() {
-                    return Err(CommandError::InvalidValue);
-                }
-                target.muted_takes.retain(|other| *other != take);
-                if muted {
-                    target.muted_takes.push(take);
-                    target.muted_takes.sort_unstable();
-                }
-                Ok(Outcome::Done)
-            }
-            Command::UseTake { clip, take } => {
-                let (t, i) = self.locate(clip)?;
-                let target = &mut self.tracks[t].clips[i];
-                let Some(shift) = target.takes.get(take).copied() else {
-                    return Err(CommandError::InvalidValue);
-                };
-                let offset = target.offset as i64 + shift;
-                if offset < 0 {
-                    return Err(CommandError::InvalidValue);
-                }
-                for other in target.takes.iter_mut() {
-                    *other -= shift;
-                }
-                target.offset = offset as Frames;
-                target.take = take;
+                target.lane = lane;
+                target.lane_on = lane.is_some() && on;
                 Ok(Outcome::Done)
             }
             Command::SetStretch { clip, stretch } => {
@@ -843,9 +774,6 @@ impl Project {
                 let scale = stretch / target.stretch;
                 let len = ((target.len as f64 * scale).round() as Frames).max(1);
                 target.offset = (target.offset as f64 * scale).round() as Frames;
-                for shift in target.takes.iter_mut() {
-                    *shift = (*shift as f64 * scale).round() as i64;
-                }
                 target.len = len;
                 target.fade_in.len = ((target.fade_in.len as f64 * scale).round() as Frames).min(len);
                 target.fade_out.len = ((target.fade_out.len as f64 * scale).round() as Frames).min(len - target.fade_in.len);

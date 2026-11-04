@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::widget::canvas::{self, Cache, Frame, Geometry, Path, Stroke, Text};
@@ -71,7 +70,6 @@ const GAIN_FIGURE_INSET: f32 = 6.0;
 const GAIN_FIGURE_LIFT: f32 = 7.0;
 const GAIN_PLATE_HEIGHT: f32 = 14.0;
 pub const MIN_GAIN_DB: f32 = -24.0;
-const TAKE_LANE_INSET: f32 = 3.0;
 const BADGE_LETTER: f32 = 6.2;
 const BADGE_PAD: f32 = 6.0;
 const BADGE_INSET: f32 = 3.0;
@@ -168,7 +166,7 @@ enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
     Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
-    SlideTake { clip: ClipId, take: usize, grab: f64, from: i64, length: i64 },
+    SlideTake { clip: ClipId, grab: f64, from: i64, length: i64 },
     Resize { track: TrackId, top: f32 },
     LaneResize { target: loupe_engine::Target, top: f32 },
     Reorder { track: TrackId, from: Point, at: Option<usize> },
@@ -177,7 +175,7 @@ enum Drag {
     Marquee { from: Point, to: Point },
     Trim { clip: ClipId, edge: Edge },
     Stretch { clip: ClipId, edge: Edge },
-    Paint { muted: Option<bool>, touched: Vec<ClipId>, take: Option<usize> },
+    Paint { muted: Option<bool>, touched: Vec<ClipId>, },
     Point { target: loupe_engine::Target, which: usize },
     Grip { clip: ClipId, grip: Grip, pull: EndlessDrag, curve_at_grab: f32, db_at_grab: f32 },
     Pan { track: TrackId, pull: EndlessDrag, pan_at_grab: f32 },
@@ -736,10 +734,16 @@ impl Timeline<'_> {
 
     fn clip_box(&self, clip: &Clip) -> Option<ClipBox> {
         let index = self.project.tracks.iter().position(|t| t.clips.iter().any(|c| c.id == clip.id))?;
+        let track = &self.project.tracks[index];
+        let top = match clip.lane {
+            Some(lane) if track.takes_open => self.take_lane_top(index, lane),
+            Some(_) if !clip.lane_on => return None,
+            _ => self.track_top(index),
+        };
         Some(ClipBox {
             left: self.x_of(clip.start as f64),
             right: self.x_of(clip.end() as f64),
-            top: self.track_top(index) + self.palette.clip_padding,
+            top: top + self.palette.clip_padding,
             height: self.clips_height(&self.project.tracks[index]) - self.palette.clip_padding * 2.0,
             title: self.palette.clip_title_height,
         })
@@ -815,7 +819,7 @@ impl Timeline<'_> {
                 if top > size.height || top + tall < 0.0 {
                     continue;
                 }
-                let used = track.clips.iter().any(|clip| clip.takes.len() > take && clip.take == take);
+                let used = track.clips.iter().any(|clip| clip.lane == Some(take) && clip.lane_on);
                 let row = Point::new(indent, top);
                 let row_size = Size::new((size.width - indent).max(0.0), tall - 1.0);
                 frame.fill_rectangle(row, row_size, theme::mix(p.panel, colour, if used { 0.32 } else { 0.16 }));
@@ -857,8 +861,23 @@ impl Timeline<'_> {
         }
         let take = row as usize;
         let at = self.frames_at(p.x);
-        let found = track.clips.iter().rev().find(|clip| clip.takes.len() > take && !clip.take_erased(take) && at >= clip.start as f64 && at < clip.end() as f64);
-        Some(found.map_or(Hit::Lane, |clip| Hit::Take(clip, take)))
+        let Some(clip) = track.clips.iter().rev().find(|clip| clip.lane == Some(take) && at >= clip.start as f64 && at < clip.end() as f64) else {
+            return Some(Hit::Lane);
+        };
+        if self.tool == Tool::Comp {
+            return Some(Hit::Take(clip, take));
+        }
+        let (left, right) = (self.x_of(clip.start as f64), self.x_of(clip.end() as f64));
+        if self.tool != Tool::Pencil || right - left < MIN_CLIP_PX_FOR_EDGES {
+            return Some(Hit::Clip(clip));
+        }
+        Some(if p.x - left <= EDGE_GRIP {
+            Hit::Edge(clip, Edge::In)
+        } else if right - p.x <= EDGE_GRIP {
+            Hit::Edge(clip, Edge::Out)
+        } else {
+            Hit::Clip(clip)
+        })
     }
 
     fn take_badges(&self, index: usize) -> Vec<(Rectangle, usize)> {
@@ -866,23 +885,26 @@ impl Timeline<'_> {
         if self.hidden(track) {
             return Vec::new();
         }
-        let mut folders: Vec<&Clip> = track.clips.iter().filter(|clip| clip.has_takes() && !clip.is_notes()).collect();
+        let mut folders: Vec<&Clip> = track.clips.iter().filter(|clip| clip.lane.is_some() && !clip.is_notes()).collect();
         folders.sort_by_key(|clip| clip.start);
-        let mut runs: Vec<(Frames, Frames, &Clip)> = Vec::new();
+        let mut runs: Vec<(Frames, Frames, Vec<usize>)> = Vec::new();
         for clip in folders {
+            let lane = clip.lane.unwrap_or(0);
             match runs.last_mut() {
-                Some((_, end, last)) if follows_in_folder(last, clip) => {
-                    *end = clip.end();
-                    *last = clip;
+                Some((_, end, lanes)) if clip.start <= *end => {
+                    *end = (*end).max(clip.end());
+                    if !lanes.contains(&lane) {
+                        lanes.push(lane);
+                    }
                 }
-                _ => runs.push((clip.start, clip.end(), clip)),
+                _ => runs.push((clip.start, clip.end(), vec![lane])),
             }
         }
         let top = self.track_top(index) + self.palette.clip_padding + BADGE_INSET;
         let height = (self.palette.clip_title_height - BADGE_INSET * 2.0).max(1.0);
         runs.into_iter()
-            .filter_map(|(start, end, last)| {
-                let count = last.takes.len();
+            .filter_map(|(start, end, lanes)| {
+                let count = lanes.len();
                 let left = self.x_of(start as f64).max(self.lanes_left());
                 let right = self.x_of(end as f64).min(self.lanes_right());
                 let width = badge_width(count);
@@ -986,7 +1008,7 @@ impl Timeline<'_> {
             return Hit::Lane;
         }
         let at = self.frames_at(p.x);
-        let Some(clip) = track.clips.iter().rev().find(|c| !c.take_erased(c.take) && at >= c.start as f64 && at < c.end() as f64) else {
+        let Some(clip) = track.clips.iter().rev().find(|c| (c.lane.is_none() || c.lane_on) && at >= c.start as f64 && at < c.end() as f64) else {
             return Hit::Lane;
         };
         let left = self.x_of(clip.start as f64);
@@ -1063,8 +1085,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                     Hit::Envelope(target, Some(which), ..) => Some(Message::DropPoint { target, which }),
                     Hit::Envelope(..) => None,
                     Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Edge(clip, _) => Some(Message::DeleteClip(clip.id)),
-                    Hit::Take(clip, take) => Some(Message::EraseTake { clip: clip.id, take }),
+                    Hit::Take(clip, _) => Some(Message::EraseTake(clip.id)),
                     Hit::TakeHeader(track, take) => Some(Message::TakeMenu { track: track.id, take, at: Point::new(bounds.x + p.x, bounds.y + p.y) }),
+                    Hit::Folder(track) => Some(Message::TakesMenu { track: track.id, at: Point::new(bounds.x + p.x, bounds.y + p.y) }),
                     _ if self.meter_at(p).is_some() => self.meter_at(p).map(|track| Message::MeterMenu { track, at: Some(Point::new(bounds.x + p.x, bounds.y + p.y)) }),
                     _ => self.track_header_at(p).map(|track| Message::TrackMenu {
                         track: track.id,
@@ -1123,9 +1146,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Slice { from: p, to: p });
                         Some(Message::Refresh)
                     }
-                    (Tool::Pencil | Tool::Comp, Hit::Take(clip, take)) if state.modifiers.alt() => {
-                        let from = clip.offset as i64 + clip.takes.get(take).copied().unwrap_or(0);
-                        state.drag = Some(Drag::SlideTake { clip: clip.id, take, grab: self.frames_at(p.x) as f64, from, length: clip.source.frames.len() as i64 });
+                    (Tool::Pencil | Tool::Comp, Hit::Take(clip, _)) if state.modifiers.alt() => {
+                        let from = clip.offset as i64;
+                        state.drag = Some(Drag::SlideTake { clip: clip.id, grab: self.frames_at(p.x) as f64, from, length: clip.source.frames.len() as i64 });
                         Some(Message::Refresh)
                     }
                     (Tool::Pencil | Tool::Comp, Hit::Take(clip, take)) => {
@@ -1137,31 +1160,23 @@ impl canvas::Program<Message> for Timeline<'_> {
                         state.drag = Some(Drag::Comp { clip: clip.id, track: self.project.tracks[index].id, take, from: at, to: at, band });
                         Some(Message::Refresh)
                     }
-                    (Tool::Comp, Hit::Clip(clip) | Hit::Grip(clip, _)) if clip.has_takes() => {
+                    (Tool::Comp, Hit::Clip(clip) | Hit::Grip(clip, _)) if clip.lane.is_some() => {
                         let closed = self.project.track_of(clip.id).filter(|track| !track.takes_open);
                         closed.map(|track| Message::ToggleTakes(track.id))
                     }
                     (Tool::Comp, Hit::Clip(_) | Hit::Grip(..)) => None,
-                    (Tool::Mute, Hit::Take(clip, take)) => {
-                        let muted = !clip.take_muted(take);
-                        state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id], take: Some(take) });
-                        Some(Message::PaintMuteTake { clip: clip.id, take, muted })
-                    }
                     (Tool::Mute, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
                         let muted = !clip.muted;
-                        state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id], take: None });
+                        state.drag = Some(Drag::Paint { muted: Some(muted), touched: vec![clip.id] });
                         Some(Message::PaintMute { clip: clip.id, muted })
                     }
-                    (Tool::Delete, Hit::Take(clip, take)) => {
-                        state.drag = Some(Drag::Paint { muted: None, touched: vec![clip.id], take: Some(take) });
-                        Some(Message::PaintEraseTake { clip: clip.id, take })
-                    }
                     (Tool::Delete, Hit::Clip(clip) | Hit::Grip(clip, _)) => {
-                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new(), take: None });
+                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
                         Some(Message::PaintDelete(clip.id))
                     }
+                    (Tool::Mute | Tool::Delete, Hit::Take(..)) => None,
                     (Tool::Mute | Tool::Delete, Hit::Lane) => {
-                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new(), take: None });
+                        state.drag = Some(Drag::Paint { muted: None, touched: Vec::new() });
                         None
                     }
                     (_, Hit::Scrollbar) => {
@@ -1300,10 +1315,10 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let range = (here != *anchor).then(|| (here.min(*anchor), here.max(*anchor)));
                         (Captured, (range != self.loop_range).then_some(Message::SetLoop(range)))
                     }
-                    Drag::SlideTake { clip, take, grab, from, length } => {
+                    Drag::SlideTake { clip, grab, from, length } => {
                         let moved = self.frames_at(p.x) as f64 - *grab;
                         let offset = (*from - moved.round() as i64).clamp(0, (*length - 1).max(0));
-                        (Captured, Some(Message::SlideTake { clip: *clip, take: *take, offset }))
+                        (Captured, Some(Message::SlideTake { clip: *clip, offset }))
                     }
                     Drag::Comp { to, .. } => {
                         *to = self.snap(self.frames_at(p.x), free);
@@ -1414,28 +1429,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         *to = p;
                         (Captured, Some(Message::Refresh))
                     }
-                    Drag::Paint { muted: None, touched, take: Some(lane) } => {
-                        let Hit::Take(clip, take) = self.hit(p) else {
-                            return (Captured, None);
-                        };
-                        if take != *lane || touched.contains(&clip.id) {
-                            return (Captured, None);
-                        }
-                        touched.push(clip.id);
-                        (Captured, Some(Message::PaintEraseTake { clip: clip.id, take }))
-                    }
-                    Drag::Paint { muted, touched, take: Some(lane) } => {
-                        let Hit::Take(clip, take) = self.hit(p) else {
-                            return (Captured, None);
-                        };
-                        if take != *lane || touched.contains(&clip.id) {
-                            return (Captured, None);
-                        }
-                        touched.push(clip.id);
-                        let muted = *muted.get_or_insert(!clip.take_muted(take));
-                        (Captured, Some(Message::PaintMuteTake { clip: clip.id, take, muted }))
-                    }
-                    Drag::Paint { muted, touched, take: None } => {
+                    Drag::Paint { muted, touched, .. } => {
                         let (Hit::Clip(clip) | Hit::Grip(clip, _) | Hit::Take(clip, _)) = self.hit(p) else {
                             return (Captured, None);
                         };
@@ -1481,7 +1475,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                 Some(Drag::SlideTake { .. }) => (Captured, Some(Message::Refresh)),
                 Some(Drag::Comp { clip, track, take, from, to, .. }) => {
                     let message = match from == to {
-                        true => Message::UseTake(clip, take),
+                        true => Message::UseTake(clip),
                         false => Message::Comp { track, take, from: from.min(to), to: from.max(to) },
                     };
                     (Captured, Some(message))
@@ -1507,7 +1501,8 @@ impl canvas::Program<Message> for Timeline<'_> {
                         .into_iter()
                         .map(|(row, at)| (self.project.tracks[row].id, at))
                         .collect();
-                    (Captured, Some(Message::Slice { cuts }))
+                    let lane = self.track_at(from.y).filter(|_| self.slice_line(from, to, free).0 == self.slice_line(from, to, free).1).and_then(|row| self.take_row_at(row, from.y));
+                    (Captured, Some(Message::Slice { cuts, lane }))
                 }
                 Some(_) => (Captured, None),
                 None => (Ignored, None),
@@ -1863,7 +1858,7 @@ impl Timeline<'_> {
             let track_colour = if track.muted { p.text_faint } else { self.colour_of(i) };
             let clips_height = self.clips_height(track);
             let badges = self.take_badges(i);
-            for clip in track.clips.iter().filter(|clip| !clip.take_erased(clip.take)) {
+            for clip in track.clips.iter().filter(|clip| clip.lane.is_none() || clip.lane_on) {
                 let colour = if clip.is_silent() { p.text_faint } else { track_colour };
                 self.draw_clip(frame, size, clip, top, clips_height, colour, &badges);
             }
@@ -2104,25 +2099,26 @@ impl Timeline<'_> {
             Stroke::default().with_color(theme::mix(p.background, colour, 0.5)).with_width(1.0)
         };
         frame.stroke(&body, outline);
-        self.draw_fades_and_grips(frame, clip, colour);
+        if self.clip_box(clip).is_some_and(|shape| (shape.top - self.lanes_top() - top).abs() < 0.5) {
+            self.draw_fades_and_grips(frame, clip, colour);
+        }
 
         let title_on_canvas = Rectangle::new(
             Point::new(self.lanes_left() + shown_left, self.lanes_top() + top),
             Size::new(shown_width, self.palette.clip_title_height),
         );
         let lanes_on_canvas = Rectangle::new(Point::new(self.lanes_left(), self.lanes_top()), size);
-        let continues_a_folder = self.project.track_of(clip.id).is_some_and(|track| track.clips.iter().any(|earlier| follows_in_folder(earlier, clip)));
         let name_from = left.max(0.0);
         let under_badge = badges.iter().find(|(badge, _)| (name_from - 1.0..right).contains(&(badge.x - self.lanes_left() - BADGE_INSET)));
         let name_inset = under_badge.map_or(0.0, |(badge, _)| badge.width + BADGE_INSET);
-        let title = match (clip.is_stretched(), clip.waiting_for_stretch(), continues_a_folder) {
-            (_, _, true) => format!("take {}", clip.take + 1),
-            (false, _, false) => clip.called().to_string(),
-            (true, false, false) => format!("{}  {:.0}%", clip.called(), clip.stretch * 100.0),
-            (true, true, false) => format!("{}  {:.0}%  stretching…", clip.called(), clip.stretch * 100.0),
-        } + &if clip.has_takes() && !continues_a_folder { format!("  ·  take {}", clip.take + 1) } else { String::new() };
+        let called = clip.lane.map_or_else(|| clip.called().to_string(), |lane| format!("take {}", lane + 1));
+        let title = match (clip.is_stretched(), clip.waiting_for_stretch()) {
+            (false, _) => called,
+            (true, false) => format!("{called}  {:.0}%", clip.stretch * 100.0),
+            (true, true) => format!("{called}  {:.0}%  stretching…", clip.stretch * 100.0),
+        };
         let room = right.min(size.width) - name_from - name_inset - 12.0;
-        let title = match (clip.has_takes(), (room / NAME_LETTER).max(0.0) as usize) {
+        let title = match (clip.lane.is_some(), (room / NAME_LETTER).max(0.0) as usize) {
             (false, _) => title,
             (true, 0) => String::new(),
             (true, most) => shorten(&title, most),
@@ -2155,26 +2151,13 @@ impl Timeline<'_> {
             }
             frame.fill_rectangle(Point::new(0.0, top), Size::new(size.width, tall), theme::mix(p.background, p.panel, 0.5));
             frame.fill_rectangle(Point::new(0.0, top + tall - 1.0), Size::new(size.width, 1.0), p.line);
-            let box_top = top + TAKE_LANE_INSET;
-            let box_height = tall - TAKE_LANE_INSET * 2.0;
-            for clip in track.clips.iter().filter(|clip| clip.takes.len() > take && !clip.is_notes() && !clip.take_erased(take)) {
-                let left = self.x_of(clip.start as f64) - self.lanes_left();
-                let right = self.x_of(clip.end() as f64) - self.lanes_left();
-                if right < 0.0 || left > size.width {
-                    continue;
-                }
-                let (from_x, to_x) = (left.max(0.0), right.min(size.width));
-                let colour = if clip.muted || clip.take_muted(take) { p.text_faint } else { track_colour };
-                let chosen = take == clip.take;
-                let span = Size::new((to_x - from_x).max(1.0), box_height);
-                frame.fill_rectangle(Point::new(from_x, box_top), span, theme::mix(p.background, colour, if chosen { 0.3 } else { 0.1 }));
-                if chosen {
-                    frame.stroke(&Path::rectangle(Point::new(from_x, box_top), span), Stroke::default().with_color(colour).with_width(1.0));
-                }
-                if let Some(offset) = clip.take_offset(take) {
-                    let tone = if chosen { colour } else { theme::mix(p.background, colour, 0.45) };
-                    self.draw_waveform(frame, clip, offset, left, from_x, to_x, box_top + 1.0, box_height - 2.0, tone);
-                }
+            for clip in track.clips.iter().filter(|clip| clip.lane == Some(take) && !clip.is_notes()) {
+                let colour = match (clip.muted, clip.lane_on) {
+                    (true, _) => p.text_faint,
+                    (false, true) => track_colour,
+                    (false, false) => theme::mix(p.background, track_colour, 0.5),
+                };
+                self.draw_clip(frame, size, clip, top, tall, colour, &[]);
             }
         }
     }
@@ -2720,15 +2703,12 @@ fn shorten(name: &str, most: usize) -> String {
     }
 }
 
-fn follows_in_folder(earlier: &Clip, later: &Clip) -> bool {
-    earlier.has_takes() && earlier.end() == later.start && Arc::ptr_eq(&earlier.source, &later.source) && earlier.takes.len() == later.takes.len()
-}
 
 fn open_take_lanes(track: &Track) -> usize {
     if !track.takes_open {
         return 0;
     }
-    track.clips.iter().filter(|clip| clip.has_takes() && !clip.is_notes()).map(|clip| clip.takes.len()).max().unwrap_or(0)
+    crate::takes::lane_rows(track)
 }
 
 fn badge_label(count: usize) -> String {
@@ -3161,10 +3141,8 @@ mod take_folders {
         let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
         let Ok(Outcome::Track(drums)) = app.project.apply(Command::AddTrack { name: "Drums".into() }) else { panic!() };
         let source = Arc::new(Source::from_frames("Vox (take 14)", vec![[0.2, 0.2]; pass as usize * PASSES]));
-        let Ok(Outcome::Clip(clip)) = app.project.apply(Command::AddClip { track: vox, source, start: 0 }) else { panic!() };
-        app.project.apply(Command::TrimClip { clip, offset: pass * (PASSES as Frames - 1), len: pass }).unwrap();
-        let offsets = (0..PASSES).map(|at| at as i64 * pass as i64).collect();
-        app.project.apply(Command::SetTakes { clip, offsets, active: 0 }).unwrap();
+        let offsets: Vec<i64> = (0..PASSES).map(|at| at as i64 * pass as i64).collect();
+        crate::takes::lay_take(&mut app.project, vox, source, 0, pass, &offsets, 0).unwrap();
         (app, vox, drums)
     }
 
@@ -3172,19 +3150,20 @@ mod take_folders {
     fn deleting_a_take_drops_it_from_the_folder_and_undo_brings_it_back() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::UseTakeOnTrack(vox, 4));
-        let clip = |app: &App| app.project.track(vox).unwrap().clips[0].clone();
-        let heard = clip(&app).offset;
+        let playing = |app: &App| app.project.track(vox).unwrap().clips.iter().find(|clip| !clip.is_silent()).cloned().unwrap();
+        let count = |app: &App| crate::takes::take_count(app.project.track(vox).unwrap());
+        let heard = playing(&app).offset;
         let _ = app.update(crate::Message::DeleteTake(vox, 2));
-        assert_eq!(clip(&app).takes.len(), PASSES - 1, "the take was not removed");
-        assert_eq!(clip(&app).take, 3, "the playing take lost its place after an earlier one went");
-        assert_eq!(clip(&app).offset, heard, "the clip now plays different audio");
+        assert_eq!(count(&app), PASSES - 1, "the take was not removed");
+        assert_eq!(playing(&app).lane, Some(3), "the playing take lost its place after an earlier one went");
+        assert_eq!(playing(&app).offset, heard, "the clip now plays different audio");
         let _ = app.update(crate::Message::DeleteTake(vox, 3));
-        assert_eq!(clip(&app).takes.len(), PASSES - 2);
-        assert_eq!(clip(&app).take, 2, "deleting the playing take should fall back to the one before");
+        assert_eq!(count(&app), PASSES - 2);
+        assert_eq!(playing(&app).lane, Some(2), "deleting the playing take should fall back to the one before");
         let _ = app.update(crate::Message::Undo);
         let _ = app.update(crate::Message::Undo);
-        assert_eq!(clip(&app).takes.len(), PASSES);
-        assert_eq!(clip(&app).take, 4);
+        assert_eq!(count(&app), PASSES);
+        assert_eq!(playing(&app).lane, Some(4));
     }
 
     fn timeline_of(app: &App) -> Timeline<'_> {
@@ -3234,6 +3213,7 @@ mod take_folders {
     fn an_open_folder_gives_every_take_a_readable_lane_under_the_comp() {
         let (mut app, vox, drums) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
+        app.tool = Tool::Comp;
         let below = TOP + TALL + PASSES as f32 * TALL + TALL / 2.0;
         let timeline = timeline_of(&app);
         let track = app.project.track(vox).unwrap();
@@ -3253,7 +3233,7 @@ mod take_folders {
     fn swiping_a_lane_comps_that_take_and_a_click_picks_it() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
-        app.tool = Tool::Pencil;
+        app.tool = Tool::Comp;
         let timeline = timeline_of(&app);
         let mut state = Interaction::default();
         let y = TOP + TALL + 3.0 * TALL + TALL / 2.0;
@@ -3267,35 +3247,33 @@ mod take_folders {
         assert!(matches!(swiped, Some(crate::Message::Comp { track, take: 3, from, to }) if track == vox && from < to), "a swipe on lane 4 did not comp take 4");
         let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 60.0));
         let (_, clicked) = canvas::Program::update(&timeline, &mut state, released, CANVAS, cursor(LEFT + 60.0));
-        assert!(matches!(clicked, Some(crate::Message::UseTake(_, 3))), "a click on lane 4 did not pick take 4");
+        assert!(matches!(clicked, Some(crate::Message::UseTake(_))), "a click on lane 4 did not pick take 4");
     }
 
     #[test]
-    fn the_mute_tool_on_a_take_lane_mutes_only_that_take() {
+    fn the_mute_tool_on_a_take_lane_mutes_only_that_clip() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
         app.tool = Tool::Mute;
-        let clip = app.project.track(vox).unwrap().clips[0].id;
+        let clip = app.project.track(vox).unwrap().clips.iter().find(|clip| clip.lane == Some(2)).unwrap().id;
         let timeline = timeline_of(&app);
         let mut state = Interaction::default();
         let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
         let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
         let (_, muted) = canvas::Program::update(&timeline, &mut state, press, CANVAS, mouse::Cursor::Available(Point::new(CANVAS.x + LEFT + 50.0, CANVAS.y + y)));
         let Some(message) = muted else { panic!("muting on a take lane did nothing") };
-        assert!(matches!(message, crate::Message::PaintMuteTake { clip: id, take: 2, muted: true } if id == clip));
+        assert!(matches!(message, crate::Message::PaintMute { clip: id, muted: true } if id == clip));
         let _ = app.update(message);
-        let found = app.project.clip(clip).unwrap();
-        assert_eq!(found.muted_takes, vec![2]);
-        assert!(!found.muted, "the whole piece was muted, not just the take");
+        let clips = &app.project.track(vox).unwrap().clips;
+        assert_eq!(clips.iter().filter(|clip| clip.muted).map(|clip| clip.lane).collect::<Vec<_>>(), [Some(2)], "another take was muted too");
     }
 
     #[test]
-    fn alt_dragging_a_take_lane_slides_only_that_take() {
+    fn alt_dragging_a_take_lane_with_the_comp_tool_slides_only_that_take() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
-        app.tool = Tool::Pencil;
-        let clip = app.project.track(vox).unwrap().clips[0].clone();
-        let was: Vec<i64> = clip.takes.iter().map(|shift| clip.offset as i64 + shift).collect();
+        app.tool = Tool::Comp;
+        let was: Vec<Frames> = app.project.track(vox).unwrap().clips.iter().map(|clip| clip.offset).collect();
         let timeline = timeline_of(&app);
         let mut state = Interaction { modifiers: keyboard::Modifiers::ALT, ..Interaction::default() };
         let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
@@ -3305,84 +3283,82 @@ mod take_folders {
         let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 50.0));
         let (_, slid) = canvas::Program::update(&timeline, &mut state, moved, CANVAS, cursor(LEFT + 150.0));
         let Some(message) = slid else { panic!("alt-dragging a take lane did nothing") };
-        assert!(matches!(message, crate::Message::SlideTake { take: 2, .. }), "{message:?}");
+        assert!(matches!(message, crate::Message::SlideTake { .. }), "{message:?}");
         let _ = app.update(message);
-        let now = app.project.clip(clip.id).unwrap();
-        let after: Vec<i64> = now.takes.iter().map(|shift| now.offset as i64 + shift).collect();
+        let after: Vec<Frames> = app.project.track(vox).unwrap().clips.iter().map(|clip| clip.offset).collect();
         assert!(after[2] < was[2], "dragging right did not move take 3's audio later");
         assert_eq!((after[0], after[1]), (was[0], was[1]), "the other takes moved too");
-        assert_eq!(now.take, clip.take, "sliding changed which take plays");
     }
 
     #[test]
-    fn the_eraser_on_a_take_lane_removes_that_take_from_that_piece_and_leaves_the_other_takes() {
+    fn the_eraser_on_a_take_lane_deletes_that_clip_and_leaves_the_other_takes() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
         app.tool = Tool::Delete;
-        let clip = app.project.track(vox).unwrap().clips[0].id;
+        let clip = app.project.track(vox).unwrap().clips.iter().find(|clip| clip.lane == Some(2)).unwrap().id;
         let timeline = timeline_of(&app);
         let mut state = Interaction::default();
         let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
         let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
         let (_, erased) = canvas::Program::update(&timeline, &mut state, press, CANVAS, mouse::Cursor::Available(Point::new(CANVAS.x + LEFT + 50.0, CANVAS.y + y)));
-        assert!(matches!(erased, Some(crate::Message::PaintEraseTake { clip: id, take: 2 }) if id == clip), "erasing on a take lane did not pick that lane");
+        assert!(matches!(erased, Some(crate::Message::PaintDelete(id)) if id == clip), "erasing on a take lane did not pick that clip");
         let _ = app.update(erased.unwrap());
-        let found = app.project.clip(clip).expect("the whole piece was deleted");
-        assert!(found.take_erased(2), "take 3 was not erased");
-        assert!((0..found.takes.len()).filter(|take| *take != 2).all(|take| !found.take_erased(take)), "other takes were erased too");
+        assert!(app.project.clip(clip).is_none(), "take 3 was not deleted");
+        assert_eq!(crate::takes::take_count(app.project.track(vox).unwrap()), PASSES - 1, "other takes went too");
         let _ = app.update(crate::Message::Undo);
-        assert!(!app.project.clip(clip).unwrap().take_erased(2), "undo did not bring the take back");
+        assert!(app.project.clip(clip).is_some(), "undo did not bring the take back");
     }
 
     #[test]
-    fn cutting_a_part_out_with_the_takes_open_leaves_the_other_takes_there() {
+    fn the_razor_on_a_take_lane_cuts_only_that_take() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
-        let clip = app.project.track(vox).unwrap().clips[0].clone();
-        let Some(Outcome::Clip(part)) = app.transact(None, |project| project.apply(Command::SplitClip { clip: clip.id, at: clip.start + clip.len / 2 })) else { panic!("the cut failed") };
-        let _ = app.update(crate::Message::DeleteClip(part));
-        let found = app.project.clip(part).expect("the cut part went from every take");
-        assert!(found.take_erased(found.take), "the playing take still has the part");
-        assert!(found.is_silent(), "the erased part still sounds");
-        assert_eq!((0..found.takes.len()).filter(|take| found.take_erased(*take)).count(), 1, "more than one take lost the part");
-        let left = app.project.clip(clip.id).unwrap();
-        assert!(!left.take_erased(left.take), "the part before the cut was erased too");
+        let pass = app.project.rate as Frames * 2;
+        let _ = app.update(crate::Message::Slice { cuts: vec![(vox, pass / 2)], lane: Some(3) });
+        let clips = &app.project.track(vox).unwrap().clips;
+        assert_eq!(clips.iter().filter(|clip| clip.lane == Some(3)).count(), 2, "take 4 was not cut");
+        assert_eq!(clips.len(), PASSES + 1, "another take was cut too");
     }
 
     #[test]
-    fn with_the_takes_folded_the_cut_part_goes_whole() {
-        let (mut app, vox, _) = a_looped_vocal_and_drums();
-        let clip = app.project.track(vox).unwrap().clips[0].clone();
-        let Some(Outcome::Clip(part)) = app.transact(None, |project| project.apply(Command::SplitClip { clip: clip.id, at: clip.start + clip.len / 2 })) else { panic!("the cut failed") };
-        let _ = app.update(crate::Message::DeleteClip(part));
-        assert!(app.project.clip(part).is_none(), "a folded stack kept the deleted part");
-    }
-
-
-    #[test]
-    fn an_erased_part_is_a_gap_nothing_can_land_on_and_it_stops_being_selected() {
+    fn dragging_the_edge_of_a_take_clip_answers_as_an_edge_and_the_razor_aims_at_its_lane() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
         let _ = app.update(crate::Message::ToggleTakes(vox));
-        let clip = app.project.track(vox).unwrap().clips[0].clone();
+        app.tool = Tool::Pencil;
+        let y = TOP + TALL + 2.0 * TALL + TALL / 2.0;
+        let timeline = timeline_of(&app);
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, y)), Hit::Clip(clip) if clip.lane == Some(2)), "the pencil does not treat a take as a clip");
+        let clip = app.project.track(vox).unwrap().clips.iter().find(|clip| clip.lane == Some(2)).unwrap();
+        let right = timeline.x_of(clip.end() as f64);
+        assert!(matches!(timeline.hit(Point::new(right - 2.0, y)), Hit::Edge(found, Edge::Out) if found.lane == Some(2)), "a take has no edge to drag");
+    }
+
+    #[test]
+    fn with_the_takes_folded_deleting_a_part_clears_every_take_there() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let playing = app.project.track(vox).unwrap().clips.iter().find(|clip| !clip.is_silent()).unwrap().id;
+        let _ = app.update(crate::Message::DeleteClip(playing));
+        assert!(app.project.track(vox).unwrap().clips.is_empty(), "a folded stack kept the deleted part");
+    }
+
+
+    #[test]
+    fn a_deleted_take_clip_is_a_gap_nothing_can_land_on_and_it_stops_being_selected() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        app.tool = Tool::Comp;
+        let clip = app.project.track(vox).unwrap().clips.iter().find(|clip| !clip.is_silent()).unwrap().clone();
+        let lane_number = clip.lane.unwrap();
         app.choose([clip.id]);
         let _ = app.update(crate::Message::Delete);
-        assert!(app.selection.is_empty(), "the erased part stayed selected");
-        let lane = TOP + TALL + clip.take as f32 * TALL + TALL / 2.0;
+        assert!(app.selection.is_empty(), "the deleted part stayed selected");
+        let lane = TOP + TALL + lane_number as f32 * TALL + TALL / 2.0;
         let comp_row = TOP + TALL / 2.0 + 8.0;
-        let other = TOP + TALL + ((clip.take + 1) % clip.takes.len()) as f32 * TALL + TALL / 2.0;
+        let other = TOP + TALL + (lane_number + 1) as f32 * TALL + TALL / 2.0;
         let timeline = timeline_of(&app);
-        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, lane)), Hit::Lane), "the erased lane still answers as a take");
+        assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, lane)), Hit::Lane), "the deleted lane still answers as a take");
         assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, comp_row)), Hit::Lane), "the comp row still answers as a clip");
         assert!(matches!(timeline.hit(Point::new(LEFT + 100.0, other)), Hit::Take(..)), "the other take went too");
-    }
-    #[test]
-    fn erasing_every_take_of_a_part_removes_the_part() {
-        let (mut app, vox, _) = a_looped_vocal_and_drums();
-        let clip = app.project.track(vox).unwrap().clips[0].clone();
-        for take in 0..clip.takes.len() {
-            app.erase_take(clip.id, take, None);
-        }
-        assert!(app.project.clip(clip.id).is_none());
     }
 }
 

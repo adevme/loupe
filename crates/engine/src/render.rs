@@ -2647,18 +2647,18 @@ mod take_mute {
     use crate::source::Source;
 
     #[test]
-    fn muting_the_playing_take_silences_the_piece_and_muting_another_does_not() {
+    fn only_the_take_that_is_on_sounds_and_a_clip_moved_off_the_track_stays_as_it_sounded() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(other)) = p.apply(Command::AddTrack { name: "Other".into() }) else { panic!() };
         let source = Arc::new(Source::from_frames("take", vec![[0.5, 0.5]; 3_000]));
         let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
-        p.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
-        p.apply(Command::SetTakes { clip, offsets: vec![0, 1_000, 2_000], active: 1 }).unwrap();
-        p.apply(Command::SetTakeMuted { clip, take: 0, muted: true }).unwrap();
-        assert!(!p.clip(clip).unwrap().is_silent(), "muting a take that is not playing silenced the piece");
-        p.apply(Command::SetTakeMuted { clip, take: 1, muted: true }).unwrap();
-        assert!(p.clip(clip).unwrap().is_silent(), "muting the playing take left the piece sounding");
-        p.apply(Command::SetTakes { clip, offsets: vec![1_000, 2_000], active: 0 }).unwrap();
-        assert_eq!(p.clip(clip).unwrap().muted_takes, vec![0], "the muted take lost its mute when a take before it was removed");
+        p.apply(Command::SetClipLane { clip, lane: Some(0), on: true }).unwrap();
+        assert!(!p.clip(clip).unwrap().is_silent());
+        p.apply(Command::SetClipLane { clip, lane: Some(0), on: false }).unwrap();
+        assert!(p.clip(clip).unwrap().is_silent(), "a take that is off still sounds");
+        p.apply(Command::MoveClip { clip, track: other, start: 0 }).unwrap();
+        let moved = p.clip(clip).unwrap();
+        assert!(moved.lane.is_none() && moved.is_silent(), "a quiet take started sounding on the other track");
     }
 }

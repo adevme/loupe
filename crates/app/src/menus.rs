@@ -44,6 +44,7 @@ impl App {
             Overlay::About => self.centred(self.about_sheet()),
             Overlay::TrackMenu { track, at } => self.floating(*at, self.track_menu(*track)),
             Overlay::TakeMenu { track, take, at } => self.floating(*at, self.take_menu(*track, *take)),
+            Overlay::TakesMenu { track, at } => self.floating(*at, self.takes_menu(*track)),
             Overlay::MixerMenu { at } => self.floating(*at, self.mixer_menu()),
             Overlay::MeterMenu { track, at } => self.floating(*at, self.meter_menu(*track)),
             Overlay::Exported(folder, note) => self.centred(self.exported_sheet(folder, note.as_deref())),
@@ -77,10 +78,7 @@ impl App {
 
     fn under_the_bar(&self, left: f32) -> Point {
         let shift = match self.screen {
-            Screen::Home => {
-                let width = self.room_for_the_overlay().width;
-                ((width - crate::home::PAGE_WIDTH) / 2.0).max(crate::home::PAGE_SIDE) - HOME_BAR_PAD
-            }
+            Screen::Home => crate::home::PAGE_SIDE - HOME_BAR_PAD,
             _ => 0.0,
         };
         Point::new(left + shift, self.palette.top_bar_height - MENU_OVERLAPS_BAR)
@@ -217,7 +215,11 @@ impl App {
 
 
     fn take_menu(&self, track: TrackId, take: usize) -> Element<'_, Message> {
-        self.menu(vec![self.item("Pull out to its own track", "", Some(Message::PullOutTake(track, take)))])
+        self.menu(vec![self.item("Move take to its own track", "", Some(Message::PullOutTake(track, take)))])
+    }
+
+    fn takes_menu(&self, track: TrackId) -> Element<'_, Message> {
+        self.menu(vec![self.item("Move all takes to their own tracks", "", Some(Message::MoveAllTakes(track)))])
     }
 
     fn track_menu(&self, track: TrackId) -> Element<'_, Message> {
@@ -250,7 +252,7 @@ impl App {
         items.push(self.item(if keys { "Record notes from keys ✓" } else { "Record notes from keys" }, "", Some(Message::ToggleRecordsNotes(track))));
         let printing = self.project.track(track).is_some_and(|t| t.print_takes);
         items.push(self.item(if printing { "Keep Rec plugins in takes ✓" } else { "Keep Rec plugins in takes" }, "", Some(Message::TogglePrintTakes(track))));
-        if let Some(found) = self.project.track(track).filter(|t| t.clips.iter().any(|clip| clip.has_takes())) {
+        if let Some(found) = self.project.track(track).filter(|t| t.clips.iter().any(|clip| clip.lane.is_some())) {
             items.push(self.item(if found.takes_open { "Show takes ✓" } else { "Show takes" }, "", Some(Message::ToggleTakes(track))));
             let unused = crate::takes::unused_takes(found) > 0;
             items.push(self.item("Delete unused takes", "", unused.then_some(Message::DeleteUnusedTakes(track))));

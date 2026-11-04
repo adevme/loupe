@@ -89,6 +89,8 @@ pub struct SavedClip {
     pub take: usize,
     pub muted_takes: Vec<usize>,
     pub erased_takes: Vec<usize>,
+    pub lane: Option<usize>,
+    pub lane_on: bool,
     pub called: Option<String>,
 }
 
@@ -215,10 +217,12 @@ impl SavedProject {
                             fade_out: clip.fade_out,
                             notes: clip.notes.as_ref().map(|notes| (clip.source.name.clone(), notes.to_vec())),
                             stretch: clip.stretch,
-                            takes: clip.takes.clone(),
-                            take: clip.take,
-                            muted_takes: clip.muted_takes.clone(),
-                            erased_takes: clip.erased_takes.clone(),
+                            takes: Vec::new(),
+                            take: 0,
+                            muted_takes: Vec::new(),
+                            erased_takes: Vec::new(),
+                            lane: clip.lane,
+                            lane_on: clip.lane_on,
                             called: clip.name.clone(),
                             fx: clip
                                 .fx
@@ -286,24 +290,15 @@ impl SavedProject {
                     clip.offset,
                     clip.len,
                     clip.gain,
-                    clip.muted as u8,
+                    (clip.muted || (clip.lane.is_some() && !clip.lane_on)) as u8,
                     clip.fade_in.len,
                     clip.fade_in.curve,
                     clip.fade_out.len,
                     clip.fade_out.curve,
                     if clip.stretch == 1.0 { String::new() } else { format!(" stretch={}", clip.stretch) },
-                    if clip.takes.len() > 1 {
-                        let muted = match clip.muted_takes.is_empty() {
-                            true => String::new(),
-                            false => format!(" mutedtakes={}", clip.muted_takes.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
-                        };
-                        let erased = match clip.erased_takes.is_empty() {
-                            true => String::new(),
-                            false => format!(" erasedtakes={}", clip.erased_takes.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
-                        };
-                        format!(" takes={} take={}{muted}{erased}", clip.takes.iter().map(i64::to_string).collect::<Vec<_>>().join(","), clip.take)
-                    } else {
-                        String::new()
+                    match clip.lane {
+                        Some(lane) => format!(" lane={lane} laneon={} lanemuted={}", clip.lane_on as u8, clip.muted as u8),
+                        None => String::new(),
                     },
                     clip.notes.as_ref().map_or(String::new(), |(name, _)| format!(" name={name}"))
                 ));
@@ -490,7 +485,7 @@ impl SavedProject {
                         offset: whole("offset")?,
                         len: whole("len")?,
                         gain: number_in(&fields, "gain").ok_or_else(|| bad("the clip has no gain"))?,
-                        muted: fields.get("muted") == Some(&"1"),
+                        muted: if fields.contains_key("lane") { fields.get("lanemuted") == Some(&"1") } else { fields.get("muted") == Some(&"1") },
                         fade_in: fade_from(need("fade_in")?).ok_or_else(|| bad("the fade in is not readable"))?,
                         fade_out: fade_from(need("fade_out")?).ok_or_else(|| bad("the fade out is not readable"))?,
                         fx: Vec::new(),
@@ -503,6 +498,8 @@ impl SavedProject {
                         take: fields.get("take").and_then(|text| text.parse().ok()).unwrap_or(0),
                         muted_takes: fields.get("mutedtakes").map(|text| text.split(',').filter_map(|take| take.parse().ok()).collect()).unwrap_or_default(),
                         erased_takes: fields.get("erasedtakes").map(|text| text.split(',').filter_map(|take| take.parse().ok()).collect()).unwrap_or_default(),
+                        lane: fields.get("lane").and_then(|text| text.parse().ok()),
+                        lane_on: fields.get("laneon").is_some_and(|text| *text == "1"),
                         called: None,
                     };
                     if clip.notes.is_none() && clip.source >= saved.sources.len() {
@@ -526,6 +523,7 @@ impl SavedProject {
     pub fn build(&self, sources: &[Arc<Source>], rate: u32) -> (Project, Vec<(TrackId, f32)>) {
         let rescale = |frames: Frames| (frames as u128 * rate as u128 / self.rate.max(1) as u128) as Frames;
         let mut project = Project::new(rate);
+        let mut old_stacks = Vec::new();
         let mut heights = Vec::new();
         let _ = project.apply(Command::SetBpm(self.bpm));
         let _ = project.apply(Command::SetMasterGain(self.master));
@@ -593,16 +591,15 @@ impl SavedProject {
                 if clip.called.is_some() {
                     let _ = project.apply(Command::RenameClip { clip: id, name: clip.called.clone() });
                 }
-                if clip.takes.len() > 1 {
+                let old_takes: Option<Vec<i64>> = (clip.takes.len() > 1).then(|| {
                     let offset = rescale(clip.offset) as i64;
-                    let offsets = clip.takes.iter().map(|shift| offset + shift.signum() * rescale(shift.unsigned_abs()) as i64).collect();
-                    let _ = project.apply(Command::SetTakes { clip: id, offsets, active: clip.take });
-                    for take in &clip.muted_takes {
-                        let _ = project.apply(Command::SetTakeMuted { clip: id, take: *take, muted: true });
-                    }
-                    for take in &clip.erased_takes {
-                        let _ = project.apply(Command::SetTakeErased { clip: id, take: *take, erased: true });
-                    }
+                    clip.takes.iter().map(|shift| offset + shift.signum() * rescale(shift.unsigned_abs()) as i64).collect()
+                });
+                if let Some(offsets) = old_takes {
+                    old_stacks.push((id, offsets, clip.take, clip.muted_takes.clone(), clip.erased_takes.clone()));
+                }
+                if clip.lane.is_some() {
+                    let _ = project.apply(Command::SetClipLane { clip: id, lane: clip.lane, on: clip.lane_on });
                 }
                 for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
                     let fade = Fade { len: rescale(fade.len), curve: fade.curve };
@@ -695,6 +692,9 @@ impl SavedProject {
             if shape.lane_height.is_some() {
                 let _ = project.apply(Command::SizeEnvelopeLane { target, height: shape.lane_height });
             }
+        }
+        for (clip, offsets, active, muted, erased) in old_stacks {
+            let _ = project.spread_takes(clip, &offsets, active, &muted, &erased);
         }
         (project, heights)
     }
@@ -916,56 +916,52 @@ mod routing_round_trip {
     use crate::source::Source;
 
     #[test]
-    fn a_stacked_take_saves_with_its_own_audio_and_not_the_first_file_in_the_song() {
-        let mut p = Project::new(48_000);
-        let Ok(Outcome::Track(beat)) = p.apply(Command::AddTrack { name: "Beat".into() }) else { panic!() };
-        let Ok(Outcome::Track(vox)) = p.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
-        let tune = Arc::new(Source::from_frames("beat", vec![[0.1, 0.1]; 100]));
-        let first = Arc::new(Source::from_frames("first", vec![[0.2, 0.2]; 100]));
-        let joined = Arc::new(Source::from_frames("joined", vec![[0.3, 0.3]; 200]));
-        p.apply(Command::AddClip { track: beat, source: tune, start: 0 }).unwrap();
-        let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track: vox, source: first, start: 0 }) else { panic!() };
-        p.apply(Command::SetClipAudio { clip, source: joined.clone(), start: 0, len: 100, offsets: vec![0, 100], active: 1 }).unwrap();
-        let text = SavedProject::capture(&p, |_| None).to_text();
-        let (back, _) = SavedProject::parse(&text).unwrap().build(&p.sources, 48_000);
-        assert_eq!(back.tracks[1].clips[0].audio()[0][0], 0.3, "the stacked vocal came back as another file");
-        assert!(p.sources.iter().any(|kept| Arc::ptr_eq(kept, &joined)), "the joined file is not in the song");
-    }
-
-    #[test]
-    fn takes_follow_trims_and_splits_and_survive_a_save_and_open() {
+    fn a_song_saved_with_a_stack_opens_as_real_clips_and_plays_the_same_take() {
         let mut p = Project::new(48_000);
         let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
         let passes: Vec<[f32; 2]> = (0..3_000).map(|at| [(at / 1_000) as f32, 0.0]).collect();
         let source = Arc::new(Source::from_frames("Vocal (take 1)", passes));
         let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track, source, start: 500 }) else { panic!() };
-        p.apply(Command::TrimClip { clip, offset: 0, len: 1_000 }).unwrap();
-        p.apply(Command::SetTakes { clip, offsets: vec![0, 1_000, 2_000], active: 2 }).unwrap();
-        let found = p.clip(clip).unwrap();
-        assert_eq!((found.offset, found.take, found.takes.clone()), (2_000, 2, vec![-2_000, -1_000, 0]));
-        assert_eq!(found.audio()[found.offset as usize][0], 2.0, "the last pass plays");
-        p.apply(Command::UseTake { clip, take: 0 }).unwrap();
-        assert_eq!(p.clip(clip).unwrap().offset, 0);
-        p.apply(Command::TrimClip { clip, offset: 100, len: 900 }).unwrap();
-        p.apply(Command::SplitClip { clip, at: 1_000 }).unwrap();
-        let pieces: Vec<Clip> = p.tracks[0].clips.clone();
-        assert_eq!(pieces.len(), 2);
-        for piece in &pieces {
-            assert_eq!(piece.take_offset(1).unwrap(), piece.offset + 1_000, "every take keeps its place in time");
+        p.apply(Command::TrimClip { clip, offset: 2_000, len: 1_000 }).unwrap();
+        let mut saved = SavedProject::capture(&p, |_| None);
+        let old = &mut saved.tracks[0].clips[0];
+        old.takes = vec![-2_000, -1_000, 0];
+        old.take = 2;
+        old.muted_takes = vec![1];
+        let text = saved.to_text().replace(" muted=0", " muted=0 takes=-2000,-1000,0 take=2 mutedtakes=1");
+        let sources = vec![p.sources[0].clone()];
+        let (back, _) = SavedProject::parse(&text).unwrap().build(&sources, 48_000);
+        let clips = &back.tracks[0].clips;
+        assert_eq!(clips.len(), 3, "each take should be its own clip");
+        for (lane, clip) in clips.iter().enumerate() {
+            assert_eq!(clip.lane, Some(lane));
+            assert_eq!((clip.start, clip.len, clip.offset), (500, 1_000, lane as Frames * 1_000), "take {lane} moved");
         }
-        let right = pieces[1].id;
-        p.apply(Command::UseTake { clip: right, take: 1 }).unwrap();
-        let comped = p.clip(right).unwrap();
-        assert_eq!(comped.audio()[comped.offset as usize][0], 1.0);
-        assert!(p.apply(Command::UseTake { clip: right, take: 7 }).is_err());
-        p.apply(Command::SetTakeMuted { clip: right, take: 2, muted: true }).unwrap();
-        p.apply(Command::SetTakeErased { clip: right, take: 1, erased: true }).unwrap();
+        assert!(clips[2].lane_on && !clips[2].is_silent(), "the playing take stopped playing");
+        assert!(clips[0].is_silent() && clips[1].is_silent(), "a take that was not playing would double the vocal");
+        assert!(clips[1].muted, "the muted take lost its mute");
+    }
+
+    #[test]
+    fn a_take_clip_keeps_its_own_edits_through_a_save_and_open_and_old_loupe_hears_it_quiet() {
+        let mut p = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vocal".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("Vocal (take 1)", vec![[0.5, 0.5]; 3_000]));
+        let Ok(Outcome::Clip(first)) = p.apply(Command::AddClip { track, source: source.clone(), start: 0 }) else { panic!() };
+        let Ok(Outcome::Clip(second)) = p.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
+        p.apply(Command::SetClipLane { clip: first, lane: Some(0), on: true }).unwrap();
+        p.apply(Command::SetClipLane { clip: second, lane: Some(1), on: false }).unwrap();
+        let Ok(Outcome::Clip(right)) = p.apply(Command::SplitClip { clip: second, at: 1_000 }) else { panic!() };
+        p.apply(Command::SetStretch { clip: right, stretch: 1.5 }).unwrap();
+        assert_eq!(p.clip(first).unwrap().len, 3_000, "cutting one take cut the other");
+        assert_eq!(p.clip(first).unwrap().stretch, 1.0, "stretching one take stretched the other");
         let text = SavedProject::capture(&p, |_| None).to_text();
-        assert!(text.contains(" takes="));
+        let quiet = text.lines().filter(|line| line.starts_with("clip ") && line.contains(" muted=1") && line.contains(" laneon=0 lanemuted=0")).count();
+        assert_eq!(quiet, 2, "an older Loupe would play the takes on top of each other");
         let sources = vec![p.sources[0].clone()];
         let (back, _) = SavedProject::parse(&text).unwrap().build(&sources, 48_000);
         for (was, now) in p.tracks[0].clips.iter().zip(&back.tracks[0].clips) {
-            assert_eq!((now.offset, now.take, &now.takes, &now.muted_takes, &now.erased_takes), (was.offset, was.take, &was.takes, &was.muted_takes, &was.erased_takes));
+            assert_eq!((now.lane, now.lane_on, now.muted, now.start, now.len, now.stretch), (was.lane, was.lane_on, was.muted, was.start, was.len, was.stretch));
         }
     }
 

@@ -84,7 +84,6 @@ impl App {
         let page = column![title, rule(palette), lists].spacing(20);
         let menus = row![self.file_button(), self.view_button(), self.help_button()].spacing(8).align_y(Alignment::Center);
         let bar = container(container(menus).width(Length::Fill).max_width(PAGE_WIDTH))
-            .center_x(Length::Fill)
             .padding([0.0, PAGE_SIDE])
             .height(palette.top_bar_height)
             .align_y(Alignment::Center)
@@ -92,7 +91,7 @@ impl App {
             .style(move |_| palette.bar());
         let page = container(container(page).width(Length::Fill).max_width(PAGE_WIDTH))
             .style(move |_| container::Style { background: Some(palette.background.into()), ..Default::default() })
-            .center_x(Length::Fill)
+            .width(Length::Fill)
             .padding(iced::Padding { top: PAGE_TOP, right: PAGE_SIDE, bottom: PAGE_SIDE, left: PAGE_SIDE })
             .height(Length::Fill);
         let mut whole = column![bar, rule(palette)];
