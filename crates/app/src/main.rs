@@ -373,6 +373,8 @@ pub enum Message {
     PaintMuteTake { clip: ClipId, take: usize, muted: bool },
     SlideTake { clip: ClipId, take: usize, offset: i64 },
     PaintDelete(ClipId),
+    PaintEraseTake { clip: ClipId, take: usize },
+    EraseTake { clip: ClipId, take: usize },
     TrimClip { clip: ClipId, start: Frames, offset: Frames, len: Frames },
     StretchClip { clip: ClipId, start: Frames, len: Frames },
     Stretched { source: Arc<Source>, stretch: f64, made: Option<Arc<Source>> },
@@ -1436,7 +1438,7 @@ impl App {
             Message::Delete => {
                 let chosen: Vec<ClipId> = self.selection.iter().copied().collect();
                 if !chosen.is_empty() {
-                    self.delete_clips(chosen, None);
+                    self.delete_parts(chosen, None);
                 }
             }
             Message::Undo => {
@@ -1754,7 +1756,7 @@ impl App {
                     self.problem = Some(format!("Could not open the folder: {why}"));
                 }
             }
-            Message::DeleteClip(clip) => self.delete_clips(self.affected_by(clip), None),
+            Message::DeleteClip(clip) => self.delete_parts(self.affected_by(clip), None),
             Message::TrackMenu { track, at } => self.overlay = Overlay::TrackMenu { track, at },
             Message::MixerMenu { at } => self.overlay = Overlay::MixerMenu { at },
             Message::MeterMenu { track, at } => {
@@ -2084,7 +2086,9 @@ impl App {
             Message::PaintMuteTake { clip, take, muted } => {
                 self.edit(Some(Run::Paint), Command::SetTakeMuted { clip, take, muted });
             }
-            Message::PaintDelete(clip) => self.delete_clips(self.affected_by(clip), Some(Run::Paint)),
+            Message::PaintDelete(clip) => self.delete_parts(self.affected_by(clip), Some(Run::Paint)),
+            Message::PaintEraseTake { clip, take } => self.erase_take(clip, take, Some(Run::Paint)),
+            Message::EraseTake { clip, take } => self.erase_take(clip, take, None),
             Message::StretchClip { clip, start, len } => self.stretch_clip(clip, start, len),
             Message::Stretched { source, stretch, made } => self.stretched(source, stretch, made),
             Message::ChainName(spot, typed) => {

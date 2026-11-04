@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use loupe_engine::{ClipId, Command, Frames, Outcome, Source, TrackId};
+use loupe_engine::{ClipId, Command, CommandError, Frames, Outcome, Source, TrackId};
 
 use crate::{App, Run};
 
@@ -39,6 +39,30 @@ impl App {
             .collect();
         clips.sort_by_key(|(start, _)| *start);
         clips.into_iter().map(|(_, id)| id).collect()
+    }
+
+    pub(crate) fn delete_parts(&mut self, clips: Vec<ClipId>, run: Option<Run>) {
+        self.transact(run, |project| {
+            for clip in clips {
+                let shown_as_lanes = project.track_of(clip).is_some_and(|track| track.takes_open) && project.clip(clip).is_some_and(|found| found.has_takes());
+                match (shown_as_lanes, project.clip(clip).map(|found| found.take)) {
+                    (true, Some(take)) => erase_take_from_piece(project, clip, take)?,
+                    _ => {
+                        project.apply(Command::DeleteClip(clip))?;
+                    }
+                }
+            }
+            Ok(Outcome::Done)
+        });
+        self.forget_gone_clips();
+    }
+
+    pub(crate) fn erase_take(&mut self, clip: ClipId, take: usize, run: Option<Run>) {
+        self.transact(run, |project| {
+            erase_take_from_piece(project, clip, take)?;
+            Ok(Outcome::Done)
+        });
+        self.forget_gone_clips();
     }
 
     pub(crate) fn delete_clips(&mut self, clips: Vec<ClipId>, run: Option<Run>) {
@@ -170,4 +194,13 @@ fn unused_file(folder: &std::path::Path, name: &str) -> PathBuf {
         .map(|number| folder.join(format!("{name} (consolidated {number}).wav")))
         .find(|file| !file.exists())
         .unwrap_or(first)
+}
+
+fn erase_take_from_piece(project: &mut loupe_engine::Project, clip: ClipId, take: usize) -> Result<(), CommandError> {
+    project.apply(Command::SetTakeErased { clip, take, erased: true })?;
+    let nothing_left = project.clip(clip).is_some_and(|found| (0..found.takes.len()).all(|lane| found.take_erased(lane)));
+    if nothing_left {
+        project.apply(Command::DeleteClip(clip))?;
+    }
+    Ok(())
 }

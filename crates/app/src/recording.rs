@@ -74,6 +74,8 @@ impl App {
         }
         self.problem = None;
         self.notice = None;
+        let replaced: Vec<TrackId> = if punch.is_none() { tracks.iter().map(|(track, _)| *track).collect() } else { Vec::new() };
+        self.engine.keep_quiet_while_recording(&replaced, &self.project);
         let looping = self.loop_range.filter(|(from, to)| punch.is_none() && to > from && (!self.playing || (*from..*to).contains(&self.playhead)));
         self.engine.set_endless(looping.is_none());
         let counted_in = !self.playing && self.count_in_bars > 0 && punch.is_none();
@@ -125,6 +127,7 @@ impl App {
         let nudge = self.record_offset_ms as i64 * self.project.rate as i64 / 1000 - loupe_engine::driver_extra_delay();
         let began = began.map(|at| at + nudge);
         self.engine.stop();
+        self.engine.keep_quiet_while_recording(&[], &self.project);
         self.engine.set_endless(false);
         self.playing = false;
         self.settle = SETTLE_TICKS;
@@ -483,6 +486,46 @@ mod tests {
         let _ = app.finish_recording();
         assert!(app.recording.is_none());
         assert_eq!(app.playhead, 48_000, "the cursor stayed where the take stopped");
+    }
+
+    #[test]
+    fn the_track_being_recorded_stays_quiet_until_recording_stops_and_only_that_track() {
+        let folder = std::env::temp_dir().join(format!("loupe-quiet-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(beat)) = app.project.apply(Command::AddTrack { name: "Beat".into() }) else { panic!() };
+        app.path = Some(folder.join("Song.lp"));
+        app.input = Some(Input::open(loupe_engine::InputChoice::Practice).unwrap());
+        app.armed.insert(vox);
+        let _ = app.toggle_recording();
+        assert!(app.recording.is_some(), "recording did not start");
+        assert!(app.engine.is_kept_quiet(vox), "the last take plays over this one");
+        assert!(!app.engine.is_kept_quiet(beat), "the beat went quiet");
+        let _ = app.next_take();
+        assert!(app.recording.is_some(), "the next take did not start");
+        assert!(app.engine.is_kept_quiet(vox), "the last take plays over the next one");
+        let _ = app.finish_recording();
+        assert!(!app.engine.is_kept_quiet(vox), "the stack stays quiet after recording");
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn a_punch_still_hears_the_old_take_up_to_the_punch() {
+        let folder = std::env::temp_dir().join(format!("loupe-punch-quiet-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        app.path = Some(folder.join("Song.lp"));
+        app.input = Some(Input::open(loupe_engine::InputChoice::Practice).unwrap());
+        app.armed.insert(vox);
+        app.punch = true;
+        app.loop_range = Some((1_000, 2_000));
+        let _ = app.toggle_recording();
+        assert!(app.recording.is_some(), "recording did not start");
+        assert!(!app.engine.is_kept_quiet(vox), "the punch run-up went silent");
+        let _ = app.finish_recording();
+        std::fs::remove_dir_all(&folder).ok();
     }
 
     #[test]

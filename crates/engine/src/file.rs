@@ -88,6 +88,7 @@ pub struct SavedClip {
     pub takes: Vec<i64>,
     pub take: usize,
     pub muted_takes: Vec<usize>,
+    pub erased_takes: Vec<usize>,
     pub called: Option<String>,
 }
 
@@ -217,6 +218,7 @@ impl SavedProject {
                             takes: clip.takes.clone(),
                             take: clip.take,
                             muted_takes: clip.muted_takes.clone(),
+                            erased_takes: clip.erased_takes.clone(),
                             called: clip.name.clone(),
                             fx: clip
                                 .fx
@@ -295,7 +297,11 @@ impl SavedProject {
                             true => String::new(),
                             false => format!(" mutedtakes={}", clip.muted_takes.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                         };
-                        format!(" takes={} take={}{muted}", clip.takes.iter().map(i64::to_string).collect::<Vec<_>>().join(","), clip.take)
+                        let erased = match clip.erased_takes.is_empty() {
+                            true => String::new(),
+                            false => format!(" erasedtakes={}", clip.erased_takes.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                        };
+                        format!(" takes={} take={}{muted}{erased}", clip.takes.iter().map(i64::to_string).collect::<Vec<_>>().join(","), clip.take)
                     } else {
                         String::new()
                     },
@@ -496,6 +502,7 @@ impl SavedProject {
                         takes: fields.get("takes").map(|text| text.split(',').filter_map(|shift| shift.parse().ok()).collect()).unwrap_or_default(),
                         take: fields.get("take").and_then(|text| text.parse().ok()).unwrap_or(0),
                         muted_takes: fields.get("mutedtakes").map(|text| text.split(',').filter_map(|take| take.parse().ok()).collect()).unwrap_or_default(),
+                        erased_takes: fields.get("erasedtakes").map(|text| text.split(',').filter_map(|take| take.parse().ok()).collect()).unwrap_or_default(),
                         called: None,
                     };
                     if clip.notes.is_none() && clip.source >= saved.sources.len() {
@@ -592,6 +599,9 @@ impl SavedProject {
                     let _ = project.apply(Command::SetTakes { clip: id, offsets, active: clip.take });
                     for take in &clip.muted_takes {
                         let _ = project.apply(Command::SetTakeMuted { clip: id, take: *take, muted: true });
+                    }
+                    for take in &clip.erased_takes {
+                        let _ = project.apply(Command::SetTakeErased { clip: id, take: *take, erased: true });
                     }
                 }
                 for (edge, fade) in [(Edge::In, clip.fade_in), (Edge::Out, clip.fade_out)] {
@@ -932,12 +942,13 @@ mod routing_round_trip {
         assert_eq!(comped.audio()[comped.offset as usize][0], 1.0);
         assert!(p.apply(Command::UseTake { clip: right, take: 7 }).is_err());
         p.apply(Command::SetTakeMuted { clip: right, take: 2, muted: true }).unwrap();
+        p.apply(Command::SetTakeErased { clip: right, take: 1, erased: true }).unwrap();
         let text = SavedProject::capture(&p, |_| None).to_text();
         assert!(text.contains(" takes="));
         let sources = vec![p.sources[0].clone()];
         let (back, _) = SavedProject::parse(&text).unwrap().build(&sources, 48_000);
         for (was, now) in p.tracks[0].clips.iter().zip(&back.tracks[0].clips) {
-            assert_eq!((now.offset, now.take, &now.takes, &now.muted_takes), (was.offset, was.take, &was.takes, &was.muted_takes));
+            assert_eq!((now.offset, now.take, &now.takes, &now.muted_takes, &now.erased_takes), (was.offset, was.take, &was.takes, &was.muted_takes, &was.erased_takes));
         }
     }
 
