@@ -3303,8 +3303,12 @@ impl App {
         }
     }
 
+    pub(crate) fn armed_audio_tracks(&self) -> Vec<TrackId> {
+        self.project.tracks.iter().filter(|track| self.armed.contains(&track.id) && !track.records_notes).map(|track| track.id).collect()
+    }
+
     pub(crate) fn listen_if_armed(&mut self) {
-        let heard: Vec<TrackId> = self.project.tracks.iter().filter(|track| self.armed.contains(&track.id) && !track.records_notes).map(|track| track.id).collect();
+        let heard = self.armed_audio_tracks();
         if heard.is_empty() {
             self.engine.hear_on(&[]);
             self.engine.stop_hearing();

@@ -134,7 +134,9 @@ impl App {
         };
         let stopped_at = self.engine.position();
         self.engine.now_recording(false);
-        self.engine.hear_on(&[]);
+        let heard = self.armed_audio_tracks();
+        let through = self.hear_input.wants_input(true, false);
+        self.engine.hear_on(if through { &heard } else { &[] });
         self.engine.tape_keys(false);
         let began = recording.began.or_else(|| self.input.as_ref().and_then(Input::take_began).map(|at| self.engine.position_at(at)));
         let nudge = self.record_offset_ms as i64 * self.project.rate as i64 / 1000 - loupe_engine::driver_extra_delay();
@@ -509,6 +511,31 @@ mod tests {
         let _ = app.next_take();
         assert!(app.recording.as_ref().unwrap().counted_in, "a take started from stopped lost its count in");
         let _ = app.finish_recording();
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn an_armed_track_is_still_heard_after_the_take_when_hearing_is_while_armed() {
+        let folder = std::env::temp_dir().join(format!("loupe-still-heard-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        app.path = Some(folder.join("Song.lp"));
+        app.hear_input = crate::settings::Hearing::WhileArmed;
+        let mut input = Input::open(loupe_engine::InputChoice::Practice).unwrap();
+        app.engine.hear(&mut input);
+        app.input = Some(input);
+        app.armed.insert(vox);
+        app.listen_if_armed();
+        assert!(app.engine.is_hearing(), "arming did not bring the input through");
+        let _ = app.toggle_recording();
+        assert!(app.recording.is_some(), "recording did not start");
+        let _ = app.finish_recording();
+        assert!(app.engine.is_hearing(), "the input went quiet after the take");
+        app.hear_input = crate::settings::Hearing::WhileRecording;
+        let _ = app.toggle_recording();
+        let _ = app.finish_recording();
+        assert!(!app.engine.is_hearing(), "while recording only still came through after the take");
         std::fs::remove_dir_all(&folder).ok();
     }
 
