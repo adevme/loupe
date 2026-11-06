@@ -2905,7 +2905,20 @@ impl App {
             true => Subscription::none(),
             false => iced::time::every(Duration::from_millis(SCRIPT_CHECK_MS)).map(|_| Message::ScriptsDue),
         };
-        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around, following, scripts_due])
+        let nudging = iced::event::listen_with(|event, _status, _window| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp), modifiers, .. })
+                if modifiers.alt() =>
+            {
+                Some(Message::NudgeTracks { down: false })
+            }
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::ArrowDown), modifiers, .. })
+                if modifiers.alt() =>
+            {
+                Some(Message::NudgeTracks { down: true })
+            }
+            _ => None,
+        });
+        Subscription::batch([shortcuts, window, closing, ticks, mixer_drag, typing, autosave, picking, roll_keys, looking_around, following, scripts_due, nudging])
     }
 
     fn edit(&mut self, run: Option<Run>, command: Command) -> Option<Outcome> {
@@ -4115,8 +4128,6 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Named(Named::Space) => Some(Message::TogglePlay),
         keyboard::Key::Named(Named::Home) => Some(Message::ToStart),
         keyboard::Key::Named(Named::Escape) => Some(Message::CloseOverlay),
-        keyboard::Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::NudgeTracks { down: false }),
-        keyboard::Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::NudgeTracks { down: true }),
         keyboard::Key::Named(Named::F6) => Some(Message::ToggleMixer),
         keyboard::Key::Named(Named::Delete | Named::Backspace) => Some(Message::Delete),
         keyboard::Key::Character(c) => {
