@@ -3796,6 +3796,11 @@ impl App {
             .padding(0)
             .style(move |_, status| palette.toggled(metronome_on, status))
             .on_press(Message::ToggleMetronome);
+        let snap_on = self.snap;
+        let snap = button(container(icon("magnet", 15.0)).center(30))
+            .padding(0)
+            .style(move |_, status| palette.toggled(snap_on, status))
+            .on_press(Message::ToggleSnap);
         let punch_on = self.punch;
         let punch = button(container(text("Punch").size(11.5).font(palette.medium)).center_y(30).padding([0, 8]))
             .padding(0)
@@ -3816,6 +3821,7 @@ impl App {
             hinted(record, "Record onto every armed track. Ctrl+R does the same."),
             hinted(punch, "Punch: record only inside the part marked on the ruler, replacing what was there."),
             hinted(metronome, "The click you record to. Ctrl+M turns it on and off."),
+            hinted(snap, "Snap: clips you drag land on the grid. Hold Alt while dragging to place freely."),
             hinted(typing_keys, "Play notes with your letter keys: the Z row is the lower octave, the Q row the upper. Ctrl+T turns it on and off."),
         ]
         .push_maybe(lag)
@@ -4095,7 +4101,6 @@ fn shortcut(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messag
         keyboard::Key::Character(c) => {
             match (c.to_lowercase().as_str(), modifiers.command(), modifiers.shift()) {
                 ("s", false, _) => Some(Message::Split),
-                ("n", false, _) => Some(Message::ToggleSnap),
                 ("r", _, _) => Some(Message::ToggleRecord),
                 ("p", false, _) => Some(Message::SetTool(Tool::Pencil)),
                 ("c", false, _) => Some(Message::SetTool(Tool::Razor)),
