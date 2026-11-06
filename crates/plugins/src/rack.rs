@@ -1585,7 +1585,8 @@ fn open_on_a_thread(host: &Path, order: Order, seat: Seat) -> Arrived {
         placed.map_err(|why| (why, sandbox.gone()))?;
     }
     let ask = Ask::Load { path: path.to_string_lossy().to_string(), index, rate, block };
-    let loaded = sandbox.ask(ask).and_then(|reply| match reply {
+    let patience = if state.is_empty() { crate::sandbox::SIGN_IN_PATIENCE } else { crate::sandbox::PATIENCE };
+    let loaded = sandbox.ask_patiently(ask, patience).and_then(|reply| match reply {
         Reply::Loaded { latency, ara, .. } => Ok((latency, ara)),
         Reply::Trouble(why) => Err(why),
         other => Err(format!("the plugin host answered out of turn: {other:?}")),

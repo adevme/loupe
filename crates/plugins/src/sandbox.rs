@@ -25,7 +25,8 @@ pub fn exchanges() -> (u64, u64, u64, u64) {
 }
 
 const SPIN_FOR_A_REPLY: Duration = Duration::from_millis(2);
-const PATIENCE: Duration = Duration::from_secs(20);
+pub const PATIENCE: Duration = Duration::from_secs(20);
+pub const SIGN_IN_PATIENCE: Duration = Duration::from_secs(300);
 const BLOCK_PATIENCE: Duration = Duration::from_millis(2_000);
 const SILENT_FOR_TOO_LONG: Duration = Duration::from_secs(20);
 const FIRST_BLOCK_PATIENCE: Duration = Duration::from_secs(10);
@@ -176,12 +177,16 @@ impl Sandbox {
     }
 
     pub fn ask(&mut self, ask: Ask) -> Result<Reply, String> {
+        self.ask_patiently(ask, PATIENCE)
+    }
+
+    pub fn ask_patiently(&mut self, ask: Ask, patience: Duration) -> Result<Reply, String> {
         if self.lost {
             return Err("the plugin host is gone".into());
         }
         self.settle_what_is_owed()?;
         self.send_the_ask(&ask, Want::Line)?;
-        match self.gets.recv_timeout(PATIENCE) {
+        match self.gets.recv_timeout(patience) {
             Ok(got) => {
                 self.late_since = None;
                 self.reply_from(got)
