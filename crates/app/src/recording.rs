@@ -269,6 +269,7 @@ impl App {
             }
             loose.push((track, source));
         }
+        let recording_now: Vec<TrackId> = self.recording.as_ref().map(|recording| recording.tracks.iter().map(|(track, _)| *track).collect()).unwrap_or_default();
         let mut placed = Vec::new();
         self.transact(None, |project| {
             for (clip, keep) in cut_short {
@@ -279,7 +280,15 @@ impl App {
                 if project.track(track).is_none() {
                     continue;
                 }
-                placed.push(crate::takes::lay_take(project, track, source, start, whole - cut, &[cut as i64], 0)?);
+                let clip = crate::takes::lay_take(project, track, source, start, whole - cut, &[cut as i64], 0)?;
+                if recording_now.contains(&track) {
+                    let lane = match project.clip(clip).and_then(|found| found.lane) {
+                        Some(lane) => lane,
+                        None => crate::takes::lane_rows(project.track(track).ok_or(CommandError::NoSuchTrack)?),
+                    };
+                    project.apply(Command::SetClipLane { clip, lane: Some(lane), on: false })?;
+                }
+                placed.push(clip);
             }
             Ok(Outcome::Done)
         });
@@ -633,6 +642,28 @@ mod tests {
         app.place_take(240_000, 0, true, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 480_000))]));
         let clips = &app.project.track(track).unwrap().clips;
         assert_eq!(clips.iter().filter_map(|clip| clip.lane).collect::<Vec<_>>(), [0, 1]);
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn the_last_take_lands_in_the_group_switched_off_while_the_next_one_records() {
+        let folder = std::env::temp_dir().join(format!("loupe-landing-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        app.path = Some(folder.join("Song.lp"));
+        app.input = Some(Input::open(loupe_engine::InputChoice::Practice).unwrap());
+        app.armed.insert(vox);
+        let _ = app.toggle_recording();
+        app.place_take(48_000, 0, false, None, None, Ok(vec![(vox, a_take(&folder, "one.wav", 96_000))]));
+        let first = app.project.track(vox).unwrap().clips[0].clone();
+        assert!(first.lane.is_some(), "the last take landed outside the group");
+        assert!(!first.lane_on, "the last take plays while the next one records");
+        let _ = app.finish_recording();
+        app.place_take(48_000, 0, true, None, None, Ok(vec![(vox, a_take(&folder, "two.wav", 96_000))]));
+        let clips = &app.project.track(vox).unwrap().clips;
+        assert!(clips.iter().all(|clip| clip.lane.is_some()), "a take is outside the group");
+        assert_eq!(clips.iter().filter(|clip| clip.lane_on).count(), 1, "more than one take plays");
         std::fs::remove_dir_all(&folder).ok();
     }
 
