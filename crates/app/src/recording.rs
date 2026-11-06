@@ -111,14 +111,11 @@ impl App {
         if let Some((from, _)) = looping {
             self.seek(from);
         }
-        if again && !self.punch {
+        if !self.punch {
             let sung_over: Vec<TrackId> = self.project.tracks.iter().filter(|track| self.armed.contains(&track.id) && !track.records_notes).map(|track| track.id).collect();
             self.engine.keep_quiet_while_recording(&sung_over, &self.project);
         }
-        let count_in_bars = self.count_in_bars;
-        if again {
-            self.count_in_bars = 0;
-        }
+        let count_in_bars = std::mem::replace(&mut self.count_in_bars, 0);
         tasks.push(self.toggle_recording());
         self.count_in_bars = count_in_bars;
         match &mut self.recording {
@@ -509,7 +506,7 @@ mod tests {
         assert_eq!(app.count_in_bars, 2, "the count in setting changed");
         let _ = app.finish_recording();
         let _ = app.next_take();
-        assert!(app.recording.as_ref().unwrap().counted_in, "a take started from stopped lost its count in");
+        assert!(!app.recording.as_ref().unwrap().counted_in, "a next take from stopped counted in");
         let _ = app.finish_recording();
         std::fs::remove_dir_all(&folder).ok();
     }
@@ -536,6 +533,31 @@ mod tests {
         let _ = app.toggle_recording();
         let _ = app.finish_recording();
         assert!(!app.engine.is_hearing(), "while recording only still came through after the take");
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
+    fn next_take_from_stopped_keeps_the_last_take_quiet_too() {
+        let folder = std::env::temp_dir().join(format!("loupe-quiet-stopped-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(beat)) = app.project.apply(Command::AddTrack { name: "Beat".into() }) else { panic!() };
+        app.path = Some(folder.join("Song.lp"));
+        app.input = Some(Input::open(loupe_engine::InputChoice::Practice).unwrap());
+        app.armed.insert(vox);
+        let _ = app.toggle_recording();
+        let _ = app.finish_recording();
+        assert!(app.recording.is_none(), "the first take did not stop");
+        let _ = app.next_take();
+        assert!(app.recording.is_some(), "next take did not start from stopped");
+        assert!(app.engine.is_kept_quiet(vox), "the last take plays over a next take started from stopped");
+        assert!(!app.engine.is_kept_quiet(beat), "the beat went quiet");
+        let _ = app.finish_recording();
+        assert!(!app.engine.is_kept_quiet(vox), "the track stays quiet after recording");
+        let _ = app.toggle_recording();
+        assert!(!app.engine.is_kept_quiet(vox), "a plain recording went quiet");
+        let _ = app.finish_recording();
         std::fs::remove_dir_all(&folder).ok();
     }
 
