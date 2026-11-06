@@ -637,6 +637,23 @@ mod tests {
     }
 
     #[test]
+    fn the_next_take_joins_the_group_and_only_it_plays() {
+        let folder = std::env::temp_dir().join(format!("loupe-group-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        app.place_take(48_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "one.wav", 96_000))]));
+        app.place_take(48_000, 0, true, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 90_000))]));
+        app.place_take(48_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "three.wav", 40_000))]));
+        let clips = &app.project.track(track).unwrap().clips;
+        assert_eq!(clips.len(), 3, "a take went missing");
+        assert!(clips.iter().all(|clip| clip.lane.is_some()), "a take is outside the group");
+        let playing: Vec<_> = clips.iter().filter(|clip| clip.lane_on).map(|clip| clip.source.name.clone()).collect();
+        assert_eq!(playing.len(), 1, "more than one take plays: {playing:?}");
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
+    #[test]
     fn recording_again_from_the_start_of_a_clip_or_before_it_is_a_retake() {
         let folder = std::env::temp_dir().join(format!("loupe-retake-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
