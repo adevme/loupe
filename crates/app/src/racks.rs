@@ -772,6 +772,10 @@ impl Chains for Racks {
         self.chains.values().chain(self.clips.values()).chain(self.master.iter()).chain(self.monitor.iter()).any(|rack| rack.still_opening())
     }
 
+    fn not_ready(&self) -> Vec<String> {
+        self.chains.values().chain(self.clips.values()).chain(self.master.iter()).chain(self.monitor.iter()).flat_map(|rack| rack.not_ready()).collect()
+    }
+
     fn nudge(&mut self) {
         self.publish();
         self.gather();

@@ -544,6 +544,14 @@ impl Rack {
         self.slots.iter().any(|slot| slot.on_its_way())
     }
 
+    pub fn not_ready(&self) -> Vec<String> {
+        self.slots
+            .iter()
+            .filter(|slot| !slot.bypassed && !slot.record && (slot.trouble.is_some() || slot.held_back || slot.on_its_way()))
+            .map(|slot| slot.name.clone())
+            .collect()
+    }
+
     pub fn open_waiting(&mut self) -> Vec<String> {
         self.take_arrivals();
         let waiting: Vec<usize> = self

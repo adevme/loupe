@@ -211,6 +211,11 @@ impl App {
                 racks.nudge();
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
+            let missing = racks.not_ready();
+            if !missing.is_empty() {
+                let _ = done.send(Err(unloaded_plugins(&missing)));
+                return;
+            }
             let went = loupe_engine::export_through(&project, &plan, &report, Some(racks.as_mut()));
             drop(racks);
             let _ = done.send(went.map(|note| (folder, note)));
@@ -245,4 +250,17 @@ impl App {
         body = body.push(row![open, copy, Space::with_width(Length::Fill)].spacing(10).align_y(Alignment::Center));
         self.window("Exported".to_string(), body.into(), 520.0)
     }
+}
+
+fn unloaded_plugins(missing: &[String]) -> String {
+    let mut names: Vec<&str> = missing.iter().map(String::as_str).collect();
+    names.dedup();
+    let one = names.len() == 1;
+    format!(
+        "Nothing was exported, because {} did not load in time: {}. Open {} in the song to check {}, then export again.",
+        if one { "a plugin" } else { "some plugins" },
+        names.join(", "),
+        if one { "it" } else { "them" },
+        if one { "it works" } else { "they work" },
+    )
 }

@@ -270,6 +270,10 @@ pub trait Chains: Send {
         false
     }
 
+    fn not_ready(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn plugin_spending(&self) -> PluginSpending {
         PluginSpending::default()
     }
