@@ -101,6 +101,19 @@ impl App {
         }
     }
 
+    pub(crate) fn look_for_touches_before_leaving(&mut self) {
+        if self.engine.is_playing() || self.recording.is_some() {
+            return;
+        }
+        let Some(mut racks) = self.borrow_racks() else { return };
+        let found = racks.plugins_touched();
+        self.racks.keep(racks);
+        self.hand_racks_over();
+        if !found.is_empty() {
+            self.dirty = true;
+        }
+    }
+
     pub(crate) fn keep_plugin_edits(&mut self) {
         if racks_must_stay(&self.engine) {
             return;
@@ -471,6 +484,36 @@ mod running_tests {
         let written = app.exported_project_file();
         assert_eq!(state_on(&app, track), vec![0x22], "the export took the settings from before the knob moved");
         assert!(written.contains("state=22"), "the project copy beside the export holds the old settings");
+    }
+
+    #[test]
+    fn saving_while_a_track_is_armed_keeps_the_knob_he_just_turned() {
+        let fake = a_plugin_with_a_knob("armed-save", &[0x11]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        app.gather_fx_state();
+        let mut input = loupe_engine::Input::open(loupe_engine::InputChoice::Practice).expect("the practice input opens");
+        app.engine.hear(&mut input);
+        app.engine.hear_on(&[track]);
+        fake.turned_to(&[0x22]);
+        let file = std::env::temp_dir().join(format!("loupe-armed-save-{}.lp", std::process::id()));
+        app.write_to(file.clone());
+        let written = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(&file).ok();
+        assert!(written.contains("state=22"), "the save kept the setting from before the knob moved");
+    }
+
+    #[test]
+    fn closing_while_a_track_is_armed_notices_a_turned_knob_so_it_asks_to_save() {
+        let fake = a_plugin_with_a_knob("armed-close", &[0x11]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        app.gather_fx_state();
+        app.dirty = false;
+        let mut input = loupe_engine::Input::open(loupe_engine::InputChoice::Practice).expect("the practice input opens");
+        app.engine.hear(&mut input);
+        app.engine.hear_on(&[track]);
+        fake.turned_to(&[0x22]);
+        app.look_for_touches_before_leaving();
+        assert!(app.dirty, "closing would lose the knob without asking");
     }
 
     #[test]

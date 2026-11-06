@@ -3584,6 +3584,7 @@ impl App {
     }
 
     fn ask_before(&mut self, pending: Pending) -> Task<Message> {
+        self.look_for_touches_before_leaving();
         match closing::ask_first(self.dirty, self.project.tracks.len(), pending) {
             closing::Next::Ask(pending) => {
                 self.overlay = Overlay::ConfirmDiscard(pending);

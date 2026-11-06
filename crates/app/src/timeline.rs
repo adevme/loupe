@@ -906,6 +906,9 @@ impl Timeline<'_> {
         runs.into_iter()
             .filter_map(|(start, end, lanes)| {
                 let count = lanes.len();
+                let shown = |clip: &&Clip| clip.lane.is_some() && clip.lane_on && clip.start < end && clip.end() > start;
+                let start = track.clips.iter().filter(shown).map(|clip| clip.start).min().unwrap_or(start);
+                let end = track.clips.iter().filter(shown).map(|clip| clip.end()).max().unwrap_or(end);
                 let left = self.x_of(start as f64).max(self.lanes_left());
                 let right = self.x_of(end as f64).min(self.lanes_right());
                 let width = badge_width(count);
@@ -1506,7 +1509,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         .into_iter()
                         .map(|(row, at)| (self.project.tracks[row].id, at))
                         .collect();
-                    let lane = self.track_at(from.y).filter(|_| self.slice_line(from, to, free).0 == self.slice_line(from, to, free).1).and_then(|row| self.take_row_at(row, from.y));
+                    let lane = self.track_at(from.y).filter(|row| self.track_at(to.y) == Some(*row)).and_then(|row| self.take_row_at(row, from.y).filter(|aimed| self.take_row_at(row, to.y) == Some(*aimed)));
                     (Captured, Some(Message::Slice { cuts, lane }))
                 }
                 Some(_) => (Captured, None),
@@ -3324,6 +3327,36 @@ mod take_folders {
         let clips = &app.project.track(vox).unwrap().clips;
         assert_eq!(clips.iter().filter(|clip| clip.lane == Some(3)).count(), 2, "take 4 was not cut");
         assert_eq!(clips.len(), PASSES + 1, "another take was cut too");
+    }
+
+    #[test]
+    fn a_razor_click_that_wobbles_a_pixel_still_cuts_only_the_take_it_aimed_at() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        app.tool = Tool::Razor;
+        let timeline = timeline_of(&app);
+        let mut state = Interaction::default();
+        let y = TOP + TALL + 3.0 * TALL + TALL / 2.0;
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let moved = canvas::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(LEFT + 51.0, y + 1.0) });
+        let released = canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        let at = |x: f32, y: f32| mouse::Cursor::Available(Point::new(CANVAS.x + x, CANVAS.y + y));
+        let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, at(LEFT + 50.0, y));
+        let _ = canvas::Program::update(&timeline, &mut state, moved, CANVAS, at(LEFT + 51.0, y + 1.0));
+        let (_, cut) = canvas::Program::update(&timeline, &mut state, released, CANVAS, at(LEFT + 51.0, y + 1.0));
+        assert!(matches!(cut, Some(crate::Message::Slice { lane: Some(3), .. })), "the wobble cut every take: {cut:?}");
+    }
+
+    #[test]
+    fn the_takes_pill_follows_the_take_that_is_playing_when_it_moves() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let playing = app.project.track(vox).unwrap().clips.iter().find(|clip| clip.lane_on).unwrap().id;
+        let pass = app.project.rate as Frames * 2;
+        app.project.apply(Command::MoveClip { clip: playing, track: vox, start: pass / 2 }).unwrap();
+        let timeline = timeline_of(&app);
+        let badges = timeline.take_badges(0);
+        assert_eq!(badges.len(), 1);
+        assert_eq!(badges[0].0.x, timeline.x_of((pass / 2) as f64) + BADGE_INSET, "the pill stayed behind when the take moved");
     }
 
     #[test]

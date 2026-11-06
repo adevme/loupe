@@ -173,7 +173,10 @@ impl App {
         if path.extension().is_none() {
             path.set_extension(EXTENSION);
         }
-        self.gather_fx_state();
+        match self.engine.is_playing() || self.recording.is_some() {
+            true => self.gather_fx_state(),
+            false => self.gather_fx_state_now(),
+        }
         let saved = SavedProject::capture(&self.project, |track| self.heights.get(&track).copied());
         match write_whole(&path, &saved.to_text()) {
             Ok(()) => {
