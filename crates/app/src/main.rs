@@ -606,6 +606,7 @@ struct App {
     fx_drag: Option<(TrackId, usize, usize)>,
     writing: Option<loupe_engine::Writer>,
     held_back: std::collections::HashSet<(u64, usize, bool)>,
+    slot_latency: std::collections::HashMap<(u64, usize, bool), usize>,
     knob_names: HashMap<(u64, usize, usize, bool), String>,
     hint: Option<&'static str>,
     plugins_opening: bool,
@@ -907,6 +908,7 @@ impl App {
             fx_drag: None,
             writing: None,
             held_back: std::collections::HashSet::new(),
+            slot_latency: std::collections::HashMap::new(),
             knob_names: HashMap::new(),
             found: Vec::new(),
             scanning: true,
@@ -1124,6 +1126,7 @@ impl App {
             fx_drag: None,
             writing: None,
             held_back: std::collections::HashSet::new(),
+            slot_latency: std::collections::HashMap::new(),
             knob_names: HashMap::new(),
             found: Vec::new(),
             scanning: false,
@@ -4364,6 +4367,7 @@ impl App {
     fn read_peeks(&mut self) {
         self.knob_names.clear();
         self.held_back.clear();
+        self.slot_latency.clear();
         let Ok(held) = self.peeks.lock() else { return };
         for (spot, peek) in held.iter() {
             let (owner, slot, on_clip) = match spot {
@@ -4374,6 +4378,9 @@ impl App {
             };
             if peek.held_back {
                 self.held_back.insert((owner, slot, on_clip));
+            }
+            if peek.latency > 0 {
+                self.slot_latency.insert((owner, slot, on_clip), peek.latency);
             }
             for (knob, name) in peek.knobs.iter().enumerate() {
                 self.knob_names.insert((owner, slot, knob, on_clip), name.clone());
@@ -4389,6 +4396,17 @@ impl App {
             stockwin::Spot::Monitor => (MONITOR_OWNER, slot, false),
         };
         self.held_back.contains(&key)
+    }
+
+    pub(crate) fn delay_at(&self, spot: stockwin::Spot, slot: usize) -> Option<String> {
+        let key = match spot {
+            stockwin::Spot::Track(track) => (track.0, slot, false),
+            stockwin::Spot::Clip(clip) => (clip.0, slot, true),
+            stockwin::Spot::Master => (MASTER_OWNER, slot, false),
+            stockwin::Spot::Monitor => (MONITOR_OWNER, slot, false),
+        };
+        let frames = *self.slot_latency.get(&key)? as loupe_engine::Frames;
+        Some(format!("{:.1} ms", milliseconds_of(frames, self.engine.rate())))
     }
 
     pub(crate) fn load_held_back_plugin(&mut self, spot: stockwin::Spot, slot: usize) {

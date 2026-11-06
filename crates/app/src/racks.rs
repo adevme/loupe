@@ -20,6 +20,7 @@ pub struct Peek {
     pub tuning: Option<Arc<Tuning>>,
     pub knobs: Vec<String>,
     pub held_back: bool,
+    pub latency: usize,
     pub host: Option<u32>,
 }
 
@@ -473,12 +474,13 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
+                let latency = rack.slots().get(slot).map_or(0, |found| found.latency);
                 let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
                     None => (None, None, None, None, None, None),
                 };
 
-                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Track(*id, slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, latency, host: rack.host_pid(slot) }));
 
 
             }
@@ -487,12 +489,13 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
+                let latency = rack.slots().get(slot).map_or(0, |found| found.latency);
                 let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
                     None => (None, None, None, None, None, None),
                 };
 
-                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Clip(*id, slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, latency, host: rack.host_pid(slot) }));
 
 
             }
@@ -501,12 +504,13 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
+                let latency = rack.slots().get(slot).map_or(0, |found| found.latency);
                 let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
                     None => (None, None, None, None, None, None),
                 };
 
-                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Master(slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, latency, host: rack.host_pid(slot) }));
 
 
             }
@@ -515,11 +519,12 @@ impl Racks {
             for slot in 0..rack.len() {
                 let knobs = rack.knobs(slot);
                 let held_back = rack.slots().get(slot).is_some_and(|found| found.held_back);
+                let latency = rack.slots().get(slot).map_or(0, |found| found.latency);
                 let (scopes, history, meter, findings, spectra, tuning) = match rack.built_at(slot) {
                     Some(made) => (made.scopes(), made.history(), made.meter(), made.findings(), made.spectra(), made.tuning()),
                     None => (None, None, None, None, None, None),
                 };
-                found.push((Spot::Monitor(slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, host: rack.host_pid(slot) }));
+                found.push((Spot::Monitor(slot), Peek { scopes, history, meter, findings, spectra, tuning, knobs, held_back, latency, host: rack.host_pid(slot) }));
             }
         }
         let Ok(mut held) = self.peeks.lock() else { return };

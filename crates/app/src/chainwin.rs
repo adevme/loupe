@@ -289,7 +289,11 @@ impl App {
         } else {
             Space::new(0, 0).into()
         };
-        let line = row![grip, dot, open, waiting_for_room, mix, reading, drop].spacing(8).align_y(Alignment::Center);
+        let delay: Element<'_, Message> = match self.delay_at(spot, slot) {
+            Some(shown) => text(shown).size(11.5).font(palette.mono).color(palette.text_dim).into(),
+            None => Space::new(0, 0).into(),
+        };
+        let line = row![grip, dot, open, waiting_for_room, delay, mix, reading, drop].spacing(8).align_y(Alignment::Center);
         container(line)
             .padding([4, 6])
             .width(Length::Fill)
