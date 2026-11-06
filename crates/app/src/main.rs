@@ -2609,17 +2609,13 @@ impl App {
                 if self.overlay.is_a_menu() {
                     self.overlay = Overlay::None;
                 }
-                if !self.project.tracks.is_empty() {
-                    return self.save();
-                }
+                return self.save();
             }
             Message::SaveAs => {
                 if self.overlay.is_a_menu() {
                     self.overlay = Overlay::None;
                 }
-                if !self.project.tracks.is_empty() {
-                    return self.save_as();
-                }
+                return self.save_as();
             }
             Message::SaveElsewhere => return self.save_elsewhere(),
             Message::OpenExport => {
