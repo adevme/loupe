@@ -230,7 +230,7 @@ impl App {
         )
     }
 
-    pub(crate) fn place_take(&mut self, start: i64, keep_from: i64, retake: bool, passes: Option<Passes>, punch: Option<(Frames, Frames)>, result: Result<Vec<(TrackId, Arc<Source>)>, String>) {
+    pub(crate) fn place_take(&mut self, start: i64, keep_from: i64, _retake: bool, passes: Option<Passes>, punch: Option<(Frames, Frames)>, result: Result<Vec<(TrackId, Arc<Source>)>, String>) {
         self.loading = self.loading.saturating_sub(1);
         let sources = match result {
             Ok(sources) => sources,
@@ -255,27 +255,15 @@ impl App {
             return;
         }
         let start = (start + cut as i64) as Frames;
-        let beat = bar_frames(self.project.bpm, self.project.rate) / 4;
         let mut loose = Vec::new();
-        let mut cut_short = Vec::new();
         for (track, source) in sources {
-            let Some(new) = source.frames.get(cut as usize..) else { continue };
-            if !retake {
-                if let Some((clip, keep)) = self.moved_on_from(track, start, new.len() as Frames, beat) {
-                    cut_short.push((clip, keep));
-                    loose.push((track, source));
-                    continue;
-                }
+            if source.frames.get(cut as usize..).is_some() {
+                loose.push((track, source));
             }
-            loose.push((track, source));
         }
         let recording_now: Vec<TrackId> = self.recording.as_ref().map(|recording| recording.tracks.iter().map(|(track, _)| *track).collect()).unwrap_or_default();
         let mut placed = Vec::new();
         self.transact(None, |project| {
-            for (clip, keep) in cut_short {
-                let offset = project.clip(clip).map_or(0, |found| found.offset);
-                project.apply(Command::TrimClip { clip, offset, len: keep })?;
-            }
             for (track, source) in loose {
                 if project.track(track).is_none() {
                     continue;
@@ -418,7 +406,7 @@ mod tests {
 
     #[test]
     fn recording_over_a_clip_adds_the_take_to_its_stack() {
-        let folder = std::env::temp_dir().join(format!("loupe-stack-{}", std::process::id()));
+        let folder = std::env::temp_dir().join(format!("loupe-partway-stack-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&folder).unwrap();
         let mut app = App::bare();
         let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
@@ -617,18 +605,19 @@ mod tests {
     }
 
     #[test]
-    fn moving_on_to_the_next_segment_makes_its_own_clip_and_ends_the_last_one_there() {
-        let folder = std::env::temp_dir().join(format!("loupe-moved-on-{}", std::process::id()));
+    fn recording_partway_into_an_old_take_stacks_and_cuts_nothing() {
+        let folder = std::env::temp_dir().join(format!("loupe-partway-stack-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&folder).unwrap();
         let mut app = App::bare();
         let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
         app.place_take(0, 0, false, None, None, Ok(vec![(track, a_take(&folder, "one.wav", 480_000))]));
         app.place_take(240_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 480_000))]));
         let clips = &app.project.track(track).unwrap().clips;
-        assert_eq!(clips.len(), 2, "the next segment joined the last one as a take");
-        let mut spans: Vec<(Frames, Frames, Option<usize>)> = clips.iter().map(|clip| (clip.start, clip.end(), clip.lane)).collect();
-        spans.sort();
-        assert_eq!(spans, vec![(0, 240_000, None), (240_000, 720_000, None)]);
+        assert_eq!(clips.len(), 2);
+        let first = clips.iter().find(|clip| clip.start == 0).unwrap();
+        assert_eq!(first.end(), 480_000, "the old take was cut short");
+        assert!(clips.iter().all(|clip| clip.lane.is_some()), "the new recording did not stack");
+        assert_eq!(clips.iter().filter(|clip| clip.lane_on).count(), 1, "both play");
         std::fs::remove_dir_all(&folder).ok();
     }
 
@@ -832,19 +821,4 @@ impl App {
 
 
 impl App {
-    fn moved_on_from(&self, track: TrackId, start: Frames, len: Frames, beat: Frames) -> Option<(loupe_engine::ClipId, Frames)> {
-        let end = start + len;
-        let under = self
-            .project
-            .track(track)?
-            .clips
-            .iter()
-            .filter(|clip| !clip.is_notes() && !clip.is_stretched() && (clip.lane.is_none() || clip.lane_on))
-            .map(|clip| (clip, clip.end().min(end).saturating_sub(clip.start.max(start))))
-            .filter(|(_, overlap)| *overlap > 0)
-            .max_by_key(|(_, overlap)| *overlap)
-            .map(|(clip, _)| clip)?;
-        (start > under.start + beat).then(|| (under.id, start - under.start))
-    }
-
 }
