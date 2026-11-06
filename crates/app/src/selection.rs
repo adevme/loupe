@@ -23,6 +23,29 @@ impl App {
         }
     }
 
+    pub(crate) fn nudge_clips(&mut self, down: bool) {
+        let Some(lead) = self.in_song_order().first().copied() else {
+            return;
+        };
+        let (Some(start), Some(track)) = (self.project.clip(lead).map(|clip| clip.start), self.project.track_of(lead).map(|track| track.id)) else {
+            return;
+        };
+        let Some(row) = self.project.tracks.iter().position(|found| found.id == track) else {
+            return;
+        };
+        let to = match down {
+            true => row + 1,
+            false => match row.checked_sub(1) {
+                Some(above) => above,
+                None => return,
+            },
+        };
+        let Some(target) = self.project.tracks.get(to).map(|found| found.id) else {
+            return;
+        };
+        self.move_clips(lead, target, start);
+    }
+
     pub(crate) fn affected_by(&self, clip: ClipId) -> Vec<ClipId> {
         if self.selection.len() > 1 && self.selection.contains(&clip) {
             self.in_song_order()
@@ -188,3 +211,37 @@ fn unused_file(folder: &std::path::Path, name: &str) -> PathBuf {
         .unwrap_or(first)
 }
 
+
+#[cfg(test)]
+mod nudge_tests {
+    use super::*;
+
+    #[test]
+    fn alt_arrows_move_selected_clips_one_track_and_never_in_time() {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(top)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(below)) = app.project.apply(Command::AddTrack { name: "Hook".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 4_000]));
+        let Ok(Outcome::Clip(clip)) = app.project.apply(Command::AddClip { track: top, source, start: 12_345 }) else { panic!() };
+        app.choose([clip]);
+        app.nudge_clips(true);
+        assert_eq!(app.project.track_of(clip).map(|track| track.id), Some(below));
+        assert_eq!(app.project.clip(clip).map(|found| found.start), Some(12_345), "the clip slid in time");
+        app.nudge_clips(true);
+        assert_eq!(app.project.track_of(clip).map(|track| track.id), Some(below), "it left the last track");
+        app.nudge_clips(false);
+        assert_eq!(app.project.track_of(clip).map(|track| track.id), Some(top));
+        assert_eq!(app.project.clip(clip).map(|found| found.start), Some(12_345));
+    }
+
+    #[test]
+    fn the_vertical_drag_key_is_the_one_chosen() {
+        use crate::settings::VerticalDrag;
+        assert!(VerticalDrag::Shift.held(true, false));
+        assert!(!VerticalDrag::Shift.held(false, true));
+        assert!(VerticalDrag::Control.held(false, true));
+        assert!(!VerticalDrag::Off.held(true, true));
+        assert_eq!(VerticalDrag::from_saved(Some(VerticalDrag::Control.saved_as())), VerticalDrag::Control);
+        assert_eq!(VerticalDrag::from_saved(None), VerticalDrag::Shift);
+    }
+}

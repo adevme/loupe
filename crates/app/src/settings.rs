@@ -33,6 +33,7 @@ pub struct Settings {
     pub record_offset_ms: i32,
     pub punch: bool,
     pub hear_input: Hearing,
+    pub vertical_drag: VerticalDrag,
     pub hear_through_chain: bool,
     pub snap: bool,
     pub follow: crate::following::Follow,
@@ -106,6 +107,7 @@ impl Settings {
             record_offset_ms: value_of("record_offset").and_then(|text| text.trim().parse::<i32>().ok()).filter(|ms| ms.abs() <= MOST_RECORD_OFFSET_MS).unwrap_or(0),
             punch: value_of("punch") == Some("on"),
             hear_input: Hearing::from_saved(value_of("hear_input")),
+            vertical_drag: VerticalDrag::from_saved(value_of("vertical_drag")),
             hear_through_chain: value_of("hear_through_chain") != Some("off"),
             snap: value_of("snap") != Some("off"),
             follow: crate::following::Follow::from_saved(value_of("follow")),
@@ -424,6 +426,52 @@ impl std::fmt::Display for Hearing {
             Hearing::Never => write!(f, "Never"),
             Hearing::WhileArmed => write!(f, "Whenever a track is armed"),
             Hearing::WhileRecording => write!(f, "Only while recording"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VerticalDrag {
+    #[default]
+    Shift,
+    Control,
+    Off,
+}
+
+impl VerticalDrag {
+    pub const ALL: [VerticalDrag; 3] = [VerticalDrag::Shift, VerticalDrag::Control, VerticalDrag::Off];
+
+    pub fn saved_as(self) -> &'static str {
+        match self {
+            VerticalDrag::Shift => "shift",
+            VerticalDrag::Control => "ctrl",
+            VerticalDrag::Off => "off",
+        }
+    }
+
+    pub fn from_saved(value: Option<&str>) -> Self {
+        match value {
+            Some("ctrl") => VerticalDrag::Control,
+            Some("off") => VerticalDrag::Off,
+            _ => VerticalDrag::Shift,
+        }
+    }
+
+    pub fn held(self, shift: bool, control: bool) -> bool {
+        match self {
+            VerticalDrag::Shift => shift,
+            VerticalDrag::Control => control,
+            VerticalDrag::Off => false,
+        }
+    }
+}
+
+impl std::fmt::Display for VerticalDrag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VerticalDrag::Shift => write!(f, "Hold Shift"),
+            VerticalDrag::Control => write!(f, "Hold Ctrl"),
+            VerticalDrag::Off => write!(f, "Off"),
         }
     }
 }

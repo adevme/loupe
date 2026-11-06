@@ -331,6 +331,7 @@ pub enum Message {
     DeleteUnusedTakes(TrackId),
     ShowChain(TrackId, bool),
     HearingChosen(settings::Hearing),
+    VerticalDragChosen(settings::VerticalDrag),
     HearThroughChainToggled(bool),
     OpenSampler(TrackId),
     SamplerChanged(TrackId, loupe_engine::Sampler),
@@ -721,6 +722,7 @@ struct App {
     record_offset_ms: i32,
     punch: bool,
     hear_input: settings::Hearing,
+    vertical_drag: settings::VerticalDrag,
     hear_through_chain: bool,
     rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
@@ -881,6 +883,7 @@ impl App {
             record_offset_ms: settings.record_offset_ms,
             punch: settings.punch,
             hear_input: settings.hear_input,
+            vertical_drag: settings.vertical_drag,
             hear_through_chain: settings.hear_through_chain,
             rec_shown: HashSet::new(),
             copied_clips: None,
@@ -1097,6 +1100,7 @@ impl App {
             record_offset_ms: 0,
             punch: false,
             hear_input: settings::Hearing::default(),
+            vertical_drag: settings::VerticalDrag::default(),
             hear_through_chain: false,
             rec_shown: HashSet::new(),
             copied_clips: None,
@@ -1620,6 +1624,12 @@ impl App {
                     self.rec_shown.insert(track);
                 } else {
                     self.rec_shown.remove(&track);
+                }
+            }
+            Message::VerticalDragChosen(chosen) => {
+                self.vertical_drag = chosen;
+                if let Err(why) = settings::save("vertical_drag", chosen.saved_as()) {
+                    self.problem = Some(format!("Could not save settings: {why}"));
                 }
             }
             Message::HearingChosen(chosen) => {
@@ -2208,6 +2218,10 @@ impl App {
                 }
             }
             Message::NudgeTracks { down } => {
+                if !self.selection.is_empty() {
+                    self.nudge_clips(down);
+                    return Task::none();
+                }
                 let mut order: Vec<usize> = self
                     .project
                     .tracks
@@ -3647,6 +3661,7 @@ impl App {
             punch: self.punch,
             tool: self.tool,
             snap: self.snap,
+            vertical_drag: self.vertical_drag,
             hinting: self.hint,
             armed: &self.armed,
             recording_from: self.recording.as_ref().map(|recording| recording.from),
@@ -3965,6 +3980,11 @@ impl App {
                 .size(12)
                 .color(palette.text_dim),
             theme::picker(palette, following::Follow::ALL, Some(self.follow), Message::FollowChosen).width(160),
+            text("Drag straight up or down").size(13).font(palette.medium),
+            text("Hold this key while dragging clips to move them to another track without sliding them in time. Alt+Up and Alt+Down move selected clips one track.")
+                .size(12)
+                .color(palette.text_dim),
+            theme::picker(palette, settings::VerticalDrag::ALL, Some(self.vertical_drag), Message::VerticalDragChosen).width(160),
         ]
         .spacing(8);
 

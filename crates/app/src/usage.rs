@@ -217,6 +217,7 @@ mod tests {
             record_offset_ms: 0,
             punch: false,
             hear_input: crate::settings::Hearing::default(),
+            vertical_drag: crate::settings::VerticalDrag::default(),
             snap: true,
             audio: loupe_engine::Device::default(),
             export: settings::ExportChoices::from_settings(|_| None),

@@ -138,6 +138,7 @@ pub struct Timeline<'a> {
     pub punch: bool,
     pub tool: Tool,
     pub snap: bool,
+    pub vertical_drag: crate::settings::VerticalDrag,
     pub hinting: Option<&'static str>,
     pub armed: &'a HashSet<TrackId>,
     pub recording_from: Option<Frames>,
@@ -1333,7 +1334,11 @@ impl canvas::Program<Message> for Timeline<'_> {
                         else {
                             return (Captured, None);
                         };
-                        let start = self.snap(self.frames_at(p.x) - *grab, free);
+                        let start = if self.vertical_drag.held(state.modifiers.shift(), state.modifiers.control()) {
+                            clip.start
+                        } else {
+                            self.snap(self.frames_at(p.x) - *grab, free)
+                        };
                         let track = self.project.tracks[self.row_for_drag(p.y)].id;
                         let changed = start != clip.start || track != current.id;
                         (Captured, changed.then_some(Message::MoveClip { clip: *id, track, start }))
@@ -3180,6 +3185,7 @@ mod take_folders {
             punch: app.punch,
             tool: app.tool,
             snap: app.snap,
+            vertical_drag: crate::settings::VerticalDrag::default(),
             hinting: app.hint,
             armed: &app.armed,
             recording_from: None,
