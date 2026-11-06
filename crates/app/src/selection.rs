@@ -33,12 +33,14 @@ impl App {
         let Some(row) = self.project.tracks.iter().position(|found| found.id == track) else {
             return;
         };
-        let to = match down {
-            true => row + 1,
-            false => match row.checked_sub(1) {
-                Some(above) => above,
-                None => return,
-            },
+        let shown = |at: &usize| self.project.tracks.get(*at).is_some_and(|found| !crate::timeline::out_of_sight(&self.project, found));
+        let next = match down {
+            true => (row + 1..self.project.tracks.len()).find(shown),
+            false => (0..row).rev().find(shown),
+        };
+        let Some(to) = next else {
+            self.notice = Some("No track that way.".into());
+            return;
         };
         let Some(target) = self.project.tracks.get(to).map(|found| found.id) else {
             return;
@@ -275,5 +277,26 @@ mod nudge_take_tests {
         app.nudge_clips(true);
         assert_eq!(app.project.track_of(playing).map(|track| track.id), Some(below), "the take did not move: {:?}", app.problem);
         std::fs::remove_dir_all(&folder).ok();
+    }
+}
+
+#[cfg(test)]
+mod nudge_hidden_tests {
+    use super::*;
+
+    #[test]
+    fn alt_arrows_skip_hidden_tracks() {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(top)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(hidden)) = app.project.apply(Command::AddTrack { name: "Vox Reverb".into() }) else { panic!() };
+        let Ok(Outcome::Track(below)) = app.project.apply(Command::AddTrack { name: "Hook".into() }) else { panic!() };
+        app.project.apply(Command::SetTrackHidden { track: hidden, hidden: true }).unwrap();
+        let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 4_000]));
+        let Ok(Outcome::Clip(clip)) = app.project.apply(Command::AddClip { track: top, source, start: 500 }) else { panic!() };
+        app.choose([clip]);
+        app.nudge_clips(true);
+        assert_eq!(app.project.track_of(clip).map(|track| track.id), Some(below), "it landed on the hidden track");
+        app.nudge_clips(false);
+        assert_eq!(app.project.track_of(clip).map(|track| track.id), Some(top));
     }
 }

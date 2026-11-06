@@ -400,7 +400,7 @@ fn hint_now(hinting: Option<&'static str>, over: Option<&'static str>, inside: b
     (over != hinting).then_some(over)
 }
 
-fn out_of_sight(project: &Project, track: &Track) -> bool {
+pub(crate) fn out_of_sight(project: &Project, track: &Track) -> bool {
     if track.hidden {
         return true;
     }
