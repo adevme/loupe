@@ -160,10 +160,11 @@ pub struct Effect {
     processor: ComPtr<IAudioProcessor>,
     component: ComPtr<IComponent>,
     us: vst3::ComWrapper<crate::context::Us>,
-    left: Vec<f32>,
-    right: Vec<f32>,
-    side_left: Vec<f32>,
-    side_right: Vec<f32>,
+    main: Vec<Vec<f32>>,
+    side: Vec<Vec<f32>>,
+    main_in: i32,
+    main_out: i32,
+    side_in: i32,
     pub side_bus: bool,
     turns: vst3::ComWrapper<crate::changes::Turns>,
     ids: Vec<u32>,
@@ -213,6 +214,11 @@ impl Effect {
             }
             let ins = component.getBusCount(MediaTypes_::kAudio as i32, BusDirections_::kInput as i32);
             let outs = component.getBusCount(MediaTypes_::kAudio as i32, BusDirections_::kOutput as i32);
+            ask_for_stereo(&processor, ins, outs);
+            let main_in = channels_on(&component, BusDirections_::kInput as i32, 0, ins);
+            let main_out = channels_on(&component, BusDirections_::kOutput as i32, 0, outs);
+            let side_in = channels_on(&component, BusDirections_::kInput as i32, 1, ins);
+            let widest = main_in.max(main_out).max(2) as usize;
             for bus in 0..ins {
                 component.activateBus(MediaTypes_::kAudio as i32, BusDirections_::kInput as i32, bus, 1);
             }
@@ -225,10 +231,11 @@ impl Effect {
                 processor,
                 component,
                 us,
-                left: vec![0.0; block],
-                right: vec![0.0; block],
-                side_left: vec![0.0; block],
-                side_right: vec![0.0; block],
+                main: vec![vec![0.0; block]; widest],
+                side: vec![vec![0.0; block]; side_in.max(2) as usize],
+                main_in,
+                main_out,
+                side_in,
                 side_bus: ins > 1,
                 turns: crate::changes::Turns::empty(),
                 ids: Vec::new(),
@@ -343,7 +350,7 @@ impl Effect {
         if let Some(document) = self.ara.as_mut() {
             document.start_reading();
             let tempo = document.placed().tempo;
-            let most = self.left.len();
+            let most = self.main[0].len();
             crate::in_pieces(audio, side, most, |piece, beside, into| {
                 self.context = playing_at(at + into as i64, self.rate, tempo);
                 self.process_as_told(piece, beside);
@@ -543,7 +550,7 @@ impl Effect {
     }
 
     pub fn process_with(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
-        let most = self.left.len();
+        let most = self.main[0].len();
         crate::in_pieces(audio, side, most, |piece, beside, _| {
             self.context = where_the_song_is(&self.song, self.rate, self.since);
             self.process_as_told(piece, beside);
@@ -551,29 +558,41 @@ impl Effect {
     }
 
     fn process_as_told(&mut self, audio: &mut [[f32; 2]], side: &[[f32; 2]]) {
-        let frames = audio.len().min(self.left.len());
+        let frames = audio.len().min(self.main[0].len());
+        for channel in self.main.iter_mut().skip(2) {
+            channel[..frames].fill(0.0);
+        }
+        for channel in self.side.iter_mut().skip(2) {
+            channel[..frames].fill(0.0);
+        }
         for (i, frame) in audio.iter().take(frames).enumerate() {
-            self.left[i] = frame[0];
-            self.right[i] = frame[1];
+            self.main[0][i] = frame[0];
+            self.main[1][i] = frame[1];
         }
         for i in 0..frames {
             let frame = side.get(i).copied().unwrap_or([0.0; 2]);
-            self.side_left[i] = frame[0];
-            self.side_right[i] = frame[1];
+            self.side[0][i] = frame[0];
+            self.side[1][i] = frame[1];
         }
         self.turns.take_in();
         unsafe {
-            let mut channels = [self.left.as_mut_ptr(), self.right.as_mut_ptr()];
-            let mut side_channels = [self.side_left.as_mut_ptr(), self.side_right.as_mut_ptr()];
+            let mut channels = [std::ptr::null_mut::<f32>(); MOST_CHANNELS];
+            for (slot, channel) in channels.iter_mut().zip(self.main.iter_mut()) {
+                *slot = channel.as_mut_ptr();
+            }
+            let mut side_channels = [std::ptr::null_mut::<f32>(); MOST_CHANNELS];
+            for (slot, channel) in side_channels.iter_mut().zip(self.side.iter_mut()) {
+                *slot = channel.as_mut_ptr();
+            }
             let mut bus = AudioBusBuffers {
-                numChannels: 2,
+                numChannels: self.main_out,
                 silenceFlags: 0,
                 __field0: vst3::Steinberg::Vst::AudioBusBuffers__type0 { channelBuffers32: channels.as_mut_ptr() },
             };
             let mut both = [
-                bus,
+                AudioBusBuffers { numChannels: self.main_in, ..bus },
                 AudioBusBuffers {
-                    numChannels: 2,
+                    numChannels: self.side_in,
                     silenceFlags: 0,
                     __field0: vst3::Steinberg::Vst::AudioBusBuffers__type0 { channelBuffers32: side_channels.as_mut_ptr() },
                 },
@@ -595,9 +614,10 @@ impl Effect {
             };
             self.processor.process(&mut data);
         }
+        let right = if self.main_out == 1 { 0 } else { 1 };
         for (i, frame) in audio.iter_mut().take(frames).enumerate() {
-            frame[0] = self.left[i];
-            frame[1] = self.right[i];
+            frame[0] = self.main[0][i];
+            frame[1] = self.main[right][i];
         }
         self.turns.clear();
         self.since += frames as i64;
@@ -731,4 +751,24 @@ mod tests {
         assert_eq!(context.state & 2, 2);
         assert_eq!((context.timeSigNumerator, context.timeSigDenominator), (4, 4));
     }
+}
+
+const MOST_CHANNELS: usize = 32;
+const STEREO: vst3::Steinberg::Vst::SpeakerArrangement = 0x3;
+
+unsafe fn ask_for_stereo(processor: &ComPtr<IAudioProcessor>, ins: i32, outs: i32) {
+    let mut inputs = vec![STEREO; ins.max(0) as usize];
+    let mut outputs = vec![STEREO; outs.max(0) as usize];
+    processor.setBusArrangements(inputs.as_mut_ptr(), ins, outputs.as_mut_ptr(), outs);
+}
+
+unsafe fn channels_on(component: &ComPtr<IComponent>, direction: i32, index: i32, count: i32) -> i32 {
+    if index >= count {
+        return 2;
+    }
+    let mut info: vst3::Steinberg::Vst::BusInfo = std::mem::zeroed();
+    if component.getBusInfo(MediaTypes_::kAudio as i32, direction, index, &mut info) != kResultOk {
+        return 2;
+    }
+    info.channelCount.clamp(0, MOST_CHANNELS as i32)
 }
