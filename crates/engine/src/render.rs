@@ -892,9 +892,9 @@ fn lay_clips(
         let to = clip.end().min(end).max(from);
         let source = clip.audio();
         let source_from = ((clip.offset + (from - clip.start)) as usize).min(source.len());
-        let count = match clip.notes {
-            Some(_) => (to - from) as usize,
-            None => ((to - from) as usize).min(source.len() - source_from),
+        let count = match clip.notes.is_some() || clip.waiting_for_stretch() {
+            true => (to - from) as usize,
+            false => ((to - from) as usize).min(source.len() - source_from),
         };
         let gain = clip_automated(project, crate::envelope::Target::ClipGain(clip.id), pos, clip.start, clip.gain);
         if own {
@@ -908,6 +908,8 @@ fn lay_clips(
         let first = from - clip.start;
         if let Some(notes) = &clip.notes {
             play_notes(track.instrument, track.sample.as_deref().map(|sample| &sample.frames[..]), notes, clip, first, target, rate);
+        } else if clip.waiting_for_stretch() {
+            play_while_stretching(clip, first, target, gain);
         } else {
         let audio = &source[source_from..][..count];
         let fade_in_frames = (clip.fade_in.len.saturating_sub(first) as usize).min(count);
@@ -968,6 +970,31 @@ fn mix(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32) -> f32 {
         top = top.max(l.abs()).max(r.abs());
     }
     top
+}
+
+const STRETCH_PREVIEW_CHUNK: usize = 256;
+
+fn play_while_stretching(clip: &Clip, first: Frames, target: &mut [[f32; 2]], gain: f32) {
+    let mut chunk = [[0.0f32; 2]; STRETCH_PREVIEW_CHUNK];
+    let mut done = 0;
+    while done < target.len() {
+        let many = (target.len() - done).min(STRETCH_PREVIEW_CHUNK);
+        for (i, frame) in chunk[..many].iter_mut().enumerate() {
+            let at = (clip.offset + first + (done + i) as Frames) as f64 / clip.stretch;
+            *frame = sampled_at(&clip.source.frames, at);
+        }
+        mix_faded(&mut target[done..done + many], &chunk[..many], gain, clip, first + done as Frames);
+        done += many;
+    }
+}
+
+fn sampled_at(frames: &[[f32; 2]], at: f64) -> [f32; 2] {
+    let below = at.floor() as usize;
+    let (Some(a), Some(b)) = (frames.get(below), frames.get(below + 1).or(frames.get(below))) else {
+        return [0.0; 2];
+    };
+    let towards = (at - below as f64) as f32;
+    [a[0] + (b[0] - a[0]) * towards, a[1] + (b[1] - a[1]) * towards]
 }
 
 fn mix_faded(target: &mut [[f32; 2]], audio: &[[f32; 2]], gain: f32, clip: &Clip, first: Frames) -> f32 {
