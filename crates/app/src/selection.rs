@@ -43,7 +43,13 @@ impl App {
         let Some(target) = self.project.tracks.get(to).map(|found| found.id) else {
             return;
         };
+        let moved = self.selection.len();
         self.move_clips(lead, target, start);
+        let now = self.project.track_of(lead).map(|track| track.id);
+        self.notice = Some(match now == Some(target) {
+            true => format!("Moved {moved} clip{} {}.", if moved == 1 { "" } else { "s" }, if down { "down" } else { "up" }),
+            false => "Those clips cannot move that way.".into(),
+        });
     }
 
     pub(crate) fn affected_by(&self, clip: ClipId) -> Vec<ClipId> {
@@ -243,5 +249,31 @@ mod nudge_tests {
         assert!(!VerticalDrag::Off.held(true, true));
         assert_eq!(VerticalDrag::from_saved(Some(VerticalDrag::Control.saved_as())), VerticalDrag::Control);
         assert_eq!(VerticalDrag::from_saved(None), VerticalDrag::Shift);
+    }
+}
+
+#[cfg(test)]
+mod nudge_take_tests {
+    use super::*;
+
+    #[test]
+    fn alt_arrows_move_a_take_from_a_group() {
+        let folder = std::env::temp_dir().join(format!("loupe-nudge-take-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(top)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let Ok(Outcome::Track(below)) = app.project.apply(Command::AddTrack { name: "Hook".into() }) else { panic!() };
+        let take = |name: &str| {
+            let file = folder.join(name);
+            loupe_engine::write_frames(&file, &vec![[0.5, 0.5]; 48_000], 48_000).unwrap();
+            Arc::new(Source::load(&file, 48_000).unwrap())
+        };
+        app.place_take(0, 0, false, None, None, Ok(vec![(top, take("one.wav"))]));
+        app.place_take(0, 0, true, None, None, Ok(vec![(top, take("two.wav"))]));
+        let playing = app.project.track(top).unwrap().clips.iter().find(|clip| clip.lane_on).unwrap().id;
+        app.choose([playing]);
+        app.nudge_clips(true);
+        assert_eq!(app.project.track_of(playing).map(|track| track.id), Some(below), "the take did not move: {:?}", app.problem);
+        std::fs::remove_dir_all(&folder).ok();
     }
 }

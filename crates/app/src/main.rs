@@ -2218,6 +2218,10 @@ impl App {
                 }
             }
             Message::NudgeTracks { down } => {
+                if self.selection.is_empty() && self.chosen_tracks.is_empty() {
+                    self.notice = Some("Select clips first, then Alt+Up or Alt+Down moves them a track.".into());
+                    return Task::none();
+                }
                 if !self.selection.is_empty() {
                     self.nudge_clips(down);
                     return Task::none();
