@@ -17,6 +17,7 @@ use crate::render::{loudest, mix_tracks_metered, TrackPeaks, pan_gains, scale, s
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
+const MOST_LISTEN: f32 = 1.0;
 const QUEUE: usize = 256;
 const SILENT_RATE: u32 = 48_000;
 pub const METERS: usize = 64;
@@ -78,6 +79,7 @@ enum Msg {
     Hear(Option<(Consumer<f32>, u32, usize)>),
     HearOn([Option<TrackId>; MOST_HEARD]),
     HearThroughChain(bool),
+    Listen(f32),
 }
 
 impl Default for Shared {
@@ -183,6 +185,8 @@ struct Rt {
     audition: Option<ClipId>,
     endless: bool,
     master: f32,
+    listen: f32,
+    listening: f32,
     fade: u32,
     fade_len: u32,
     block: Vec<[f32; 2]>,
@@ -476,6 +480,8 @@ fn pair(rate: u32) -> (Rt, Remote) {
         audition: None,
         endless: false,
         master: 1.0,
+        listen: 1.0,
+        listening: 1.0,
         fade: 0,
         fade_len: ((FADE_SECONDS * rate as f32).round() as u32).max(1),
         block: vec![[0.0; 2]; MAX_BLOCK],
@@ -559,6 +565,7 @@ impl Rt {
                 Msg::Silence => self.live.clear(),
                 Msg::Tape(on) => self.taping = on,
                 Msg::Recording(on) => self.recording = on,
+                Msg::Listen(level) => self.listen = level,
                 Msg::KeysGoTo(track) => {
                     if track != self.keys_go_to {
                         self.live.retain(|voice| Some(voice.track) != self.keys_go_to || voice.note.len != HELD);
@@ -689,6 +696,8 @@ impl Rt {
         let hearing = Instant::now();
         self.hear_input(frames);
         self.ear_spent = hearing.elapsed();
+        scale(&mut self.block[..frames], self.listening, self.listen);
+        self.listening = self.listen;
         self.shared.pos.store(self.pos, Ordering::Relaxed);
         &self.block[..frames]
     }
@@ -1198,6 +1207,12 @@ impl Engine {
 
     pub fn tape_keys(&mut self, on: bool) {
         self.send(Msg::Tape(on));
+    }
+
+    pub fn set_listen_level(&mut self, level: f32) {
+        if level.is_finite() {
+            self.send(Msg::Listen(level.clamp(0.0, MOST_LISTEN)));
+        }
     }
 
     pub fn now_recording(&mut self, on: bool) {
@@ -1944,6 +1959,29 @@ mod tests {
             played[settled],
             exported[settled]
         );
+    }
+
+    #[test]
+    fn the_listen_level_turns_down_what_is_heard_but_not_the_song() {
+        let (mut rt, mut remote) = pair(RATE);
+        let project = steady(RATE as usize);
+        remote.outbox.push(Msg::Project(Arc::new(project.clone()))).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        let mut loud = Vec::new();
+        for _ in 0..8 {
+            loud.extend_from_slice(rt.process(128));
+        }
+        remote.outbox.push(Msg::Listen(0.5)).ok().unwrap();
+        let mut quiet = Vec::new();
+        for _ in 0..8 {
+            quiet.extend_from_slice(rt.process(128));
+        }
+        let full = loud[loud.len() - 1][0];
+        let heard = quiet[quiet.len() - 1][0];
+        assert!(full > 0.0, "nothing played");
+        assert!((heard - full * 0.5).abs() < 1e-5, "half the listen level played {heard} against {full}");
+        assert!(quiet.windows(2).all(|pair| (pair[1][0] - pair[0][0]).abs() <= full * 0.01), "the listen level jumped and would click");
+        assert_eq!(project.master, 1.0);
     }
 
     #[derive(Default)]

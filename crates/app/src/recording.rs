@@ -97,6 +97,8 @@ impl App {
         self.recording = Some(Recording { from: self.playhead, tracks, note_tracks, taped: Vec::new(), counted_in, looping, began: None, punch, retake: false });
         self.engine.now_recording(true);
         self.listen_if_armed();
+        let heard: Vec<TrackId> = self.recording.as_ref().map(|recording| recording.tracks.iter().map(|(track, _)| *track).chain(recording.note_tracks.iter().copied()).collect()).unwrap_or_default();
+        self.happened(crate::scripting::Event::RecordStart { tracks: heard, retake: false });
         Task::none()
     }
 
@@ -118,6 +120,9 @@ impl App {
         let count_in_bars = std::mem::replace(&mut self.count_in_bars, 0);
         tasks.push(self.toggle_recording());
         self.count_in_bars = count_in_bars;
+        if again && self.recording.is_some() {
+            self.note_retake();
+        }
         match &mut self.recording {
             Some(recording) => recording.retake = again,
             None => self.engine.keep_quiet_while_recording(&[], &self.project),
@@ -129,6 +134,7 @@ impl App {
         let Some(recording) = self.recording.take() else {
             return Task::none();
         };
+        self.happened(crate::scripting::Event::RecordStop);
         let stopped_at = self.engine.position();
         self.engine.now_recording(false);
         let heard = self.armed_audio_tracks();

@@ -1,10 +1,9 @@
-use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use std::path::PathBuf;
-
 use loupe_engine::{Chains, ClipId, Command, CommandError, Frames, Fx, Instrument, Note, Outcome, Point, Project, Shape, Source, Target, TrackId};
-use mlua::{Lua, LuaOptions, StdLib, Table, Value, Variadic};
+use mlua::{AppDataRefMut, Function, Lua, LuaOptions, RegistryKey, StdLib, Table, Value, Variadic};
 
 const LONGEST_RUN: Duration = Duration::from_secs(5);
 const CHECK_EVERY: u32 = 10_000;
@@ -12,8 +11,21 @@ const MOST_MEMORY: usize = 256 * 1024 * 1024;
 const HIGHEST_KEY: i64 = 127;
 const MOST_FETCHES: usize = 16;
 const SHORTEST_EVERY: f64 = 0.25;
+const SHORTEST_TIMER: f64 = 0.01;
+const FULL_LISTEN: f32 = 1.0;
 
-pub const FUNCTIONS: [(&str, &str); 71] = [
+pub const EVENTS: &[(&str, &str)] = &[
+    ("record_start", "Recording begins, before a single sample is heard. e.tracks lists the armed tracks, e.retake is true for a next take"),
+    ("record_stop", "Recording ends"),
+    ("play", "Playback starts"),
+    ("stop", "Playback stops"),
+    ("arm", "A track is armed or disarmed. e.track, e.armed"),
+    ("song_open", "A song was opened. e.path"),
+    ("song_save", "The song was saved. e.path"),
+    ("unload", "The script is about to stop, or to reload because its file changed"),
+];
+
+pub const FUNCTIONS: &[(&str, &str)] = &[
     ("print(...)", "Show text in Loupe's status line"),
     ("bpm()", "The tempo in beats per minute"),
     ("set_bpm(bpm)", "Change the tempo"),
@@ -81,24 +93,44 @@ pub const FUNCTIONS: [(&str, &str); 71] = [
     ("next_take()", "End this take and record the next one from the same place; starts recording if it was not"),
     ("track_armed(track)", "Whether a track is armed to record"),
     ("set_track_armed(track, armed)", "Arm or disarm a track for recording"),
-    ("fetch(url, options)", "Ask a web address in the background and return a number for the request; options can hold method, body and headers. The answer comes back from responses() on a later run"),
-    ("responses()", "Answers to earlier fetch() calls: {id, status, body}; status is 0 when the address could not be reached"),
-    ("keep(key, value)", "Remember a piece of text between runs of a repeating script; nil forgets it"),
+    ("on(event, handler)", "Call handler the moment an event happens and return its number; the events are listed below"),
+    ("off(number)", "Stop a handler or timer given by on(), every() or after()"),
+    ("every(seconds, handler)", "Call handler again and again, this many seconds apart, and return its number"),
+    ("after(seconds, handler)", "Call handler once, this many seconds from now, and return its number"),
+    ("fetch(url, options, handler)", "Ask a web address in the background and return a number for the request; options can hold method, body and headers. When the answer comes, handler is called with {id, status, body}; without a handler it waits in responses()"),
+    ("responses()", "Answers to fetch() calls made without a handler that came in since you last asked: {id, status, body}; status is 0 when the address could not be reached"),
+    ("keep(key, value)", "Remember a piece of text for as long as the script runs; nil forgets it"),
     ("kept(key)", "Text remembered with keep(), or nil"),
+    ("listen_volume()", "How loud you hear Loupe, in dB; 0 is full. It is never saved with the song"),
+    ("set_listen_volume(db)", "Turn down what you hear without touching the mix, the song or undo; 0 dB is full and it never goes louder. It goes back to full when the script stops"),
 ];
 
-#[derive(Default)]
 pub struct View {
     pub playhead: Frames,
     pub playing: bool,
     pub recording: bool,
     pub armed: Vec<TrackId>,
     pub responses: Vec<Response>,
-    pub kept: std::collections::HashMap<String, String>,
-    pub next_fetch: u64,
     pub selected: Vec<ClipId>,
     pub plugins: Vec<(String, PathBuf, usize)>,
     pub folder: Option<PathBuf>,
+    pub listen: f32,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            playhead: 0,
+            playing: false,
+            recording: false,
+            armed: Vec::new(),
+            responses: Vec::new(),
+            selected: Vec::new(),
+            plugins: Vec::new(),
+            folder: None,
+            listen: FULL_LISTEN,
+        }
+    }
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -113,7 +145,7 @@ pub struct Wishes {
     pub record: Option<Record>,
     pub arm: Vec<(TrackId, bool)>,
     pub fetches: Vec<Fetch>,
-    pub keep: Vec<(String, Option<String>)>,
+    pub listen: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,12 +178,108 @@ pub struct Ran {
     pub took: Duration,
 }
 
-struct Host<'a> {
-    project: &'a mut Project,
-    view: &'a View,
-    plugins: Option<&'a mut (dyn Chains + 'static)>,
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    RecordStart { tracks: Vec<TrackId>, retake: bool },
+    RecordStop,
+    Play,
+    Stop,
+    Arm { track: TrackId, armed: bool },
+    SongOpen(PathBuf),
+    SongSave(PathBuf),
+    Unload,
+}
+
+impl Event {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Event::RecordStart { .. } => "record_start",
+            Event::RecordStop => "record_stop",
+            Event::Play => "play",
+            Event::Stop => "stop",
+            Event::Arm { .. } => "arm",
+            Event::SongOpen(_) => "song_open",
+            Event::SongSave(_) => "song_save",
+            Event::Unload => "unload",
+        }
+    }
+
+    fn table(&self, lua: &Lua) -> mlua::Result<Table> {
+        let table = lua.create_table()?;
+        table.set("name", self.name())?;
+        match self {
+            Event::RecordStart { tracks, retake } => {
+                table.set("tracks", lua.create_sequence_from(tracks.iter().map(|track| track.0))?)?;
+                table.set("retake", *retake)?;
+            }
+            Event::Arm { track, armed } => {
+                table.set("track", track.0)?;
+                table.set("armed", *armed)?;
+            }
+            Event::SongOpen(path) | Event::SongSave(path) => table.set("path", path.to_string_lossy().into_owned())?,
+            Event::RecordStop | Event::Play | Event::Stop | Event::Unload => {}
+        }
+        Ok(table)
+    }
+}
+
+pub struct Turn {
+    pub project: Project,
+    pub view: View,
+    pub plugins: Option<Box<dyn Chains>>,
+}
+
+pub struct Done {
+    pub project: Project,
+    pub plugins: Option<Box<dyn Chains>>,
+    pub ran: Result<Ran, String>,
+}
+
+struct Session {
+    project: Project,
+    view: View,
+    plugins: Option<Box<dyn Chains>>,
     wishes: Wishes,
     changed: bool,
+}
+
+struct Deadline(Instant);
+
+struct Handler {
+    id: u64,
+    event: String,
+    call: RegistryKey,
+}
+
+struct Timer {
+    id: u64,
+    every: Option<Duration>,
+    due: Instant,
+    call: RegistryKey,
+}
+
+struct Wiring {
+    next_id: u64,
+    next_fetch: u64,
+    handlers: Vec<Handler>,
+    timers: Vec<Timer>,
+    replies: HashMap<u64, RegistryKey>,
+    kept: HashMap<String, String>,
+    waiting: Vec<Response>,
+}
+
+impl Default for Wiring {
+    fn default() -> Self {
+        Self { next_id: 1, next_fetch: 1, handlers: Vec::new(), timers: Vec::new(), replies: HashMap::new(), kept: HashMap::new(), waiting: Vec::new() }
+    }
+}
+
+impl Wiring {
+    fn number(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
 }
 
 fn fail(words: impl Into<String>) -> mlua::Error {
@@ -167,7 +295,7 @@ fn refused(error: CommandError) -> mlua::Error {
     })
 }
 
-impl Host<'_> {
+impl Session {
     fn apply(&mut self, command: Command) -> mlua::Result<Outcome> {
         let outcome = self.project.apply(command).map_err(refused)?;
         self.changed = true;
@@ -258,7 +386,7 @@ fn built_in_values(effect: &dyn loupe_stock::Effect, state: &[u8]) -> Vec<f32> {
     values
 }
 
-fn hosted_readings(h: &mut Host<'_>, track: u64, slot: usize, name: &str) -> mlua::Result<Vec<(String, f32, String)>> {
+fn hosted_readings(h: &mut Session, track: u64, slot: usize, name: &str) -> mlua::Result<Vec<(String, f32, String)>> {
     let plugins = h.plugins.as_deref_mut().ok_or_else(|| fail(format!("plugins are not running, so scripts cannot reach {name}")))?;
     let readings = plugins.knob_readings(TrackId(track), slot - 1);
     if readings.is_empty() {
@@ -289,471 +417,712 @@ pub fn shortcut_of(source: &str) -> Option<String> {
 }
 
 
-pub fn run(source: &str, name: &str, project: &mut Project, view: &View, plugins: Option<&mut (dyn Chains + 'static)>) -> Result<Ran, String> {
-    let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::new()).map_err(|why| why.to_string())?;
-    lua.set_memory_limit(MOST_MEMORY).map_err(|why| why.to_string())?;
-    let started = Instant::now();
-    lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(CHECK_EVERY), move |_, _| {
-        if started.elapsed() > LONGEST_RUN {
-            Err(fail("the script ran for more than 5 seconds and was stopped"))
-        } else {
-            Ok(mlua::VmState::Continue)
-        }
-    })
-    .map_err(|why| why.to_string())?;
-    let host = RefCell::new(Host { project, view, plugins, wishes: Wishes::default(), changed: false });
-    let result = lua.scope(|scope| {
-        let globals = lua.globals();
-        for unsafe_name in ["dofile", "loadfile", "load", "collectgarbage"] {
-            globals.set(unsafe_name, Value::Nil)?;
-        }
-        let api = lua.create_table()?;
-        macro_rules! def {
-            ($name:literal, $body:expr) => {
-                api.set($name, scope.create_function($body)?)?;
-            };
-        }
-        def!("print", |_, words: Variadic<Value>| {
-            host.borrow_mut().wishes.printed.push(say(words));
-            Ok(())
-        });
-        globals.set("print", scope.create_function(|_, words: Variadic<Value>| {
-            host.borrow_mut().wishes.printed.push(say(words));
-            Ok(())
-        })?)?;
-        def!("bpm", |_, ()| Ok(host.borrow().project.bpm));
-        def!("set_bpm", |_, bpm: f64| host.borrow_mut().apply(Command::SetBpm(bpm)).map(|_| ()));
-        def!("rate", |_, ()| Ok(host.borrow().project.rate));
-        def!("length", |_, ()| {
-            let h = host.borrow();
-            Ok(h.seconds(h.project.length()))
-        });
-        def!("seconds_to_beats", |_, seconds: f64| Ok(seconds * host.borrow().project.bpm / 60.0));
-        def!("beats_to_seconds", |_, beats: f64| Ok(beats * 60.0 / host.borrow().project.bpm));
-        def!("playhead", |_, ()| {
-            let h = host.borrow();
-            Ok(h.seconds(h.wishes.seek.unwrap_or(h.view.playhead)))
-        });
-        def!("set_playhead", |_, seconds: f64| {
-            let mut h = host.borrow_mut();
-            let at = h.frames(seconds);
-            h.wishes.seek = Some(at);
-            Ok(())
-        });
-        def!("is_playing", |_, ()| {
-            let h = host.borrow();
-            Ok(h.wishes.play.unwrap_or(h.view.playing))
-        });
-        def!("play", |_, ()| {
-            host.borrow_mut().wishes.play = Some(true);
-            Ok(())
-        });
-        def!("stop", |_, ()| {
-            host.borrow_mut().wishes.play = Some(false);
-            Ok(())
-        });
-        def!("is_recording", |_, ()| Ok(host.borrow().view.recording));
-        def!("record", |_, ()| {
-            host.borrow_mut().wishes.record = Some(Record::Start);
-            Ok(())
-        });
-        def!("stop_recording", |_, ()| {
-            host.borrow_mut().wishes.record = Some(Record::Stop);
-            Ok(())
-        });
-        def!("next_take", |_, ()| {
-            host.borrow_mut().wishes.record = Some(Record::Next);
-            Ok(())
-        });
-        def!("track_armed", |_, track: u64| {
-            let h = host.borrow();
-            h.track(track)?;
-            let wished = h.wishes.arm.iter().rev().find(|(id, _)| id.0 == track).map(|(_, armed)| *armed);
-            Ok(wished.unwrap_or_else(|| h.view.armed.contains(&TrackId(track))))
-        });
-        def!("set_track_armed", |_, (track, armed): (u64, bool)| {
-            let mut h = host.borrow_mut();
-            h.track(track)?;
-            h.wishes.arm.push((TrackId(track), armed));
-            Ok(())
-        });
-        def!("fetch", |_, (url, options): (String, Option<Table>)| {
-            if !(url.starts_with("http://") || url.starts_with("https://")) {
-                return Err(fail("fetch needs an address starting with http:// or https://"));
-            }
-            let mut h = host.borrow_mut();
-            if h.wishes.fetches.len() >= MOST_FETCHES {
-                return Err(fail(format!("a script can ask at most {MOST_FETCHES} addresses per run")));
-            }
-            let id = h.view.next_fetch + h.wishes.fetches.len() as u64;
-            let mut fetch = Fetch { id, url, method: "GET".into(), ..Fetch::default() };
-            if let Some(options) = options {
-                if let Some(method) = options.get::<Option<String>>("method")? {
-                    fetch.method = method.to_uppercase();
-                }
-                fetch.body = options.get::<Option<String>>("body")?;
-                if let Some(headers) = options.get::<Option<Table>>("headers")? {
-                    for pair in headers.pairs::<String, String>() {
-                        fetch.headers.push(pair?);
-                    }
-                }
-            }
-            h.wishes.fetches.push(fetch);
-            Ok(id)
-        });
-        def!("responses", |lua, ()| {
-            let h = host.borrow();
-            let list = lua.create_table()?;
-            for (at, response) in h.view.responses.iter().enumerate() {
-                let item = lua.create_table()?;
-                item.set("id", response.id)?;
-                item.set("status", response.status)?;
-                item.set("body", response.body.as_str())?;
-                list.set(at + 1, item)?;
-            }
-            Ok(list)
-        });
-        def!("keep", |_, (key, value): (String, Option<String>)| {
-            host.borrow_mut().wishes.keep.push((key, value));
-            Ok(())
-        });
-        def!("kept", |_, key: String| {
-            let h = host.borrow();
-            match h.wishes.keep.iter().rev().find(|(kept, _)| *kept == key) {
-                Some((_, value)) => Ok(value.clone()),
-                None => Ok(h.view.kept.get(&key).cloned()),
-            }
-        });
-        def!("tracks", |lua, ()| lua.create_sequence_from(host.borrow().project.tracks.iter().map(|t| t.id.0)));
-        def!("add_track", |_, name: Option<String>| {
-            let mut h = host.borrow_mut();
-            let name = name.unwrap_or_else(|| format!("Track {}", h.project.tracks.len() + 1));
-            match h.apply(Command::AddTrack { name })? {
-                Outcome::Track(id) => Ok(id.0),
-                _ => Err(fail("the track was not made")),
-            }
-        });
-        def!("remove_track", |_, track: u64| {
-            let mut h = host.borrow_mut();
-            h.track(track)?;
-            h.apply(Command::RemoveTrack(TrackId(track))).map(|_| ())
-        });
-        def!("duplicate_track", |_, track: u64| match host.borrow_mut().apply(Command::DuplicateTrack(TrackId(track)))? {
-            Outcome::Track(id) => Ok(id.0),
-            _ => Err(fail("the track was not copied")),
-        });
-        def!("track_name", |_, track: u64| Ok(host.borrow().track(track)?.name.clone()));
-        def!("set_track_name", |_, (track, name): (u64, String)| {
-            host.borrow_mut().apply(Command::RenameTrack { track: TrackId(track), name }).map(|_| ())
-        });
-        def!("track_volume", |_, track: u64| Ok(db_of(host.borrow().track(track)?.gain)));
-        def!("set_track_volume", |_, (track, db): (u64, f64)| {
-            host.borrow_mut().apply(Command::SetTrackGain { track: TrackId(track), gain: gain_of(db) }).map(|_| ())
-        });
-        def!("master_volume", |_, ()| Ok(db_of(host.borrow().project.master)));
-        def!("set_master_volume", |_, db: f64| host.borrow_mut().apply(Command::SetMasterGain(gain_of(db))).map(|_| ()));
-        def!("track_pan", |_, track: u64| Ok(host.borrow().track(track)?.pan));
-        def!("set_track_pan", |_, (track, pan): (u64, f32)| {
-            host.borrow_mut().apply(Command::SetTrackPan { track: TrackId(track), pan }).map(|_| ())
-        });
-        def!("track_muted", |_, track: u64| Ok(host.borrow().track(track)?.muted));
-        def!("set_track_muted", |_, (track, muted): (u64, bool)| {
-            host.borrow_mut().apply(Command::SetTrackMuted { track: TrackId(track), muted }).map(|_| ())
-        });
-        def!("track_solo", |_, track: u64| Ok(host.borrow().track(track)?.solo));
-        def!("set_track_solo", |_, (track, solo): (u64, bool)| {
-            host.borrow_mut().apply(Command::SetTrackSolo { track: TrackId(track), solo }).map(|_| ())
-        });
-        def!("track_color", |_, track: u64| Ok(colour_text(host.borrow().track(track)?.colour)));
-        def!("set_track_color", |_, (track, colour): (u64, Option<String>)| {
-            let colour = match colour {
-                Some(text) => Some(colour_from(&text).ok_or_else(|| fail(format!("{text} is not a #rrggbb colour")))?),
-                None => None,
-            };
-            host.borrow_mut().apply(Command::SetTrackColour { track: TrackId(track), colour }).map(|_| ())
-        });
-        def!("track_clips", |lua, track: u64| {
-            let h = host.borrow();
-            lua.create_sequence_from(h.track(track)?.clips.iter().map(|clip| clip.id.0))
-        });
-        def!("clip_track", |_, clip: u64| {
-            let h = host.borrow();
-            h.clip(clip)?;
-            Ok(h.project.track_of(ClipId(clip)).map(|track| track.id.0))
-        });
-        def!("clip_name", |_, clip: u64| Ok(host.borrow().clip(clip)?.called().to_string()));
-        def!("clip_start", |_, clip: u64| {
-            let h = host.borrow();
-            Ok(h.seconds(h.clip(clip)?.start))
-        });
-        def!("clip_length", |_, clip: u64| {
-            let h = host.borrow();
-            Ok(h.seconds(h.clip(clip)?.len))
-        });
-        def!("move_clip", |_, (clip, track, seconds): (u64, u64, f64)| {
-            let mut h = host.borrow_mut();
-            let start = h.frames(seconds);
-            h.apply(Command::MoveClip { clip: ClipId(clip), track: TrackId(track), start }).map(|_| ())
-        });
-        def!("clip_volume", |_, clip: u64| Ok(db_of(host.borrow().clip(clip)?.gain)));
-        def!("set_clip_volume", |_, (clip, db): (u64, f64)| {
-            host.borrow_mut().apply(Command::SetClipGain { clip: ClipId(clip), gain: gain_of(db) }).map(|_| ())
-        });
-        def!("clip_muted", |_, clip: u64| Ok(host.borrow().clip(clip)?.muted));
-        def!("set_clip_muted", |_, (clip, muted): (u64, bool)| {
-            host.borrow_mut().apply(Command::SetClipMuted { clip: ClipId(clip), muted }).map(|_| ())
-        });
-        def!("split_clip", |_, (clip, seconds): (u64, f64)| {
-            let mut h = host.borrow_mut();
-            let at = h.frames(seconds);
-            match h.apply(Command::SplitClip { clip: ClipId(clip), at })? {
-                Outcome::Clip(id) => Ok(id.0),
-                _ => Err(fail("the clip was not split")),
-            }
-        });
-        def!("delete_clip", |_, clip: u64| {
-            let mut h = host.borrow_mut();
-            h.clip(clip)?;
-            h.apply(Command::DeleteClip(ClipId(clip))).map(|_| ())
-        });
-        def!("is_note_clip", |_, clip: u64| Ok(host.borrow().clip(clip)?.notes.is_some()));
-        def!("add_note_clip", |_, (track, seconds, length): (u64, f64, f64)| {
-            let mut h = host.borrow_mut();
-            let name = h.track(track)?.name.clone();
-            let (start, len) = (h.frames(seconds), h.frames(length).max(1));
-            match h.apply(Command::AddNotesClip { track: TrackId(track), name, start, len, notes: Vec::new() })? {
-                Outcome::Clip(id) => Ok(id.0),
-                _ => Err(fail("the clip was not made")),
-            }
-        });
-        def!("notes", |lua, clip: u64| {
-            let h = host.borrow();
-            let found = h.clip(clip)?;
-            let notes = found.notes.as_deref().ok_or_else(|| fail(format!("clip {clip} holds audio, not notes")))?;
-            let offset = found.offset;
-            let list = lua.create_table()?;
-            for note in notes {
-                let row = lua.create_table()?;
-                row.set("key", note.key)?;
-                row.set("start", h.seconds(note.start.saturating_sub(offset)))?;
-                row.set("length", h.seconds(note.len))?;
-                row.set("velocity", note.velocity)?;
-                list.push(row)?;
-            }
-            Ok(list)
-        });
-        def!("set_notes", |_, (clip, list): (u64, Table)| {
-            let mut h = host.borrow_mut();
-            let offset = h.clip(clip)?.offset;
-            if h.clip(clip)?.notes.is_none() {
-                return Err(fail(format!("clip {clip} holds audio, not notes")));
-            }
-            let mut notes = Vec::new();
-            for row in list.sequence_values::<Table>() {
-                let row = row?;
-                let key: i64 = row.get("key")?;
-                if !(0..=HIGHEST_KEY).contains(&key) {
-                    return Err(fail(format!("key {key} is outside 0 to 127")));
-                }
-                let start: f64 = row.get("start")?;
-                let length: f64 = row.get("length")?;
-                let velocity: Option<f32> = row.get("velocity")?;
-                notes.push(Note { key: key as u8, start: offset + h.frames(start), len: h.frames(length).max(1), velocity: velocity.unwrap_or(0.8) });
-            }
-            h.apply(Command::SetNotes { clip: ClipId(clip), notes }).map(|_| ())
-        });
-        def!("selected_clips", |lua, ()| {
-            let h = host.borrow();
-            let chosen: Vec<u64> = h.wishes.select.as_ref().unwrap_or(&h.view.selected).iter().map(|clip| clip.0).collect();
-            lua.create_sequence_from(chosen)
-        });
-        def!("select_clips", |_, clips: Vec<u64>| {
-            let mut h = host.borrow_mut();
-            for clip in &clips {
-                h.clip(*clip)?;
-            }
-            h.wishes.select = Some(clips.into_iter().map(ClipId).collect());
-            Ok(())
-        });
-        def!("clear_selection", |_, ()| {
-            host.borrow_mut().wishes.select = Some(Vec::new());
-            Ok(())
-        });
-        def!("track_plugins", |lua, track: u64| {
-            let h = host.borrow();
-            lua.create_sequence_from(h.track(track)?.fx.iter().map(|fx| fx.name.clone()))
-        });
-        def!("add_plugin", |_, (track, name): (u64, String)| {
-            let mut h = host.borrow_mut();
-            h.track(track)?;
-            let wanted = name.to_lowercase();
-            let plugins = &h.view.plugins;
-            let found = plugins
-                .iter()
-                .find(|(known, _, _)| known.to_lowercase() == wanted)
-                .or_else(|| plugins.iter().find(|(known, _, _)| known.to_lowercase().contains(&wanted)))
-                .cloned()
-                .ok_or_else(|| fail(format!("no plugin called {name} was found")))?;
-            let (name, path, index) = found;
-            h.apply(Command::AddFx { track: TrackId(track), fx: Fx { path, index, name, bypassed: false, state: Vec::new(), record: false, mix: 1.0 } })?;
-            Ok(h.track(track)?.fx.len())
-        });
-        def!("plugin_knobs", |lua, (track, slot): (u64, usize)| {
-            let mut h = host.borrow_mut();
-            let fx = h.track(track)?.fx.get(slot.wrapping_sub(1)).cloned().ok_or_else(|| fail(format!("track {track} has no plugin in slot {slot}")))?;
-            let readings: Vec<(String, f32, String)> = if loupe_plugins::rack::is_built_in(&fx.path) {
-                let effect = loupe_stock::make(&fx.name).ok_or_else(|| fail(format!("Loupe has no plugin called {}", fx.name)))?;
-                let values = built_in_values(effect.as_ref(), &fx.state);
-                effect.params().iter().zip(values).map(|(param, value)| (param.name.to_string(), value, loupe_stock_ui::shown(param, value))).collect()
-            } else {
-                hosted_readings(&mut h, track, slot, &fx.name)?
-            };
-            let out = lua.create_table()?;
-            for (at, (name, value, text)) in readings.into_iter().enumerate() {
-                let knob = lua.create_table()?;
-                knob.set("name", name)?;
-                knob.set("value", value)?;
-                knob.set("text", text)?;
-                out.set(at + 1, knob)?;
-            }
-            Ok(out)
-        });
-        def!("set_plugin_knob", |_, (track, slot, knob, value): (u64, usize, Value, Value)| {
-            let mut h = host.borrow_mut();
-            let fx = h.track(track)?.fx.get(slot.wrapping_sub(1)).cloned().ok_or_else(|| fail(format!("track {track} has no plugin in slot {slot}")))?;
-            let missing = || fail(format!("{} has no knob {}", fx.name, knob.to_string().unwrap_or_default()));
-            if !loupe_plugins::rack::is_built_in(&fx.path) {
-                let names: Vec<String> = hosted_readings(&mut h, track, slot, &fx.name)?.into_iter().map(|(name, _, _)| name).collect();
-                let index = knob_index(&knob, &names).ok_or_else(missing)?;
-                let plugins = h.plugins.as_deref_mut().ok_or_else(|| fail("plugins are not running"))?;
-                let position = match &value {
-                    Value::Integer(_) | Value::Number(_) => {
-                        let position = number_of(&value).unwrap_or(-1.0);
-                        if !(0.0..=1.0).contains(&position) {
-                            return Err(fail(format!("for {}, give a number from 0 to 1 or text in its own units, like \"-6 dB\"", fx.name)));
-                        }
-                        position
-                    }
-                    Value::String(text) => {
-                        let text = text.to_str()?.to_string();
-                        plugins.knob_from_text(TrackId(track), slot - 1, index, &text).map_err(|why| fail(format!("{} {}: {why}", fx.name, names[index])))?
-                    }
-                    _ => return Err(fail("give the knob a number from 0 to 1 or text like \"-6 dB\"")),
-                };
-                let state = plugins
-                    .turn_and_keep(TrackId(track), slot - 1, index, position)
-                    .ok_or_else(|| fail(format!("{} did not hand back its settings", fx.name)))?;
-                let shown = plugins.knob_readings(TrackId(track), slot - 1).get(index).map(|(_, _, text)| text.clone()).unwrap_or_default();
-                h.apply(Command::SetFxState { track: TrackId(track), slot: slot - 1, state })?;
-                return Ok((position, shown));
-            }
-            let mut effect = loupe_stock::make(&fx.name).ok_or_else(|| fail(format!("Loupe has no plugin called {}", fx.name)))?;
-            let params = effect.params();
-            let names: Vec<String> = params.iter().map(|param| param.name.to_string()).collect();
-            let by_id = match &knob {
-                Value::String(text) => text.to_str().ok().and_then(|text| params.iter().position(|param| param.id == text.trim().to_lowercase())),
-                _ => None,
-            };
-            let index = by_id.or_else(|| knob_index(&knob, &names)).ok_or_else(missing)?;
-            let param = params[index];
-            let wanted = match &value {
-                Value::String(text) => leading_number(&text.to_str()?),
-                _ => number_of(&value),
-            }
-            .ok_or_else(|| fail(format!("{} needs a number for {}", fx.name, param.name)))?;
-            let mut values = built_in_values(effect.as_ref(), &fx.state);
-            let value = param.clamp(wanted);
-            values[index] = value;
-            effect.set(index, value);
-            let state = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-            h.apply(Command::SetFxState { track: TrackId(track), slot: slot - 1, state })?;
-            h.wishes.tweaks.push((TrackId(track), slot - 1, index, value));
-            Ok((value, loupe_stock_ui::shown(&param, value)))
-        });
-        def!("add_send", |_, (from, to, db): (u64, u64, Option<f64>)| {
-            let mut h = host.borrow_mut();
-            h.apply(Command::AddSend { from: TrackId(from), to: TrackId(to) })?;
-            h.apply(Command::SetSendGain { from: TrackId(from), to: TrackId(to), gain: gain_of(db.unwrap_or(0.0)) }).map(|_| ())
-        });
-        def!("set_track_folder", |_, (track, folder): (u64, Option<u64>)| {
-            host.borrow_mut().apply(Command::SetTrackParent { track: TrackId(track), parent: folder.map(TrackId) }).map(|_| ())
-        });
-        def!("add_automation_point", |_, (track, what, seconds, value): (u64, String, f64, f32)| {
-            let mut h = host.borrow_mut();
-            h.track(track)?;
-            let (target, value) = match what.to_lowercase().as_str() {
-                "volume" => (Target::TrackGain(TrackId(track)), gain_of(value as f64).clamp(0.0, 2.0)),
-                "pan" => (Target::TrackPan(TrackId(track)), value.clamp(-1.0, 1.0)),
-                _ => return Err(fail(format!("{what} cannot be automated from scripts yet; use \"volume\" or \"pan\""))),
-            };
-            if h.project.envelope(target).is_none() {
-                h.apply(Command::AddEnvelope { target })?;
-                h.apply(Command::ShowEnvelopeLane { target, open: true })?;
-            }
-            let at = h.frames(seconds);
-            h.apply(Command::PutPoint { target, point: Point { at, value, shape: Shape::Linear } }).map(|_| ())
-        });
-        def!("set_loop", |_, (start, finish): (Option<f64>, Option<f64>)| {
-            let mut h = host.borrow_mut();
-            h.wishes.looped = Some(match (start, finish) {
-                (Some(start), Some(finish)) if finish > start => Some((h.frames(start), h.frames(finish))),
-                (None, None) => None,
-                _ => return Err(fail("set_loop needs a start before the finish, or nothing to clear the loop")),
-            });
-            Ok(())
-        });
-        def!("import_audio", |_, (file, track, seconds): (String, u64, Option<f64>)| {
-            let mut h = host.borrow_mut();
-            h.track(track)?;
-            let mut path = PathBuf::from(&file);
-            if path.is_relative() {
-                if let Some(folder) = &h.view.folder {
-                    path = folder.join(path);
-                }
-            }
-            let source = std::sync::Arc::new(Source::load(&path, h.project.rate).map_err(|why| fail(format!("could not read {file}: {why}")))?);
-            let start = h.frames(seconds.unwrap_or(0.0));
-            match h.apply(Command::AddClip { track: TrackId(track), source, start })? {
-                Outcome::Clip(id) => Ok(id.0),
-                _ => Err(fail("the clip was not placed")),
-            }
-        });
-        def!("set_instrument", |_, (track, name): (u64, String)| {
-            let instrument = match name.to_lowercase().as_str() {
-                "synth" => Instrument::default(),
-                "drums" => Instrument::Drums,
-                "sampler" => Instrument::Sampler(loupe_engine::Sampler::default()),
-                _ => return Err(fail(format!("{name} is not an instrument; use \"synth\", \"drums\" or \"sampler\""))),
-            };
-            host.borrow_mut().apply(Command::SetInstrument { track: TrackId(track), instrument }).map(|_| ())
-        });
-        def!("set_sample", |_, (track, file): (u64, String)| {
-            let mut h = host.borrow_mut();
-            h.track(track)?;
-            let mut path = PathBuf::from(&file);
-            if path.is_relative() {
-                if let Some(folder) = &h.view.folder {
-                    path = folder.join(path);
-                }
-            }
-            let sample = std::sync::Arc::new(Source::load(&path, h.project.rate).map_err(|why| fail(format!("could not read {file}: {why}")))?);
-            if !matches!(h.track(track)?.instrument, Instrument::Sampler(_)) {
-                h.apply(Command::SetInstrument { track: TrackId(track), instrument: Instrument::Sampler(loupe_engine::Sampler::default()) })?;
-            }
-            h.apply(Command::SetSample { track: TrackId(track), sample: Some(sample) }).map(|_| ())
-        });
-        def!("export", |_, stems: Option<bool>| {
-            host.borrow_mut().wishes.export = Some(stems.unwrap_or(false));
-            Ok(())
-        });
-        globals.set("loupe", api)?;
-        lua.load(source).set_name(format!("={name}")).exec()
-    });
-    let host = host.into_inner();
-    match result {
-        Ok(()) => Ok(Ran { changed: host.changed, wishes: host.wishes, took: started.elapsed() }),
-        Err(why) => Err(tidy_error(&why)),
+fn held(lua: &Lua) -> mlua::Result<AppDataRefMut<'_, Session>> {
+    match lua.try_app_data_mut::<Session>() {
+        Ok(Some(session)) => Ok(session),
+        Ok(None) => Err(fail("Loupe is not running this script right now")),
+        Err(_) => Err(fail("a loupe function was called from inside another one")),
     }
+}
+
+fn wiring(lua: &Lua) -> mlua::Result<AppDataRefMut<'_, Wiring>> {
+    match lua.try_app_data_mut::<Wiring>() {
+        Ok(Some(wiring)) => Ok(wiring),
+        Ok(None) => Err(fail("this script has lost its handlers")),
+        Err(_) => Err(fail("a loupe function was called from inside another one")),
+    }
+}
+
+fn timer_gap(seconds: f64) -> mlua::Result<Duration> {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(fail("give a number of seconds above 0"));
+    }
+    Ok(Duration::from_secs_f64(seconds.max(SHORTEST_TIMER)))
+}
+
+fn known_event(event: &str) -> mlua::Result<()> {
+    match EVENTS.iter().any(|(name, _)| *name == event) {
+        true => Ok(()),
+        false => {
+            let names: Vec<&str> = EVENTS.iter().map(|(name, _)| *name).collect();
+            Err(fail(format!("there is no event called {event}; the events are {}", names.join(", "))))
+        }
+    }
+}
+
+pub struct Machine {
+    lua: Lua,
+    name: String,
+}
+
+impl Machine {
+    pub fn new(name: &str) -> Result<Self, String> {
+        let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH, LuaOptions::new()).map_err(|why| why.to_string())?;
+        lua.set_memory_limit(MOST_MEMORY).map_err(|why| why.to_string())?;
+        lua.set_app_data(Wiring::default());
+        lua.set_app_data(Deadline(Instant::now() + LONGEST_RUN));
+        lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(CHECK_EVERY), |lua, _| {
+            let late = lua.app_data_ref::<Deadline>().is_some_and(|deadline| Instant::now() > deadline.0);
+            match late {
+                true => Err(fail("the script ran for more than 5 seconds and was stopped")),
+                false => Ok(mlua::VmState::Continue),
+            }
+        })
+        .map_err(|why| why.to_string())?;
+        install(&lua).map_err(|why| tidy_error(&why))?;
+        Ok(Self { lua, name: name.to_string() })
+    }
+
+    pub fn begin(&self, source: &str, turn: Turn) -> Done {
+        let every = every_of(source);
+        self.turn(turn, |lua| {
+            let chunk = lua.load(source).set_name(format!("={}", self.name)).into_function()?;
+            chunk.call::<()>(())?;
+            if let Some(every) = every {
+                let call = lua.create_registry_value(chunk)?;
+                let mut wiring = wiring(lua)?;
+                let id = wiring.number();
+                wiring.timers.push(Timer { id, every: Some(every), due: Instant::now() + every, call });
+            }
+            Ok(())
+        })
+    }
+
+    pub fn deliver(&self, event: &Event, turn: Turn) -> Done {
+        let name = event.name();
+        self.turn(turn, |lua| {
+            let calls: Vec<Function> = {
+                let wiring = wiring(lua)?;
+                wiring.handlers.iter().filter(|handler| handler.event == name).map(|handler| lua.registry_value(&handler.call)).collect::<mlua::Result<_>>()?
+            };
+            let table = event.table(lua)?;
+            for call in calls {
+                call.call::<()>(table.clone()).map_err(|why| fail(format!("on {name}: {}", tidy_error(&why))))?;
+            }
+            Ok(())
+        })
+    }
+
+    pub fn tick(&self, now: Instant, mut turn: Turn) -> Done {
+        let answers = std::mem::take(&mut turn.view.responses);
+        self.turn(turn, |lua| {
+            let mut unclaimed = Vec::new();
+            for answer in answers {
+                let claimed = wiring(lua)?.replies.remove(&answer.id);
+                match claimed {
+                    Some(key) => {
+                        let call: Function = lua.registry_value(&key)?;
+                        lua.remove_registry_value(key)?;
+                        let table = lua.create_table()?;
+                        table.set("id", answer.id)?;
+                        table.set("status", answer.status)?;
+                        table.set("body", answer.body.as_str())?;
+                        call.call::<()>(table).map_err(|why| fail(format!("on the answer from fetch {}: {}", answer.id, tidy_error(&why))))?;
+                    }
+                    None => unclaimed.push(answer),
+                }
+            }
+            wiring(lua)?.waiting.extend(unclaimed);
+            let due: Vec<(u64, Function)> = {
+                let mut wiring = wiring(lua)?;
+                let mut due = Vec::new();
+                for timer in wiring.timers.iter_mut().filter(|timer| timer.due <= now) {
+                    due.push((timer.id, lua.registry_value(&timer.call)?));
+                    if let Some(every) = timer.every {
+                        timer.due = (timer.due + every).max(now);
+                    }
+                }
+                let finished: Vec<u64> = wiring.timers.iter().filter(|timer| timer.every.is_none() && timer.due <= now).map(|timer| timer.id).collect();
+                for id in finished {
+                    if let Some(at) = wiring.timers.iter().position(|timer| timer.id == id) {
+                        let timer = wiring.timers.remove(at);
+                        lua.remove_registry_value(timer.call)?;
+                    }
+                }
+                due
+            };
+            for (id, call) in due {
+                call.call::<()>(()).map_err(|why| fail(format!("on timer {id}: {}", tidy_error(&why))))?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    pub fn kept(&self, key: &str) -> Option<String> {
+        self.lua.app_data_ref::<Wiring>()?.kept.get(key).cloned()
+    }
+
+    pub fn wants(&self, event: &Event) -> bool {
+        self.lua.app_data_ref::<Wiring>().is_some_and(|wiring| wiring.handlers.iter().any(|handler| handler.event == event.name()))
+    }
+
+    pub fn listens(&self) -> bool {
+        self.lua.app_data_ref::<Wiring>().is_some_and(|wiring| !wiring.handlers.is_empty() || !wiring.timers.is_empty() || !wiring.replies.is_empty())
+    }
+
+    pub fn is_due(&self, now: Instant, answered: bool) -> bool {
+        answered || self.lua.app_data_ref::<Wiring>().is_some_and(|wiring| wiring.timers.iter().any(|timer| timer.due <= now))
+    }
+
+    pub fn shortest_timer(&self) -> Option<Duration> {
+        let wiring = self.lua.app_data_ref::<Wiring>()?;
+        wiring.timers.iter().map(|timer| timer.every.unwrap_or_else(|| timer.due.saturating_duration_since(Instant::now()))).min()
+    }
+
+    pub fn waits_for(&self) -> String {
+        let Some(wiring) = self.lua.app_data_ref::<Wiring>() else { return String::new() };
+        let mut parts: Vec<String> = Vec::new();
+        for handler in &wiring.handlers {
+            if !parts.contains(&handler.event) {
+                parts.push(handler.event.clone());
+            }
+        }
+        match wiring.timers.len() {
+            0 => {}
+            1 => parts.push("a timer".into()),
+            many => parts.push(format!("{many} timers")),
+        }
+        if !wiring.replies.is_empty() {
+            parts.push("a web answer".into());
+        }
+        parts.join(", ")
+    }
+
+    fn turn(&self, turn: Turn, work: impl FnOnce(&Lua) -> mlua::Result<()>) -> Done {
+        let started = Instant::now();
+        let Turn { project, view, plugins } = turn;
+        self.lua.set_app_data(Session { project, view, plugins, wishes: Wishes::default(), changed: false });
+        self.lua.set_app_data(Deadline(started + LONGEST_RUN));
+        let result = work(&self.lua);
+        let session = self.lua.remove_app_data::<Session>().expect("the session stays while a script runs");
+        Done {
+            project: session.project,
+            plugins: session.plugins,
+            ran: result.map(|()| Ran { changed: session.changed, wishes: session.wishes, took: started.elapsed() }).map_err(|why| tidy_error(&why)),
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn run(source: &str, name: &str, project: &mut Project, view: View, plugins: Option<Box<dyn Chains>>) -> Result<Ran, String> {
+    let machine = Machine::new(name)?;
+    let done = machine.begin(source, Turn { project: project.clone(), view, plugins });
+    if done.ran.is_ok() {
+        *project = done.project;
+    }
+    done.ran
+}
+
+fn install(lua: &Lua) -> mlua::Result<()> {
+    let globals = lua.globals();
+    for unsafe_name in ["dofile", "loadfile", "load", "collectgarbage"] {
+        globals.set(unsafe_name, Value::Nil)?;
+    }
+    let api = lua.create_table()?;
+    macro_rules! def {
+        ($name:literal, $body:expr) => {
+            api.set($name, lua.create_function($body)?)?;
+        };
+    }
+    def!("print", |lua, words: Variadic<Value>| {
+        held(lua)?.wishes.printed.push(say(words));
+        Ok(())
+    });
+    globals.set("print", lua.create_function(|lua, words: Variadic<Value>| {
+        held(lua)?.wishes.printed.push(say(words));
+        Ok(())
+    })?)?;
+    def!("on", |lua, (event, handler): (String, Function)| {
+        known_event(&event)?;
+        let call = lua.create_registry_value(handler)?;
+        let mut wiring = wiring(lua)?;
+        let id = wiring.number();
+        wiring.handlers.push(Handler { id, event, call });
+        Ok(id)
+    });
+    def!("off", |lua, id: u64| {
+        let mut wiring = wiring(lua)?;
+        let key = match (wiring.handlers.iter().position(|h| h.id == id), wiring.timers.iter().position(|t| t.id == id)) {
+            (Some(at), _) => Some(wiring.handlers.remove(at).call),
+            (None, Some(at)) => Some(wiring.timers.remove(at).call),
+            (None, None) => None,
+        };
+        drop(wiring);
+        match key {
+            Some(key) => {
+                lua.remove_registry_value(key)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    });
+    def!("every", |lua, (seconds, handler): (f64, Function)| {
+        let every = timer_gap(seconds)?;
+        let call = lua.create_registry_value(handler)?;
+        let mut wiring = wiring(lua)?;
+        let id = wiring.number();
+        wiring.timers.push(Timer { id, every: Some(every), due: Instant::now() + every, call });
+        Ok(id)
+    });
+    def!("after", |lua, (seconds, handler): (f64, Function)| {
+        let wait = timer_gap(seconds)?;
+        let call = lua.create_registry_value(handler)?;
+        let mut wiring = wiring(lua)?;
+        let id = wiring.number();
+        wiring.timers.push(Timer { id, every: None, due: Instant::now() + wait, call });
+        Ok(id)
+    });
+    def!("fetch", |lua, (url, second, third): (String, Value, Option<Function>)| {
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(fail("fetch needs an address starting with http:// or https://"));
+        }
+        let (options, handler) = match second {
+            Value::Table(options) => (Some(options), third),
+            Value::Function(handler) => (None, Some(handler)),
+            Value::Nil => (None, third),
+            _ => return Err(fail("fetch takes an address, then options as a table, then a handler")),
+        };
+        if held(lua)?.wishes.fetches.len() >= MOST_FETCHES {
+            return Err(fail(format!("a script can ask at most {MOST_FETCHES} addresses at a time")));
+        }
+        let id = {
+            let mut wiring = wiring(lua)?;
+            let id = wiring.next_fetch;
+            wiring.next_fetch += 1;
+            id
+        };
+        let mut fetch = Fetch { id, url, method: "GET".into(), ..Fetch::default() };
+        if let Some(options) = options {
+            if let Some(method) = options.get::<Option<String>>("method")? {
+                fetch.method = method.to_uppercase();
+            }
+            fetch.body = options.get::<Option<String>>("body")?;
+            if let Some(headers) = options.get::<Option<Table>>("headers")? {
+                for pair in headers.pairs::<String, String>() {
+                    fetch.headers.push(pair?);
+                }
+            }
+        }
+        if let Some(handler) = handler {
+            let key = lua.create_registry_value(handler)?;
+            wiring(lua)?.replies.insert(id, key);
+        }
+        held(lua)?.wishes.fetches.push(fetch);
+        Ok(id)
+    });
+    def!("responses", |lua, ()| {
+        let answers = std::mem::take(&mut wiring(lua)?.waiting);
+        let list = lua.create_table()?;
+        for (at, response) in answers.iter().enumerate() {
+            let item = lua.create_table()?;
+            item.set("id", response.id)?;
+            item.set("status", response.status)?;
+            item.set("body", response.body.as_str())?;
+            list.set(at + 1, item)?;
+        }
+        Ok(list)
+    });
+    def!("keep", |lua, (key, value): (String, Option<String>)| {
+        let mut wiring = wiring(lua)?;
+        match value {
+            Some(value) => wiring.kept.insert(key, value),
+            None => wiring.kept.remove(&key),
+        };
+        Ok(())
+    });
+    def!("kept", |lua, key: String| Ok(wiring(lua)?.kept.get(&key).cloned()));
+    def!("listen_volume", |lua, ()| {
+        let h = held(lua)?;
+        Ok(db_of(h.wishes.listen.unwrap_or(h.view.listen)))
+    });
+    def!("set_listen_volume", |lua, db: f64| {
+        if db.is_nan() || db > 0.0 {
+            return Err(fail("the listen volume only turns down: 0 dB is full, below 0 is quieter"));
+        }
+        held(lua)?.wishes.listen = Some(gain_of(db).min(FULL_LISTEN));
+        Ok(())
+    });
+    def!("bpm", |lua, ()| Ok(held(lua)?.project.bpm));
+    def!("set_bpm", |lua, bpm: f64| held(lua)?.apply(Command::SetBpm(bpm)).map(|_| ()));
+    def!("rate", |lua, ()| Ok(held(lua)?.project.rate));
+    def!("length", |lua, ()| {
+        let h = held(lua)?;
+        Ok(h.seconds(h.project.length()))
+    });
+    def!("seconds_to_beats", |lua, seconds: f64| Ok(seconds * held(lua)?.project.bpm / 60.0));
+    def!("beats_to_seconds", |lua, beats: f64| Ok(beats * 60.0 / held(lua)?.project.bpm));
+    def!("playhead", |lua, ()| {
+        let h = held(lua)?;
+        Ok(h.seconds(h.wishes.seek.unwrap_or(h.view.playhead)))
+    });
+    def!("set_playhead", |lua, seconds: f64| {
+        let mut h = held(lua)?;
+        let at = h.frames(seconds);
+        h.wishes.seek = Some(at);
+        Ok(())
+    });
+    def!("is_playing", |lua, ()| {
+        let h = held(lua)?;
+        Ok(h.wishes.play.unwrap_or(h.view.playing))
+    });
+    def!("play", |lua, ()| {
+        held(lua)?.wishes.play = Some(true);
+        Ok(())
+    });
+    def!("stop", |lua, ()| {
+        held(lua)?.wishes.play = Some(false);
+        Ok(())
+    });
+    def!("is_recording", |lua, ()| Ok(held(lua)?.view.recording));
+    def!("record", |lua, ()| {
+        held(lua)?.wishes.record = Some(Record::Start);
+        Ok(())
+    });
+    def!("stop_recording", |lua, ()| {
+        held(lua)?.wishes.record = Some(Record::Stop);
+        Ok(())
+    });
+    def!("next_take", |lua, ()| {
+        held(lua)?.wishes.record = Some(Record::Next);
+        Ok(())
+    });
+    def!("track_armed", |lua, track: u64| {
+        let h = held(lua)?;
+        h.track(track)?;
+        let wished = h.wishes.arm.iter().rev().find(|(id, _)| id.0 == track).map(|(_, armed)| *armed);
+        Ok(wished.unwrap_or_else(|| h.view.armed.contains(&TrackId(track))))
+    });
+    def!("set_track_armed", |lua, (track, armed): (u64, bool)| {
+        let mut h = held(lua)?;
+        h.track(track)?;
+        h.wishes.arm.push((TrackId(track), armed));
+        Ok(())
+    });
+    def!("tracks", |lua, ()| lua.create_sequence_from(held(lua)?.project.tracks.iter().map(|t| t.id.0)));
+    def!("add_track", |lua, name: Option<String>| {
+        let mut h = held(lua)?;
+        let name = name.unwrap_or_else(|| format!("Track {}", h.project.tracks.len() + 1));
+        match h.apply(Command::AddTrack { name })? {
+            Outcome::Track(id) => Ok(id.0),
+            _ => Err(fail("the track was not made")),
+        }
+    });
+    def!("remove_track", |lua, track: u64| {
+        let mut h = held(lua)?;
+        h.track(track)?;
+        h.apply(Command::RemoveTrack(TrackId(track))).map(|_| ())
+    });
+    def!("duplicate_track", |lua, track: u64| match held(lua)?.apply(Command::DuplicateTrack(TrackId(track)))? {
+        Outcome::Track(id) => Ok(id.0),
+        _ => Err(fail("the track was not copied")),
+    });
+    def!("track_name", |lua, track: u64| Ok(held(lua)?.track(track)?.name.clone()));
+    def!("set_track_name", |lua, (track, name): (u64, String)| {
+        held(lua)?.apply(Command::RenameTrack { track: TrackId(track), name }).map(|_| ())
+    });
+    def!("track_volume", |lua, track: u64| Ok(db_of(held(lua)?.track(track)?.gain)));
+    def!("set_track_volume", |lua, (track, db): (u64, f64)| {
+        held(lua)?.apply(Command::SetTrackGain { track: TrackId(track), gain: gain_of(db) }).map(|_| ())
+    });
+    def!("master_volume", |lua, ()| Ok(db_of(held(lua)?.project.master)));
+    def!("set_master_volume", |lua, db: f64| held(lua)?.apply(Command::SetMasterGain(gain_of(db))).map(|_| ()));
+    def!("track_pan", |lua, track: u64| Ok(held(lua)?.track(track)?.pan));
+    def!("set_track_pan", |lua, (track, pan): (u64, f32)| {
+        held(lua)?.apply(Command::SetTrackPan { track: TrackId(track), pan }).map(|_| ())
+    });
+    def!("track_muted", |lua, track: u64| Ok(held(lua)?.track(track)?.muted));
+    def!("set_track_muted", |lua, (track, muted): (u64, bool)| {
+        held(lua)?.apply(Command::SetTrackMuted { track: TrackId(track), muted }).map(|_| ())
+    });
+    def!("track_solo", |lua, track: u64| Ok(held(lua)?.track(track)?.solo));
+    def!("set_track_solo", |lua, (track, solo): (u64, bool)| {
+        held(lua)?.apply(Command::SetTrackSolo { track: TrackId(track), solo }).map(|_| ())
+    });
+    def!("track_color", |lua, track: u64| Ok(colour_text(held(lua)?.track(track)?.colour)));
+    def!("set_track_color", |lua, (track, colour): (u64, Option<String>)| {
+        let colour = match colour {
+            Some(text) => Some(colour_from(&text).ok_or_else(|| fail(format!("{text} is not a #rrggbb colour")))?),
+            None => None,
+        };
+        held(lua)?.apply(Command::SetTrackColour { track: TrackId(track), colour }).map(|_| ())
+    });
+    def!("track_clips", |lua, track: u64| {
+        let h = held(lua)?;
+        lua.create_sequence_from(h.track(track)?.clips.iter().map(|clip| clip.id.0))
+    });
+    def!("clip_track", |lua, clip: u64| {
+        let h = held(lua)?;
+        h.clip(clip)?;
+        Ok(h.project.track_of(ClipId(clip)).map(|track| track.id.0))
+    });
+    def!("clip_name", |lua, clip: u64| Ok(held(lua)?.clip(clip)?.called().to_string()));
+    def!("clip_start", |lua, clip: u64| {
+        let h = held(lua)?;
+        Ok(h.seconds(h.clip(clip)?.start))
+    });
+    def!("clip_length", |lua, clip: u64| {
+        let h = held(lua)?;
+        Ok(h.seconds(h.clip(clip)?.len))
+    });
+    def!("move_clip", |lua, (clip, track, seconds): (u64, u64, f64)| {
+        let mut h = held(lua)?;
+        let start = h.frames(seconds);
+        h.apply(Command::MoveClip { clip: ClipId(clip), track: TrackId(track), start }).map(|_| ())
+    });
+    def!("clip_volume", |lua, clip: u64| Ok(db_of(held(lua)?.clip(clip)?.gain)));
+    def!("set_clip_volume", |lua, (clip, db): (u64, f64)| {
+        held(lua)?.apply(Command::SetClipGain { clip: ClipId(clip), gain: gain_of(db) }).map(|_| ())
+    });
+    def!("clip_muted", |lua, clip: u64| Ok(held(lua)?.clip(clip)?.muted));
+    def!("set_clip_muted", |lua, (clip, muted): (u64, bool)| {
+        held(lua)?.apply(Command::SetClipMuted { clip: ClipId(clip), muted }).map(|_| ())
+    });
+    def!("split_clip", |lua, (clip, seconds): (u64, f64)| {
+        let mut h = held(lua)?;
+        let at = h.frames(seconds);
+        match h.apply(Command::SplitClip { clip: ClipId(clip), at })? {
+            Outcome::Clip(id) => Ok(id.0),
+            _ => Err(fail("the clip was not split")),
+        }
+    });
+    def!("delete_clip", |lua, clip: u64| {
+        let mut h = held(lua)?;
+        h.clip(clip)?;
+        h.apply(Command::DeleteClip(ClipId(clip))).map(|_| ())
+    });
+    def!("is_note_clip", |lua, clip: u64| Ok(held(lua)?.clip(clip)?.notes.is_some()));
+    def!("add_note_clip", |lua, (track, seconds, length): (u64, f64, f64)| {
+        let mut h = held(lua)?;
+        let name = h.track(track)?.name.clone();
+        let (start, len) = (h.frames(seconds), h.frames(length).max(1));
+        match h.apply(Command::AddNotesClip { track: TrackId(track), name, start, len, notes: Vec::new() })? {
+            Outcome::Clip(id) => Ok(id.0),
+            _ => Err(fail("the clip was not made")),
+        }
+    });
+    def!("notes", |lua, clip: u64| {
+        let h = held(lua)?;
+        let found = h.clip(clip)?;
+        let notes = found.notes.as_deref().ok_or_else(|| fail(format!("clip {clip} holds audio, not notes")))?;
+        let offset = found.offset;
+        let list = lua.create_table()?;
+        for note in notes {
+            let row = lua.create_table()?;
+            row.set("key", note.key)?;
+            row.set("start", h.seconds(note.start.saturating_sub(offset)))?;
+            row.set("length", h.seconds(note.len))?;
+            row.set("velocity", note.velocity)?;
+            list.push(row)?;
+        }
+        Ok(list)
+    });
+    def!("set_notes", |lua, (clip, list): (u64, Table)| {
+        let mut h = held(lua)?;
+        let offset = h.clip(clip)?.offset;
+        if h.clip(clip)?.notes.is_none() {
+            return Err(fail(format!("clip {clip} holds audio, not notes")));
+        }
+        let mut notes = Vec::new();
+        for row in list.sequence_values::<Table>() {
+            let row = row?;
+            let key: i64 = row.get("key")?;
+            if !(0..=HIGHEST_KEY).contains(&key) {
+                return Err(fail(format!("key {key} is outside 0 to 127")));
+            }
+            let start: f64 = row.get("start")?;
+            let length: f64 = row.get("length")?;
+            let velocity: Option<f32> = row.get("velocity")?;
+            notes.push(Note { key: key as u8, start: offset + h.frames(start), len: h.frames(length).max(1), velocity: velocity.unwrap_or(0.8) });
+        }
+        h.apply(Command::SetNotes { clip: ClipId(clip), notes }).map(|_| ())
+    });
+    def!("selected_clips", |lua, ()| {
+        let h = held(lua)?;
+        let chosen: Vec<u64> = h.wishes.select.as_ref().unwrap_or(&h.view.selected).iter().map(|clip| clip.0).collect();
+        lua.create_sequence_from(chosen)
+    });
+    def!("select_clips", |lua, clips: Vec<u64>| {
+        let mut h = held(lua)?;
+        for clip in &clips {
+            h.clip(*clip)?;
+        }
+        h.wishes.select = Some(clips.into_iter().map(ClipId).collect());
+        Ok(())
+    });
+    def!("clear_selection", |lua, ()| {
+        held(lua)?.wishes.select = Some(Vec::new());
+        Ok(())
+    });
+    def!("track_plugins", |lua, track: u64| {
+        let h = held(lua)?;
+        lua.create_sequence_from(h.track(track)?.fx.iter().map(|fx| fx.name.clone()))
+    });
+    def!("add_plugin", |lua, (track, name): (u64, String)| {
+        let mut h = held(lua)?;
+        h.track(track)?;
+        let wanted = name.to_lowercase();
+        let plugins = &h.view.plugins;
+        let found = plugins
+            .iter()
+            .find(|(known, _, _)| known.to_lowercase() == wanted)
+            .or_else(|| plugins.iter().find(|(known, _, _)| known.to_lowercase().contains(&wanted)))
+            .cloned()
+            .ok_or_else(|| fail(format!("no plugin called {name} was found")))?;
+        let (name, path, index) = found;
+        h.apply(Command::AddFx { track: TrackId(track), fx: Fx { path, index, name, bypassed: false, state: Vec::new(), record: false, mix: 1.0 } })?;
+        Ok(h.track(track)?.fx.len())
+    });
+    def!("plugin_knobs", |lua, (track, slot): (u64, usize)| {
+        let mut h = held(lua)?;
+        let fx = h.track(track)?.fx.get(slot.wrapping_sub(1)).cloned().ok_or_else(|| fail(format!("track {track} has no plugin in slot {slot}")))?;
+        let readings: Vec<(String, f32, String)> = if loupe_plugins::rack::is_built_in(&fx.path) {
+            let effect = loupe_stock::make(&fx.name).ok_or_else(|| fail(format!("Loupe has no plugin called {}", fx.name)))?;
+            let values = built_in_values(effect.as_ref(), &fx.state);
+            effect.params().iter().zip(values).map(|(param, value)| (param.name.to_string(), value, loupe_stock_ui::shown(param, value))).collect()
+        } else {
+            hosted_readings(&mut h, track, slot, &fx.name)?
+        };
+        let out = lua.create_table()?;
+        for (at, (name, value, text)) in readings.into_iter().enumerate() {
+            let knob = lua.create_table()?;
+            knob.set("name", name)?;
+            knob.set("value", value)?;
+            knob.set("text", text)?;
+            out.set(at + 1, knob)?;
+        }
+        Ok(out)
+    });
+    def!("set_plugin_knob", |lua, (track, slot, knob, value): (u64, usize, Value, Value)| {
+        let mut h = held(lua)?;
+        let fx = h.track(track)?.fx.get(slot.wrapping_sub(1)).cloned().ok_or_else(|| fail(format!("track {track} has no plugin in slot {slot}")))?;
+        let missing = || fail(format!("{} has no knob {}", fx.name, knob.to_string().unwrap_or_default()));
+        if !loupe_plugins::rack::is_built_in(&fx.path) {
+            let names: Vec<String> = hosted_readings(&mut h, track, slot, &fx.name)?.into_iter().map(|(name, _, _)| name).collect();
+            let index = knob_index(&knob, &names).ok_or_else(missing)?;
+            let plugins = h.plugins.as_deref_mut().ok_or_else(|| fail("plugins are not running"))?;
+            let position = match &value {
+                Value::Integer(_) | Value::Number(_) => {
+                    let position = number_of(&value).unwrap_or(-1.0);
+                    if !(0.0..=1.0).contains(&position) {
+                        return Err(fail(format!("for {}, give a number from 0 to 1 or text in its own units, like \"-6 dB\"", fx.name)));
+                    }
+                    position
+                }
+                Value::String(text) => {
+                    let text = text.to_str()?.to_string();
+                    plugins.knob_from_text(TrackId(track), slot - 1, index, &text).map_err(|why| fail(format!("{} {}: {why}", fx.name, names[index])))?
+                }
+                _ => return Err(fail("give the knob a number from 0 to 1 or text like \"-6 dB\"")),
+            };
+            let state = plugins
+                .turn_and_keep(TrackId(track), slot - 1, index, position)
+                .ok_or_else(|| fail(format!("{} did not hand back its settings", fx.name)))?;
+            let shown = plugins.knob_readings(TrackId(track), slot - 1).get(index).map(|(_, _, text)| text.clone()).unwrap_or_default();
+            h.apply(Command::SetFxState { track: TrackId(track), slot: slot - 1, state })?;
+            return Ok((position, shown));
+        }
+        let mut effect = loupe_stock::make(&fx.name).ok_or_else(|| fail(format!("Loupe has no plugin called {}", fx.name)))?;
+        let params = effect.params();
+        let names: Vec<String> = params.iter().map(|param| param.name.to_string()).collect();
+        let by_id = match &knob {
+            Value::String(text) => text.to_str().ok().and_then(|text| params.iter().position(|param| param.id == text.trim().to_lowercase())),
+            _ => None,
+        };
+        let index = by_id.or_else(|| knob_index(&knob, &names)).ok_or_else(missing)?;
+        let param = params[index];
+        let wanted = match &value {
+            Value::String(text) => leading_number(&text.to_str()?),
+            _ => number_of(&value),
+        }
+        .ok_or_else(|| fail(format!("{} needs a number for {}", fx.name, param.name)))?;
+        let mut values = built_in_values(effect.as_ref(), &fx.state);
+        let value = param.clamp(wanted);
+        values[index] = value;
+        effect.set(index, value);
+        let state = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        h.apply(Command::SetFxState { track: TrackId(track), slot: slot - 1, state })?;
+        h.wishes.tweaks.push((TrackId(track), slot - 1, index, value));
+        Ok((value, loupe_stock_ui::shown(&param, value)))
+    });
+    def!("add_send", |lua, (from, to, db): (u64, u64, Option<f64>)| {
+        let mut h = held(lua)?;
+        h.apply(Command::AddSend { from: TrackId(from), to: TrackId(to) })?;
+        h.apply(Command::SetSendGain { from: TrackId(from), to: TrackId(to), gain: gain_of(db.unwrap_or(0.0)) }).map(|_| ())
+    });
+    def!("set_track_folder", |lua, (track, folder): (u64, Option<u64>)| {
+        held(lua)?.apply(Command::SetTrackParent { track: TrackId(track), parent: folder.map(TrackId) }).map(|_| ())
+    });
+    def!("add_automation_point", |lua, (track, what, seconds, value): (u64, String, f64, f32)| {
+        let mut h = held(lua)?;
+        h.track(track)?;
+        let (target, value) = match what.to_lowercase().as_str() {
+            "volume" => (Target::TrackGain(TrackId(track)), gain_of(value as f64).clamp(0.0, 2.0)),
+            "pan" => (Target::TrackPan(TrackId(track)), value.clamp(-1.0, 1.0)),
+            _ => return Err(fail(format!("{what} cannot be automated from scripts yet; use \"volume\" or \"pan\""))),
+        };
+        if h.project.envelope(target).is_none() {
+            h.apply(Command::AddEnvelope { target })?;
+            h.apply(Command::ShowEnvelopeLane { target, open: true })?;
+        }
+        let at = h.frames(seconds);
+        h.apply(Command::PutPoint { target, point: Point { at, value, shape: Shape::Linear } }).map(|_| ())
+    });
+    def!("set_loop", |lua, (start, finish): (Option<f64>, Option<f64>)| {
+        let mut h = held(lua)?;
+        h.wishes.looped = Some(match (start, finish) {
+            (Some(start), Some(finish)) if finish > start => Some((h.frames(start), h.frames(finish))),
+            (None, None) => None,
+            _ => return Err(fail("set_loop needs a start before the finish, or nothing to clear the loop")),
+        });
+        Ok(())
+    });
+    def!("import_audio", |lua, (file, track, seconds): (String, u64, Option<f64>)| {
+        let mut h = held(lua)?;
+        h.track(track)?;
+        let mut path = PathBuf::from(&file);
+        if path.is_relative() {
+            if let Some(folder) = &h.view.folder {
+                path = folder.join(path);
+            }
+        }
+        let source = std::sync::Arc::new(Source::load(&path, h.project.rate).map_err(|why| fail(format!("could not read {file}: {why}")))?);
+        let start = h.frames(seconds.unwrap_or(0.0));
+        match h.apply(Command::AddClip { track: TrackId(track), source, start })? {
+            Outcome::Clip(id) => Ok(id.0),
+            _ => Err(fail("the clip was not placed")),
+        }
+    });
+    def!("set_instrument", |lua, (track, name): (u64, String)| {
+        let instrument = match name.to_lowercase().as_str() {
+            "synth" => Instrument::default(),
+            "drums" => Instrument::Drums,
+            "sampler" => Instrument::Sampler(loupe_engine::Sampler::default()),
+            _ => return Err(fail(format!("{name} is not an instrument; use \"synth\", \"drums\" or \"sampler\""))),
+        };
+        held(lua)?.apply(Command::SetInstrument { track: TrackId(track), instrument }).map(|_| ())
+    });
+    def!("set_sample", |lua, (track, file): (u64, String)| {
+        let mut h = held(lua)?;
+        h.track(track)?;
+        let mut path = PathBuf::from(&file);
+        if path.is_relative() {
+            if let Some(folder) = &h.view.folder {
+                path = folder.join(path);
+            }
+        }
+        let sample = std::sync::Arc::new(Source::load(&path, h.project.rate).map_err(|why| fail(format!("could not read {file}: {why}")))?);
+        if !matches!(h.track(track)?.instrument, Instrument::Sampler(_)) {
+            h.apply(Command::SetInstrument { track: TrackId(track), instrument: Instrument::Sampler(loupe_engine::Sampler::default()) })?;
+        }
+        h.apply(Command::SetSample { track: TrackId(track), sample: Some(sample) }).map(|_| ())
+    });
+    def!("export", |lua, stems: Option<bool>| {
+        held(lua)?.wishes.export = Some(stems.unwrap_or(false));
+        Ok(())
+    });
+    globals.set("loupe", api)?;
+    Ok(())
 }
 
 fn say(words: Variadic<Value>) -> String {
@@ -791,7 +1160,7 @@ mod tests {
     }
 
     fn ran(source: &str, project: &mut Project) -> Result<Ran, String> {
-        run(source, "test", project, &view(), None)
+        run(source, "test", project, view(), None)
     }
 
     #[test]
@@ -826,7 +1195,6 @@ mod tests {
         assert_eq!(done.wishes.fetches.len(), 2);
         assert_eq!(done.wishes.fetches[0].method, "POST");
         assert_eq!(done.wishes.fetches[0].headers, vec![("X-Key".to_string(), "k".to_string())]);
-        assert_eq!(done.wishes.keep, vec![("last".to_string(), Some("7".to_string()))]);
         assert!(ran(r#"loupe.fetch("file:///etc/passwd")"#, &mut project).is_err(), "fetch reached a file");
     }
 
@@ -968,15 +1336,14 @@ mod tests {
             "#,
             "test",
             &mut project,
-            &view(),
-            Some(&mut eq),
+            view(),
+            Some(Box::new(eq)),
         )
         .unwrap();
         assert_eq!(done.wishes.printed, vec!["2 Band 1 Frequency 10010 Hz".to_string(), "3000 Hz".to_string(), "10010 Hz".to_string()]);
         assert_eq!(project.tracks[0].fx[0].state, [0.0f32, 0.5].iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<u8>>());
         assert!(done.changed && done.wishes.tweaks.is_empty());
-        let mut eq = FakeEq { knobs: vec![("Gain".into(), 0.5)] };
-        let mut again = |source: &str, project: &mut Project| run(source, "test", project, &view(), Some(&mut eq)).unwrap_err();
+        let again = |source: &str, project: &mut Project| run(source, "test", project, view(), Some(Box::new(FakeEq { knobs: vec![("Gain".into(), 0.5)] }))).unwrap_err();
         assert!(again("loupe.set_plugin_knob(loupe.tracks()[1], 1, 'gain', 3000)", &mut project).contains("from 0 to 1"));
         assert!(again("loupe.set_plugin_knob(loupe.tracks()[1], 1, 'gain', 'loud')", &mut project).contains("not a frequency"));
         assert!(again("loupe.set_plugin_knob(loupe.tracks()[1], 1, 'width', 0.5)", &mut project).contains("has no knob"));
@@ -1083,12 +1450,11 @@ mod tests {
         }
         std::fs::write(folder.join("hit.wav"), wav).unwrap();
         let mut project = song();
-        let mut here = view();
-        here.folder = Some(folder.clone());
-        let done = run("local clip = loupe.import_audio('hit.wav', loupe.tracks()[1], 1.5) print(loupe.clip_start(clip), loupe.clip_length(clip))", "test", &mut project, &here, None).unwrap();
+        let here = || View { folder: Some(folder.clone()), ..view() };
+        let done = run("local clip = loupe.import_audio('hit.wav', loupe.tracks()[1], 1.5) print(loupe.clip_start(clip), loupe.clip_length(clip))", "test", &mut project, here(), None).unwrap();
         assert_eq!(done.wishes.printed, vec!["1.5 0.1".to_string()]);
-        assert!(run("loupe.import_audio('missing.wav', loupe.tracks()[1], 0)", "test", &mut project, &here, None).unwrap_err().contains("could not read"));
-        run("loupe.set_sample(loupe.tracks()[1], 'hit.wav')", "test", &mut project, &here, None).unwrap();
+        assert!(run("loupe.import_audio('missing.wav', loupe.tracks()[1], 0)", "test", &mut project, here(), None).unwrap_err().contains("could not read"));
+        run("loupe.set_sample(loupe.tracks()[1], 'hit.wav')", "test", &mut project, here(), None).unwrap();
         assert!(matches!(project.tracks[0].instrument, Instrument::Sampler(_)));
         assert_eq!(project.tracks[0].sample.as_ref().map(|s| s.frames.len()), Some(4_800));
         std::fs::remove_dir_all(folder).unwrap();

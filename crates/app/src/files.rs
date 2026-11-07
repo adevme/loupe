@@ -182,6 +182,7 @@ impl App {
             Ok(()) => {
                 make_project_folders(&path);
                 settings::remember(&path);
+                self.happened(crate::scripting::Event::SongSave(path.clone()));
                 self.path = Some(path);
                 self.dirty = false;
                 self.problem = None;
@@ -313,6 +314,7 @@ impl App {
         }
         if !as_template && !protect {
             settings::remember(&path);
+            self.happened(crate::scripting::Event::SongOpen(path.clone()));
             self.path = Some(path);
         }
         self.problem = match opened.not_found.as_slice() {

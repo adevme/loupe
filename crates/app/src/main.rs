@@ -728,7 +728,10 @@ struct App {
     rec_shown: HashSet<TrackId>,
     copied_clips: Option<clipboard::Copied>,
     scripts: Vec<scripts::Script>,
-    background: Vec<scripts::Background>,
+    residents: Vec<scripts::Resident>,
+    script_events: Vec<scripting::Event>,
+    listen_level: f32,
+    listen_owner: Option<PathBuf>,
     drop_cut_pass: bool,
     snap: bool,
     follow: following::Follow,
@@ -889,7 +892,10 @@ impl App {
             rec_shown: HashSet::new(),
             copied_clips: None,
             scripts: Vec::new(),
-            background: Vec::new(),
+            residents: Vec::new(),
+            script_events: Vec::new(),
+            listen_level: 1.0,
+            listen_owner: None,
             drop_cut_pass: false,
             snap: settings.snap,
             follow: settings.follow,
@@ -1107,7 +1113,10 @@ impl App {
             rec_shown: HashSet::new(),
             copied_clips: None,
             scripts: Vec::new(),
-            background: Vec::new(),
+            residents: Vec::new(),
+            script_events: Vec::new(),
+            listen_level: 1.0,
+            listen_owner: None,
             drop_cut_pass: false,
             snap: false,
             follow: following::Follow::default(),
@@ -1167,6 +1176,7 @@ impl App {
                 task = Task::batch([task, window::gain_focus(self.overlay_window)]);
             }
         }
+        task = Task::batch([task, self.deliver_script_events()]);
         task = Task::batch([task, self.settle_fx_windows(), self.settle_stock_windows()]);
         if !self.a_window_of_ours(self.overlay_window) {
             self.overlay_window = self.main_window;
@@ -1491,6 +1501,7 @@ impl App {
                 if !self.armed.remove(&track) {
                     self.armed.insert(track);
                 }
+                self.happened(scripting::Event::Arm { track, armed: self.armed.contains(&track) });
                 self.listen_if_armed();
                 self.cache.clear();
             }
@@ -2904,9 +2915,9 @@ impl App {
             Subscription::none()
         };
         let looking_around = iced::time::every(Duration::from_secs(1)).map(|_| Message::LookAround);
-        let scripts_due = match self.background.is_empty() {
-            true => Subscription::none(),
-            false => iced::time::every(Duration::from_millis(SCRIPT_CHECK_MS)).map(|_| Message::ScriptsDue),
+        let scripts_due = match self.script_tick() {
+            None => Subscription::none(),
+            Some(tick) => iced::time::every(tick).map(|_| Message::ScriptsDue),
         };
         let nudging = iced::event::listen_with(|event, _status, _window| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::ArrowUp), modifiers, .. })
@@ -3410,6 +3421,7 @@ impl App {
     fn stop_playing(&mut self) {
         self.engine.stop();
         self.playing = false;
+        self.happened(scripting::Event::Stop);
         self.settle = SETTLE_TICKS;
         self.writing = None;
     }
@@ -3422,6 +3434,7 @@ impl App {
         self.engine.play();
         self.playing = true;
         self.start_meters_afresh();
+        self.happened(scripting::Event::Play);
     }
 
     fn set_loop(&mut self, range: LoopRange) {

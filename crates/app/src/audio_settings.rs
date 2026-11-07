@@ -143,6 +143,7 @@ impl App {
         let output = if self.silent { Output::SilentAt(self.audio.rate.unwrap_or(48_000)) } else { Output::Device(self.audio.clone()) };
         drop(std::mem::replace(&mut self.engine, Engine::start(Output::Silent)));
         self.engine = Engine::start(output);
+        self.engine.set_listen_level(self.listen_level);
         self.note_audio_for_crashes();
         self.problem = self.engine.output_error().map(|e| format!("Sound output: {e}"));
         self.audio_trouble = trouble_words(self.engine.output_failure());
