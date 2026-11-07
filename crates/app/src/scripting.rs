@@ -13,7 +13,7 @@ const HIGHEST_KEY: i64 = 127;
 const MOST_FETCHES: usize = 16;
 const SHORTEST_EVERY: f64 = 0.25;
 
-pub const FUNCTIONS: [(&str, &str); 69] = [
+pub const FUNCTIONS: [(&str, &str); 71] = [
     ("print(...)", "Show text in Loupe's status line"),
     ("bpm()", "The tempo in beats per minute"),
     ("set_bpm(bpm)", "Change the tempo"),
@@ -34,6 +34,8 @@ pub const FUNCTIONS: [(&str, &str); 69] = [
     ("set_track_name(track, name)", "Rename a track"),
     ("track_volume(track)", "A track's fader in dB"),
     ("set_track_volume(track, db)", "Set a track's fader in dB"),
+    ("master_volume()", "The master fader in dB"),
+    ("set_master_volume(db)", "Set the master fader in dB"),
     ("track_pan(track)", "A track's pan, -1 left to 1 right"),
     ("set_track_pan(track, pan)", "Set a track's pan"),
     ("track_muted(track)", "Whether a track is muted"),
@@ -448,6 +450,8 @@ pub fn run(source: &str, name: &str, project: &mut Project, view: &View, plugins
         def!("set_track_volume", |_, (track, db): (u64, f64)| {
             host.borrow_mut().apply(Command::SetTrackGain { track: TrackId(track), gain: gain_of(db) }).map(|_| ())
         });
+        def!("master_volume", |_, ()| Ok(db_of(host.borrow().project.master)));
+        def!("set_master_volume", |_, db: f64| host.borrow_mut().apply(Command::SetMasterGain(gain_of(db))).map(|_| ()));
         def!("track_pan", |_, track: u64| Ok(host.borrow().track(track)?.pan));
         def!("set_track_pan", |_, (track, pan): (u64, f32)| {
             host.borrow_mut().apply(Command::SetTrackPan { track: TrackId(track), pan }).map(|_| ())
@@ -847,6 +851,14 @@ mod tests {
         assert_eq!(project.tracks[0].name, "Drums bus");
         assert!((db_of(project.tracks[1].gain) + 6.0).abs() < 1e-4);
         assert_eq!(project.tracks[1].pan, -0.5);
+    }
+
+    #[test]
+    fn a_script_reads_and_changes_the_master() {
+        let mut project = song();
+        let done = ran("if loupe.master_volume() > -10 then loupe.set_master_volume(-10) end print(loupe.master_volume())", &mut project).unwrap();
+        assert!(done.changed);
+        assert!((db_of(project.master) + 10.0).abs() < 1e-4);
     }
 
     #[test]
