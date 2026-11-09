@@ -455,15 +455,17 @@ impl Timeline<'_> {
         let (left, right) = (from.x.min(to.x), from.x.max(to.x));
         let (top, bottom) = (from.y.min(to.y), from.y.max(to.y));
         let mut inside = Vec::new();
+        let pad = self.palette.clip_padding;
+        let crosses = |row_top: f32, tall: f32| row_top + tall - pad >= top && row_top + pad <= bottom;
         for (i, track) in self.project.tracks.iter().enumerate() {
-            let lane_top = self.track_top(i) + self.palette.clip_padding;
-            let lane_bottom = self.track_top(i) + self.height_of(track) - self.palette.clip_padding;
-            if lane_bottom < top || lane_top > bottom {
-                continue;
-            }
+            let main_top = self.track_top(i);
+            let main_tall = self.clips_height(track);
+            let lanes = self.take_lanes(track);
             for clip in &track.clips {
+                let in_main = (clip.lane.is_none() || clip.lane_on) && crosses(main_top, main_tall);
+                let in_lane = clip.lane.is_some_and(|take| take < lanes && crosses(self.take_lane_top(i, take), self.take_tall(track)));
                 let touches = self.x_of(clip.start as f64) <= right && self.x_of(clip.end() as f64) >= left;
-                if touches {
+                if touches && (in_main || in_lane) {
                     inside.push(clip.id);
                 }
             }
@@ -3381,6 +3383,22 @@ mod take_folders {
     }
 
 
+
+    #[test]
+    fn a_box_over_one_take_lane_selects_only_that_take() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        let lane_number = 1;
+        let y = TOP + TALL + lane_number as f32 * TALL + TALL / 2.0;
+        let timeline = timeline_of(&app);
+        let picked = timeline.clips_between(Point::new(LEFT + 50.0, y - 4.0), Point::new(LEFT + 150.0, y + 4.0));
+        assert!(!picked.is_empty(), "the box picked nothing");
+        let track = app.project.track(vox).unwrap();
+        for id in &picked {
+            let clip = track.clips.iter().find(|clip| clip.id == *id).expect("a clip from another track was picked");
+            assert_eq!(clip.lane, Some(lane_number), "a box over take {} picked a clip from lane {:?}", lane_number + 1, clip.lane);
+        }
+    }
     #[test]
     fn a_deleted_take_clip_is_a_gap_nothing_can_land_on_and_it_stops_being_selected() {
         let (mut app, vox, _) = a_looped_vocal_and_drums();
