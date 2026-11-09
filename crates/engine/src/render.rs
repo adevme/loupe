@@ -984,7 +984,7 @@ fn play_while_stretching(clip: &Clip, first: Frames, target: &mut [[f32; 2]], ga
     while done < target.len() {
         let many = (target.len() - done).min(STRETCH_PREVIEW_CHUNK);
         for (i, frame) in chunk[..many].iter_mut().enumerate() {
-            let at = (clip.offset + first + (done + i) as Frames) as f64 / clip.stretch;
+            let at = clip.offset as f64 / clip.stretch + (first + (done + i) as Frames) as f64;
             *frame = sampled_at(&clip.source.frames, at);
         }
         mix_faded(&mut target[done..done + many], &chunk[..many], gain, clip, first + done as Frames);
@@ -2407,6 +2407,21 @@ mod routing {
         out
     }
 
+
+    #[test]
+    fn a_clip_waiting_for_its_stretch_plays_at_its_own_pitch() {
+        let rate = 48_000;
+        let mut p = Project::new(rate);
+        let Ok(Outcome::Track(track)) = p.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let tone: Vec<[f32; 2]> = (0..rate as usize).map(|i| { let v = (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin() * 0.5; [v, v] }).collect();
+        let Ok(Outcome::Clip(clip)) = p.apply(Command::AddClip { track, source: Arc::new(Source::from_frames("tone", tone)), start: 0 }) else { panic!() };
+        p.apply(Command::SetStretch { clip, stretch: 1.5 }).unwrap();
+        assert!(p.clip(clip).unwrap().waiting_for_stretch());
+        let out = heard(&p, rate as usize / 2);
+        let crossings = out.windows(2).filter(|w| (w[0][0] <= 0.0) != (w[1][0] <= 0.0)).count();
+        let hz = crossings as f64 / 2.0 / 0.5;
+        assert!((hz - 440.0).abs() < 5.0, "the clip played at {hz:.0} Hz while it waited for its stretch");
+    }
     #[test]
     fn pan_turns_down_the_far_side_only() {
         let mut p = Project::new(48_000);
