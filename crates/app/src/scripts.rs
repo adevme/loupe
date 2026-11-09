@@ -613,6 +613,35 @@ mod tests {
         fs::remove_dir_all(folder).ok();
     }
 
+    const CAP_30: &str = "-- autostart: yes\nlocal cap = 20 * math.log(0.3, 10)\nlocal timer\n\nlocal function hold()\n  local over = loupe.master_volume() - cap\n  if over > 0 then\n    loupe.set_listen_volume(-over)\n  else\n    loupe.set_listen_volume(0)\n  end\nend\n\nloupe.on(\"record_start\", function(e)\n  hold()\n  if not timer then\n    timer = loupe.every(0.1, hold)\n  end\nend)\n\nloupe.on(\"record_stop\", function(e)\n  if timer then\n    loupe.off(timer)\n    timer = nil\n  end\n  loupe.set_listen_volume(0)\nend)\n";
+
+    #[test]
+    fn the_cap_script_holds_what_you_hear_at_30_percent_through_a_take() {
+        let (folder, path) = script_in("cap-30", "cap.lua", CAP_30);
+        let mut app = App::bare();
+        let _ = app.run_script(&path);
+        app.happened(Event::RecordStart { tracks: Vec::new(), retake: false });
+        let _ = app.deliver_script_events();
+        assert!((app.listen_level - 0.3).abs() < 1e-4, "a full master was heard at {}", app.listen_level);
+        assert_eq!(app.project.master, 1.0, "the song's master moved");
+        app.project.master = 0.6;
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = app.run_due_scripts();
+        assert!((app.project.master * app.listen_level - 0.3).abs() < 1e-4, "moving the master mid take was heard at {}", app.project.master * app.listen_level);
+        app.project.master = 0.2;
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = app.run_due_scripts();
+        assert_eq!(app.listen_level, 1.0, "a master under the cap was turned down");
+        app.project.master = 1.0;
+        app.happened(Event::RecordStop);
+        let _ = app.deliver_script_events();
+        assert_eq!(app.listen_level, 1.0, "stopping left the listen level down");
+        std::thread::sleep(Duration::from_millis(150));
+        let _ = app.run_due_scripts();
+        assert_eq!(app.listen_level, 1.0, "the timer kept running after the take");
+        fs::remove_dir_all(folder).ok();
+    }
+
     #[test]
     fn pressing_record_turns_it_down_and_a_next_take_says_so() {
         let (folder, path) = script_in("record-button", "quieter.lua", &format!("{QUIETER}loupe.on(\"record_start\", function(e) print(\"tracks\", #e.tracks, \"retake\", e.retake) end)\n"));
