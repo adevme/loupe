@@ -877,14 +877,14 @@ impl Rt {
                 racks.process_takes(*id, sound);
             }
             self.shared.note_track(index, MeterPoint::PostFx, loudest(&ear.track[..frames]));
-            let gain = if track.muted { 0.0 } else { track.gain * master };
+            let gain = if track.muted { 0.0 } else { track.gain };
             let (left, right) = pan_gains(track.pan);
             let mut top = 0.0f32;
             for (out, frame) in ear.out[..frames].iter_mut().zip(ear.track[..frames].iter()) {
                 let heard = [frame[0] * gain * left, frame[1] * gain * right];
                 top = top.max(heard[0].abs()).max(heard[1].abs());
-                out[0] += heard[0];
-                out[1] += heard[1];
+                out[0] += heard[0] * master;
+                out[1] += heard[1] * master;
             }
             self.shared.note_track(index, MeterPoint::PostFader, top);
         }
@@ -2846,6 +2846,31 @@ mod monitor_delay_tests {
         (vocal, mic)
     }
 
+
+    #[test]
+    fn the_master_fader_never_turns_down_a_track_meter_when_heard_straight() {
+        let (mut rt, mut remote) = pair(RATE);
+        let mut project = Project::new(RATE);
+        let Ok(Outcome::Track(vocal)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        project.master = 0.190625;
+        remote.outbox.push(Msg::Project(Arc::new(project))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(None)).ok().unwrap();
+        remote.outbox.push(Msg::HearThroughChain(false)).ok().unwrap();
+        let (mut mic, feed) = RingBuffer::new(RING);
+        remote.outbox.push(Msg::Hear(Some((feed, RATE, 1)))).ok().unwrap();
+        remote.outbox.push(Msg::HearOn([Some(vocal), None, None, None, None, None, None, None])).ok().unwrap();
+        rt.process(16);
+        for _ in 0..40 {
+            for _ in 0..256 {
+                let _ = mic.push(1.0);
+            }
+            rt.process(256);
+        }
+        let (tracks, master) = remote.shared.take_levels();
+        let vox = tracks[0][MeterPoint::PostFader.index()];
+        assert!((vox - 1.0).abs() < 1e-3, "the master fader turned the Vox meter down to {vox}");
+        assert!((master - 0.190625).abs() < 1e-3, "the master did not turn down what is heard, it read {master}");
+    }
     fn sing_over(wire: &Wire, seconds: f64) -> Heard {
         sing_through(wire, seconds, None).0
     }
