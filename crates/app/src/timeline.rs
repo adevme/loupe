@@ -770,7 +770,7 @@ impl Timeline<'_> {
         let Some(shape) = self.clip_box(clip) else {
             return Vec::new();
         };
-        if self.selected != Some(clip.id)
+        if !self.selection.contains(&clip.id)
             || shape.right - shape.left < MIN_CLIP_PX_FOR_HANDLES
             || shape.wave_height() < 20.0
         {
@@ -993,7 +993,7 @@ impl Timeline<'_> {
                 return Hit::Folder(&self.project.tracks[i]);
             }
         }
-        if let Some(clip) = self.selected.and_then(|id| self.project.clip(id)) {
+        for clip in self.selection.iter().filter_map(|id| self.project.clip(*id)) {
             let reached = self.grips(clip).into_iter().find(|(_, at)| at.distance(p) <= HANDLE_REACH);
             if let Some((grip, _)) = reached {
                 return Hit::Grip(clip, grip);
@@ -1254,7 +1254,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             true => Drag::Stretch { clip: clip.id, edge },
                             false => Drag::Trim { clip: clip.id, edge },
                         });
-                        Some(Message::Select(Some(clip.id)))
+                        (!self.selection.contains(&clip.id)).then_some(Message::Select(Some(clip.id)))
                     }
                     (_, Hit::Clip(clip)) => {
                         state.drag = Some(Drag::Clip {
@@ -1386,7 +1386,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             }
                             Grip::Gain => {
                                 let db = (*db_at_grab + travel_up * GAIN_DB_PER_PX).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-                                Some(Message::ClipGain(db))
+                                Some(Message::ClipGain { clip: clip.id, db })
                             }
                         };
                         (Captured, message)

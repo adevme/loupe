@@ -175,7 +175,7 @@ pub enum Message {
     Delete,
     Undo,
     Redo,
-    ClipGain(f32),
+    ClipGain { clip: ClipId, db: f32 },
     SetFade { clip: ClipId, edge: Edge, fade: Fade },
     AddTrack,
     RemoveTrack(TrackId),
@@ -1477,11 +1477,27 @@ impl App {
                     self.restored();
                 }
             }
-            Message::ClipGain(db) => {
-                if let Some(clip) = self.selected {
-                    let gain = 10f32.powf(db / 20.0);
-                    self.edit(Some(Run::Gain(clip)), Command::SetClipGain { clip, gain });
-                }
+            Message::ClipGain { clip, db } => {
+                let Some(lead) = self.project.clip(clip).map(|found| found.gain) else {
+                    return Task::none();
+                };
+                let shift = db - 20.0 * lead.max(1e-6).log10();
+                let gains: Vec<(ClipId, f32)> = self
+                    .affected_by(clip)
+                    .into_iter()
+                    .filter_map(|id| self.project.clip(id).map(|found| (id, found.gain)))
+                    .map(|(id, was)| {
+                        let now = if id == clip { db } else { (20.0 * was.max(1e-6).log10() + shift).clamp(timeline::MIN_GAIN_DB, timeline::MAX_GAIN_DB) };
+                        (id, 10f32.powf(now / 20.0))
+                    })
+                    .collect();
+                self.transact(Some(Run::Gain(clip)), |project| {
+                    let mut last = Outcome::Done;
+                    for (clip, gain) in gains {
+                        last = project.apply(Command::SetClipGain { clip, gain })?;
+                    }
+                    Ok(last)
+                });
             }
             Message::SetFade { clip, edge, fade } => {
                 self.edit(Some(Run::Fade(clip, edge)), Command::SetClipFade { clip, edge, fade });

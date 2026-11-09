@@ -293,6 +293,22 @@ mod nudge_tests {
         let _ = app.update(crate::Message::TrimClip { clip: a, start: 1_500, offset: 500, len: 2_000 });
         assert_eq!(app.project.clip(b).map(|clip| clip.len), Some(2_500), "an unselected clip was trimmed");
     }
+
+    #[test]
+    fn dragging_the_gain_of_one_selected_clip_moves_them_all_by_the_same_db() {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(top)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 4_000]));
+        let Ok(Outcome::Clip(a)) = app.project.apply(Command::AddClip { track: top, source: source.clone(), start: 0 }) else { panic!() };
+        let Ok(Outcome::Clip(b)) = app.project.apply(Command::AddClip { track: top, source, start: 5_000 }) else { panic!() };
+        app.project.apply(Command::SetClipGain { clip: b, gain: 0.5 }).unwrap();
+        app.choose([a, b]);
+        let _ = app.update(crate::Message::ClipGain { clip: a, db: -6.0 });
+        let db = |clip| 20.0 * app.project.clip(clip).unwrap().gain.log10();
+        assert!((db(a) + 6.0).abs() < 0.01, "the dragged clip is at {} dB", db(a));
+        assert!((db(b) - (20.0 * 0.5f32.log10() - 6.0)).abs() < 0.01, "the other selected clip is at {} dB", db(b));
+        assert_eq!(app.selection.len(), 2, "the drag dropped the selection");
+    }
     #[test]
     fn the_vertical_drag_key_is_the_one_chosen() {
         use crate::settings::VerticalDrag;
