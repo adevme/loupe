@@ -2138,10 +2138,15 @@ impl App {
                 }
             }
             Message::TrimClip { clip, start, offset, len } => {
-                if let Some(track) = self.project.track_of(clip).map(|track| track.id) {
+                let trims = self.trims_following(clip, start, offset, len);
+                if !trims.is_empty() {
                     self.transact(Some(Run::Trim(clip)), |project| {
-                        project.apply(Command::TrimClip { clip, offset, len })?;
-                        project.apply(Command::MoveClip { clip, track, start })
+                        let mut last = Outcome::Done;
+                        for (clip, track, start, offset, len) in trims {
+                            project.apply(Command::TrimClip { clip, offset, len })?;
+                            last = project.apply(Command::MoveClip { clip, track, start })?;
+                        }
+                        Ok(last)
                     });
                 }
             }

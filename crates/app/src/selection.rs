@@ -62,6 +62,35 @@ impl App {
         }
     }
 
+    pub(crate) fn trims_following(&self, lead: ClipId, start: Frames, offset: Frames, len: Frames) -> Vec<(ClipId, TrackId, Frames, Frames, Frames)> {
+        let Some(was) = self.project.clip(lead).cloned() else {
+            return Vec::new();
+        };
+        let shortest = crate::timeline::SHORTEST_CLIP;
+        let from_left = start != was.start;
+        let mut trims = Vec::new();
+        for id in self.affected_by(lead) {
+            let (Some(clip), Some(track)) = (self.project.clip(id), self.project.track_of(id).map(|track| track.id)) else { continue };
+            if id == lead {
+                trims.push((id, track, start, offset, len));
+                continue;
+            }
+            if from_left {
+                let earliest = clip.start.saturating_sub(clip.offset);
+                let latest = clip.end().saturating_sub(shortest).max(earliest);
+                let moved = (clip.start as i64 + start as i64 - was.start as i64).max(0) as Frames;
+                let new_start = moved.clamp(earliest, latest);
+                trims.push((id, track, new_start, (clip.offset as i64 + new_start as i64 - clip.start as i64).max(0) as Frames, clip.end() - new_start));
+            } else {
+                let longest = clip.audio_len().saturating_sub(clip.offset).max(clip.len);
+                let grown = (clip.len as i64 + len as i64 - was.len as i64).max(0) as Frames;
+                let new_len = grown.clamp(shortest.min(clip.len), longest);
+                trims.push((id, track, clip.start, clip.offset, new_len));
+            }
+        }
+        trims
+    }
+
     fn in_song_order(&self) -> Vec<ClipId> {
         let mut clips: Vec<(Frames, ClipId)> = self
             .selection
@@ -242,6 +271,28 @@ mod nudge_tests {
         assert_eq!(app.project.clip(clip).map(|found| found.start), Some(12_345));
     }
 
+
+    #[test]
+    fn trimming_one_of_several_selected_clips_trims_them_all() {
+        let mut app = App::bare();
+        let Ok(Outcome::Track(top)) = app.project.apply(Command::AddTrack { name: "Take 1".into() }) else { panic!() };
+        let Ok(Outcome::Track(below)) = app.project.apply(Command::AddTrack { name: "Take 2".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("take", vec![[0.1, 0.1]; 4_000]));
+        let Ok(Outcome::Clip(a)) = app.project.apply(Command::AddClip { track: top, source: source.clone(), start: 1_000 }) else { panic!() };
+        let Ok(Outcome::Clip(b)) = app.project.apply(Command::AddClip { track: below, source, start: 1_000 }) else { panic!() };
+        app.choose([a, b]);
+        let _ = app.update(crate::Message::TrimClip { clip: a, start: 1_000, offset: 0, len: 3_000 });
+        assert_eq!(app.project.clip(a).map(|clip| clip.len), Some(3_000));
+        assert_eq!(app.project.clip(b).map(|clip| clip.len), Some(3_000), "the other selected clip kept its end");
+        let _ = app.update(crate::Message::TrimClip { clip: b, start: 1_500, offset: 500, len: 2_500 });
+        for clip in [a, b] {
+            let found = app.project.clip(clip).unwrap();
+            assert_eq!((found.start, found.offset, found.len), (1_500, 500, 2_500), "a selected clip kept its start");
+        }
+        app.choose([a]);
+        let _ = app.update(crate::Message::TrimClip { clip: a, start: 1_500, offset: 500, len: 2_000 });
+        assert_eq!(app.project.clip(b).map(|clip| clip.len), Some(2_500), "an unselected clip was trimmed");
+    }
     #[test]
     fn the_vertical_drag_key_is_the_one_chosen() {
         use crate::settings::VerticalDrag;
