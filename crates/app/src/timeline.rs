@@ -21,6 +21,7 @@ const SHORTEST_SPAN_SECONDS: f64 = 30.0;
 const ADD_ROW_H: f32 = 40.0;
 const MIN_GRID_PX: f64 = 14.0;
 const DRAG_THRESHOLD: f32 = 4.0;
+const MARQUEE_EDGE: f32 = 28.0;
 const RESIZE_GRIP: f32 = 5.0;
 const ROOMY_HEADER_H: f32 = 72.0;
 const ARM_BUTTON: f32 = 22.0;
@@ -173,6 +174,8 @@ enum Drag {
     Reorder { track: TrackId, from: Point, at: Option<usize> },
     Scroll { grab_x: f32, span: f64 },
     Slice { from: Point, to: Point },
+    // `from.y` is measured down the whole song, not the screen, so the box keeps
+    // its corner while the view scrolls under it.
     Marquee { from: Point, to: Point },
     Trim { clip: ClipId, edge: Edge },
     Stretch { clip: ClipId, edge: Edge },
@@ -1038,6 +1041,18 @@ impl Timeline<'_> {
         View { zoom, scroll: self.within_span(time - anchor / zoom, zoom), ..self.view }
     }
 
+    // Picks what a selection box covers once the view moves to `view`, and moves
+    // it there. `from` is the box corner measured down the whole song.
+    fn marquee_select(&self, from: Point, p: Point, view: View) -> Message {
+        let moved = view.scroll_y - self.view.scroll_y;
+        let corner = Point::new(from.x, from.y - self.view.scroll_y);
+        let picked = Message::SelectMany(self.clips_between(corner, Point::new(p.x, p.y + moved)));
+        match view != self.view {
+            true => Message::Both(Box::new(Message::SetView(view)), Box::new(picked)),
+            false => picked,
+        }
+    }
+
     fn scrolled(&self, dx: f32, dy: f32, bounds: Rectangle) -> View {
         let most = (self.content_height() - bounds.height).max(0.0);
         View {
@@ -1112,7 +1127,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                             return (Captured, Some(Message::ToggleSelect(clip.id)));
                         }
                         Hit::Lane => {
-                            state.drag = Some(Drag::Marquee { from: p, to: p });
+                            state.drag = Some(Drag::Marquee { from: Point::new(p.x, p.y + self.view.scroll_y), to: p });
                             return (Captured, Some(Message::SelectMany(Vec::new())));
                         }
                         _ => {}
@@ -1439,7 +1454,18 @@ impl canvas::Program<Message> for Timeline<'_> {
                     }
                     Drag::Marquee { from, to } => {
                         *to = p;
-                        (Captured, Some(Message::SelectMany(self.clips_between(*from, p))))
+                        // Near the top or bottom edge the view scrolls, so a box can reach
+                        // takes below the ones that fit on screen.
+                        let reach = MARQUEE_EDGE;
+                        let dy = if p.y > bounds.height - reach {
+                            (p.y - (bounds.height - reach)).min(reach)
+                        } else if p.y < self.lanes_top() + reach {
+                            -((self.lanes_top() + reach) - p.y).min(reach)
+                        } else {
+                            0.0
+                        };
+                        let view = if dy != 0.0 { self.scrolled(0.0, dy, bounds) } else { self.view };
+                        (Captured, Some(self.marquee_select(*from, p, view)))
                     }
                     Drag::Slice { to, .. } => {
                         *to = p;
@@ -1543,6 +1569,9 @@ impl canvas::Program<Message> for Timeline<'_> {
                 } else {
                     self.scrolled(dx, dy, bounds)
                 };
+                if let Some(Drag::Marquee { from, .. }) = &state.drag {
+                    return (Captured, Some(self.marquee_select(*from, p, view)));
+                }
                 (Captured, (view != self.view).then_some(Message::SetView(view)))
             }
             _ => (Ignored, None),
@@ -1627,6 +1656,7 @@ impl canvas::Program<Message> for Timeline<'_> {
             }
         }
         if let Some(Drag::Marquee { from, to }) = &state.drag {
+            let from = &Point::new(from.x, from.y - self.view.scroll_y);
             let corner = Point::new(from.x.min(to.x).max(self.lanes_left()), from.y.min(to.y).max(self.lanes_top()));
             let reach = from.x.max(to.x).min(self.lanes_right());
             let size = Size::new((reach - corner.x).max(0.0), (from.y.max(to.y) - corner.y).max(0.0));
@@ -3405,6 +3435,27 @@ mod take_folders {
             let clip = track.clips.iter().find(|clip| clip.id == *id).expect("a clip from another track was picked");
             assert_eq!(clip.lane, Some(lane_number), "a box over take {} picked a clip from lane {:?}", lane_number + 1, clip.lane);
         }
+    }
+
+    #[test]
+    fn a_box_dragged_to_the_bottom_edge_scrolls_down_to_the_takes_below() {
+        let (mut app, vox, _) = a_looped_vocal_and_drums();
+        let _ = app.update(crate::Message::ToggleTakes(vox));
+        let timeline = timeline_of(&app);
+        let short = Rectangle { height: TOP + TALL * 2.5, ..CANVAS };
+        assert!(timeline.content_height() > short.height, "the takes fit, nothing to scroll to");
+        let mut state = Interaction { modifiers: keyboard::Modifiers::COMMAND, ..Interaction::default() };
+        let at = |x: f32, y: f32| mouse::Cursor::Available(Point::new(short.x + x, short.y + y));
+        let empty = (CANVAS.width - 10.0, TOP + TALL / 2.0);
+        let press = canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let (_, started) = canvas::Program::update(&timeline, &mut state, press, short, at(empty.0, empty.1));
+        assert!(matches!(started, Some(crate::Message::SelectMany(ref none)) if none.is_empty()), "the box did not start");
+        let bottom = short.height - 2.0;
+        let moved = canvas::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(LEFT + 100.0, bottom) });
+        let (_, message) = canvas::Program::update(&timeline, &mut state, moved, short, at(LEFT + 100.0, bottom));
+        let Some(crate::Message::Both(view, picked)) = message else { panic!("the box at the bottom edge did not scroll: {message:?}") };
+        assert!(matches!(*view, crate::Message::SetView(view) if view.scroll_y > 0.0), "the view did not move down");
+        assert!(matches!(*picked, crate::Message::SelectMany(_)), "the box stopped selecting while it scrolled");
     }
     #[test]
     fn a_deleted_take_clip_is_a_gap_nothing_can_land_on_and_it_stops_being_selected() {

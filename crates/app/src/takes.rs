@@ -269,7 +269,39 @@ pub fn use_take_on_track(project: &mut Project, track: TrackId, take: usize, fad
     for (clip, lane, on) in lanes {
         project.apply(Command::SetClipLane { clip, lane, on })?;
     }
-    Ok(())
+    rejoin_takes(project, track)
+}
+
+// Glues back pieces of one take that were cut apart but still sit end to end
+// over the same recording, so a take that was comped and then picked whole is
+// one clip again. The sound does not change.
+fn rejoin_takes(project: &mut Project, track: TrackId) -> Result<(), CommandError> {
+    loop {
+        let found = project.track(track).ok_or(CommandError::NoSuchTrack)?;
+        let mut pieces: Vec<&Clip> = found.clips.iter().filter(|clip| clip.lane.is_some()).collect();
+        pieces.sort_by_key(|clip| (clip.lane, clip.start));
+        let pair = pieces.windows(2).find_map(|two| {
+            let (left, right) = (two[0], two[1]);
+            let joins = left.lane == right.lane
+                && left.lane_on == right.lane_on
+                && Arc::ptr_eq(&left.source, &right.source)
+                && right.start == left.end()
+                && right.offset == left.offset + left.len
+                && left.gain == right.gain
+                && left.muted == right.muted
+                && left.stretch == 1.0
+                && right.stretch == 1.0
+                && left.fx.is_empty()
+                && right.fx.is_empty()
+                && left.notes.is_none()
+                && right.notes.is_none();
+            joins.then(|| (left.id, left.offset, left.len + right.len, right.id, right.fade_out))
+        });
+        let Some((left, offset, len, right, fade_out)) = pair else { return Ok(()) };
+        project.apply(Command::DeleteClip(right))?;
+        project.apply(Command::TrimClip { clip: left, offset, len })?;
+        project.apply(Command::SetClipFade { clip: left, edge: Edge::Out, fade: fade_out })?;
+    }
 }
 
 fn middle_of(
@@ -387,6 +419,23 @@ mod tests {
         use_take_on_track(&mut project, track, 1, Fade::NONE).unwrap();
         let lit: Vec<usize> = project.track(track).unwrap().clips.iter().filter(|clip| clip.lane_on).filter_map(|clip| clip.lane).collect();
         assert_eq!(lit, vec![1], "other takes stayed lit after picking take 2");
+    }
+
+    #[test]
+    fn picking_a_take_glues_its_cut_pieces_back_and_sounds_the_same() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let frames: Vec<[f32; 2]> = (0..20_000).map(|i| [(i as f32 * 0.01).sin(), 0.0]).collect();
+        let source = Arc::new(Source::from_frames("Take", frames));
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 1_000 }) else { panic!() };
+        project.apply(Command::SetClipLane { clip, lane: Some(0), on: true }).unwrap();
+        let Ok(Outcome::Clip(right)) = project.apply(Command::SplitClip { clip, at: 6_000 }) else { panic!() };
+        project.apply(Command::SplitClip { clip: right, at: 9_000 }).unwrap();
+        assert_eq!(project.track(track).unwrap().clips.len(), 3);
+        use_take_on_track(&mut project, track, 0, Fade::NONE).unwrap();
+        let clips = &project.track(track).unwrap().clips;
+        assert_eq!(clips.len(), 1, "the cut pieces were not glued back");
+        assert_eq!((clips[0].start, clips[0].offset, clips[0].len), (1_000, 0, 20_000));
     }
 
     #[test]
