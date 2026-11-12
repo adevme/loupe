@@ -1466,12 +1466,14 @@ impl App {
                 }
             }
             Message::Undo => {
+                self.keep_plugin_edits_first();
                 if let Some(earlier) = self.undo.pop() {
                     self.redo.push(std::mem::replace(&mut self.project, earlier));
                     self.restored();
                 }
             }
             Message::Redo => {
+                self.keep_plugin_edits_first();
                 if let Some(later) = self.redo.pop() {
                     self.undo.push(std::mem::replace(&mut self.project, later));
                     self.restored();
@@ -2980,6 +2982,18 @@ impl App {
     }
 
     fn transact(
+        &mut self,
+        run: Option<Run>,
+        change: impl FnOnce(&mut Project) -> Result<Outcome, CommandError>,
+    ) -> Option<Outcome> {
+        let a_new_step = run.is_none() || run != self.run;
+        if a_new_step && self.plugin_edits_owed() {
+            self.keep_plugin_edits_first();
+        }
+        self.keep_step(run, change)
+    }
+
+    pub(crate) fn keep_step(
         &mut self,
         run: Option<Run>,
         change: impl FnOnce(&mut Project) -> Result<Outcome, CommandError>,

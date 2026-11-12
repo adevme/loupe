@@ -89,6 +89,7 @@ pub enum Reply {
     SaveTheSong,
     UndoAnEdit,
     RedoAnEdit,
+    KnobMoved,
     LatencyMoved { seat: usize, frames: usize },
     Trouble(String),
 }
@@ -239,6 +240,7 @@ impl Reply {
             Reply::SaveTheSong => "savesong".to_string(),
             Reply::UndoAnEdit => "undoedit".to_string(),
             Reply::RedoAnEdit => "redoedit".to_string(),
+            Reply::KnobMoved => "knobmoved".to_string(),
             Reply::LatencyMoved { seat, frames } => format!("{LATENCY_MOVED}\t{seat}\t{frames}"),
             Reply::Trouble(why) => format!("trouble\t{}", why.replace('\n', " ")),
         };
@@ -282,6 +284,7 @@ impl Reply {
             "savesong" => Some(Reply::SaveTheSong),
             "undoedit" => Some(Reply::UndoAnEdit),
             "redoedit" => Some(Reply::RedoAnEdit),
+            "knobmoved" => Some(Reply::KnobMoved),
             LATENCY_MOVED => Some(Reply::LatencyMoved { seat: parts.next()?.parse().ok()?, frames: parts.next()?.parse().ok()? }),
             "trouble" => Some(Reply::Trouble(parts.next().unwrap_or("something went wrong").to_string())),
             _ => None,
@@ -504,6 +507,7 @@ mod tests {
             Reply::SaveTheSong,
             Reply::UndoAnEdit,
             Reply::RedoAnEdit,
+            Reply::KnobMoved,
             Reply::LatencyMoved { seat: 0, frames: 1_024 },
             Reply::LatencyMoved { seat: 3, frames: 0 },
             Reply::Trouble("it broke".into()),

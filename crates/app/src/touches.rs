@@ -4,13 +4,14 @@ use loupe_engine::{Chains, Command, Engine, Outcome, Project, Touched};
 
 use crate::App;
 
-pub const QUIET_FOR: Duration = Duration::from_millis(700);
+pub const QUIET_FOR: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 pub struct Touches {
     spots: Vec<Touched>,
     last: Option<Instant>,
     quiet: bool,
+    heard: bool,
 }
 
 impl Touches {
@@ -31,6 +32,14 @@ impl Touches {
         !self.spots.is_empty()
     }
 
+    pub fn heard_a_knob(&mut self) {
+        self.heard = true;
+    }
+
+    pub fn owed(&self) -> bool {
+        self.heard || self.waiting()
+    }
+
     pub fn due(&self) -> bool {
         self.waiting() && self.quiet && self.last.is_some_and(|at| at.elapsed() >= QUIET_FOR)
     }
@@ -38,6 +47,7 @@ impl Touches {
     pub fn take(&mut self) -> Vec<Touched> {
         self.last = None;
         self.quiet = false;
+        self.heard = false;
         std::mem::take(&mut self.spots)
     }
 
@@ -129,7 +139,39 @@ impl App {
         if changes.is_empty() {
             return;
         }
-        self.transact(None, |project| {
+        self.keep_changes(changes);
+    }
+
+    pub(crate) fn plugin_edits_owed(&mut self) -> bool {
+        if loupe_plugins::sandbox::a_knob_moved_in_a_window() {
+            self.touches.heard_a_knob();
+        }
+        self.touches.owed()
+    }
+
+    pub(crate) fn keep_plugin_edits_first(&mut self) {
+        if self.recording.is_some() {
+            return;
+        }
+        let _ = self.plugin_edits_owed();
+        let Some(mut racks) = self.borrow_racks() else { return };
+        let found = racks.plugins_touched();
+        self.touches.noticed(&found);
+        let spots = self.touches.take();
+        let changes = edits(racks.as_mut(), &self.project, &spots);
+        self.racks.keep(racks);
+        self.hand_racks_over();
+        if !found.is_empty() {
+            self.dirty = true;
+        }
+        self.keep_changes(changes);
+    }
+
+    fn keep_changes(&mut self, changes: Vec<Command>) {
+        if changes.is_empty() {
+            return;
+        }
+        self.keep_step(None, |project| {
             for change in changes {
                 project.apply(change)?;
             }
@@ -514,6 +556,105 @@ mod running_tests {
         fake.turned_to(&[0x22]);
         app.look_for_touches_before_leaving();
         assert!(app.dirty, "closing would lose the knob without asking");
+    }
+
+    fn a_loupe_edit(app: &mut App) {
+        let tracks = app.project.tracks.len();
+        app.edit(None, Command::AddTrack { name: "Hook".into() }).expect("the track went in");
+        assert_eq!(app.project.tracks.len(), tracks + 1);
+    }
+
+    fn settled_on(fake: &Fake, app: &mut App, state: &[u8]) {
+        fake.turned_to(state);
+        go_quiet(app);
+    }
+
+    #[test]
+    fn undo_right_after_a_knob_moves_takes_the_knob_back_not_the_loupe_edit_before_it() {
+        let fake = a_plugin_with_a_knob("undo-at-once", &[0x11]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        settled_on(&fake, &mut app, &[0x11]);
+        a_loupe_edit(&mut app);
+        fake.turned_to(&[0x22]);
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.project.tracks.len(), 2, "undo took back the Loupe edit instead of the knob");
+        assert_eq!(state_on(&app, track), vec![0x11], "undo did not take the knob back");
+        assert_eq!(fake.holding(), vec![0x11], "the running plugin kept the knob after undo");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.project.tracks.len(), 1, "the second undo did not reach the Loupe edit");
+        assert_eq!(fake.holding(), vec![0x11]);
+        let _ = app.update(Message::Redo);
+        assert_eq!(app.project.tracks.len(), 2);
+        assert_eq!(fake.holding(), vec![0x11], "redoing the Loupe edit moved the knob");
+        let _ = app.update(Message::Redo);
+        assert_eq!(state_on(&app, track), vec![0x22], "redo did not put the knob back in the song");
+        assert_eq!(fake.holding(), vec![0x22], "redo did not put the knob back in the plugin");
+        assert!(app.redo.is_empty());
+    }
+
+    #[test]
+    fn a_loupe_edit_made_after_a_knob_moved_lands_after_it_in_the_history() {
+        let fake = a_plugin_with_a_knob("in-order", &[0x11]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        settled_on(&fake, &mut app, &[0x11]);
+        let steps = app.undo.len();
+        fake.turned_to(&[0x22]);
+        app.look_for_touches();
+        a_loupe_edit(&mut app);
+        assert_eq!(app.undo.len(), steps + 2, "the knob and the Loupe edit were not two steps");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.project.tracks.len(), 1, "the first undo did not take back the last edit");
+        assert_eq!(fake.holding(), vec![0x22], "the first undo took the knob back too");
+        let _ = app.update(Message::Undo);
+        assert_eq!(state_on(&app, track), vec![0x11]);
+        assert_eq!(fake.holding(), vec![0x11], "the second undo did not take the knob back");
+    }
+
+    #[test]
+    fn a_knob_moved_while_the_song_plays_is_the_first_thing_undo_takes_back() {
+        let fake = a_plugin_with_a_knob("undo-playing", &[0x11]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        settled_on(&fake, &mut app, &[0x11]);
+        a_loupe_edit(&mut app);
+        app.engine.play();
+        settled_on(&fake, &mut app, &[0x22]);
+        let _ = app.update(Message::Undo);
+        app.engine.stop();
+        assert_eq!(app.project.tracks.len(), 2, "undo while playing took back the Loupe edit instead of the knob");
+        assert_eq!(state_on(&app, track), vec![0x11]);
+        assert_eq!(fake.holding(), vec![0x11], "undo while playing left the knob where it was");
+    }
+
+    #[test]
+    fn a_knob_heard_while_playing_goes_into_the_history_before_the_next_loupe_edit() {
+        let fake = a_plugin_with_a_knob("heard-playing", &[0x11]);
+        let (mut app, track) = a_song_with_that_plugin(&fake);
+        settled_on(&fake, &mut app, &[0x11]);
+        let steps = app.undo.len();
+        app.engine.play();
+        fake.turned_to(&[0x22]);
+        app.touches.heard_a_knob();
+        a_loupe_edit(&mut app);
+        app.engine.stop();
+        assert_eq!(app.undo.len(), steps + 2, "the knob heard while playing did not get its own step first");
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.project.tracks.len(), 1);
+        assert_eq!(fake.holding(), vec![0x22]);
+        let _ = app.update(Message::Undo);
+        assert_eq!(state_on(&app, track), vec![0x11]);
+        assert_eq!(fake.holding(), vec![0x11]);
+    }
+
+    #[test]
+    fn a_loupe_edit_with_no_knob_moved_never_asks_the_plugins() {
+        let fake = a_plugin_with_a_knob("not-asked", &[0x11]);
+        let (mut app, _) = a_song_with_that_plugin(&fake);
+        settled_on(&fake, &mut app, &[0x11]);
+        let steps = app.undo.len();
+        fake.says_a_knob_moved();
+        a_loupe_edit(&mut app);
+        assert_eq!(app.undo.len(), steps + 1);
+        assert!(std::fs::metadata(fake.folder.join("touch")).is_ok(), "the plugin was asked about touches for a Loupe edit with no knob owed");
     }
 
     #[test]

@@ -48,12 +48,14 @@ enum Want {
 static A_SAVE_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
 static AN_UNDO_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
 static A_REDO_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
+static A_KNOB_MOVED_IN_A_WINDOW: AtomicBool = AtomicBool::new(false);
 
 fn flag_for(chord: &Reply) -> Option<&'static AtomicBool> {
     match chord {
         Reply::SaveTheSong => Some(&A_SAVE_WAS_ASKED_FOR),
         Reply::UndoAnEdit => Some(&AN_UNDO_WAS_ASKED_FOR),
         Reply::RedoAnEdit => Some(&A_REDO_WAS_ASKED_FOR),
+        Reply::KnobMoved => Some(&A_KNOB_MOVED_IN_A_WINDOW),
         _ => None,
     }
 }
@@ -78,6 +80,10 @@ pub fn asked_to_undo_an_edit() -> bool {
 
 pub fn asked_to_redo_an_edit() -> bool {
     A_REDO_WAS_ASKED_FOR.swap(false, Ordering::Relaxed)
+}
+
+pub fn a_knob_moved_in_a_window() -> bool {
+    A_KNOB_MOVED_IN_A_WINDOW.swap(false, Ordering::Relaxed)
 }
 
 enum Got {
@@ -778,6 +784,7 @@ mod chord_tests {
         let _ = asked_to_save_the_song();
         let _ = asked_to_undo_an_edit();
         let _ = asked_to_redo_an_edit();
+        let _ = a_knob_moved_in_a_window();
     }
 
     fn waiting_now() -> (bool, bool, bool) {
@@ -851,6 +858,24 @@ mod chord_tests {
         let Ok(Got::Line(line)) = gets.recv_timeout(PATIENCE) else { panic!("the answer never came back") };
         assert_eq!(Reply::read(&line), Some(Reply::Edited(true)));
         assert_eq!(waiting_now(), (true, true, false));
+        drop(wants);
+        reader.join().expect("the reader finished");
+    }
+
+    #[test]
+    fn a_knob_moved_in_a_window_is_noted_and_never_taken_for_the_answer() {
+        let _turn = one_at_a_time();
+        let said = b"knobmoved\nknobmoved\nedited\t0\n".to_vec();
+        let (wants, asked) = channel::<Want>();
+        let (sends, gets) = channel::<Got>();
+        let (tells, _moved) = channel::<(usize, usize)>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends, tells));
+        wants.send(Want::Line).expect("the reader is listening");
+        let Ok(Got::Line(line)) = gets.recv_timeout(PATIENCE) else { panic!("the answer never came back") };
+        assert_eq!(Reply::read(&line), Some(Reply::Edited(false)), "the knob note was handed back as the answer");
+        assert!(a_knob_moved_in_a_window(), "the knob that moved was never noted");
+        assert!(!a_knob_moved_in_a_window(), "one look should take the note");
+        assert_eq!(waiting_now(), (false, false, false), "a knob that moved woke a chord");
         drop(wants);
         reader.join().expect("the reader finished");
     }

@@ -36,6 +36,7 @@ impl vst3::Steinberg::IPlugFrameTrait for Frame {
 pub struct Quiet {
     turns: std::cell::RefCell<Option<vst3::ComWrapper<crate::changes::Turns>>>,
     touched: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    heard: std::sync::atomic::AtomicBool,
     latency_moved: std::cell::Cell<bool>,
 }
 
@@ -44,12 +45,17 @@ impl Quiet {
         Self {
             turns: std::cell::RefCell::new(None),
             touched: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            heard: std::sync::atomic::AtomicBool::new(false),
             latency_moved: std::cell::Cell::new(false),
         }
     }
 
     pub fn was_touched(&self) -> bool {
         self.touched.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn heard_an_edit(&self) -> bool {
+        self.heard.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn latency_moved(&self) -> bool {
@@ -78,6 +84,7 @@ impl IComponentHandlerTrait for Quiet {
 
     unsafe fn performEdit(&self, id: u32, value: f64) -> i32 {
         self.touched.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.heard.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(turns) = self.turns.borrow().as_ref() {
             turns.set(id, value);
         }
@@ -180,6 +187,10 @@ impl Editor {
 
     pub fn touches(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self._handler.touched.clone()
+    }
+
+    pub fn heard_an_edit(&self) -> bool {
+        self._handler.heard_an_edit()
     }
 
     pub fn latency_moved(&self) -> bool {
@@ -359,5 +370,23 @@ impl vst3::Steinberg::Vst::IAttributeListTrait for Facts {
 
     unsafe fn getBinary(&self, _id: vst3::Steinberg::Vst::IAttributeList_::AttrID, _data: *mut *const std::ffi::c_void, _size: *mut u32) -> i32 {
         kResultFalse
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_knob_moved_in_the_window_is_heard_once_and_still_counts_as_a_touch() {
+        let quiet = Quiet::new();
+        assert!(!quiet.heard_an_edit() && !quiet.was_touched());
+        for value in [0.1, 0.2, 0.3] {
+            unsafe { quiet.performEdit(7, value) };
+        }
+        assert!(quiet.heard_an_edit(), "a knob that moved was never heard");
+        assert!(!quiet.heard_an_edit(), "one sweep was heard twice");
+        assert!(quiet.was_touched(), "hearing the knob took the touch away from the undo");
+        assert!(!quiet.was_touched());
     }
 }
