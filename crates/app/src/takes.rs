@@ -43,7 +43,8 @@ impl App {
 
     pub(crate) fn delete_take(&mut self, track: TrackId, take: usize) {
         let fade = short_fade(self.project.rate);
-        let there = self.project.track(track).is_some_and(|found| found.clips.iter().any(|clip| clip.lane == Some(take)));
+        // An empty take row can be removed too, not only one with audio in it.
+        let there = self.project.track(track).is_some_and(|found| take < lane_rows(found));
         if there {
             self.transact(None, |project| {
                 delete_take(project, track, take, fade)?;
@@ -429,6 +430,19 @@ mod tests {
 
     use super::*;
     use crate::Message;
+
+
+    #[test]
+    fn an_empty_take_row_can_be_deleted() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let source = Arc::new(Source::from_frames("Take", vec![[0.5, 0.5]; 1_000]));
+        let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 0 }) else { panic!() };
+        project.apply(Command::SetClipLane { clip, lane: Some(2), on: true }).unwrap();
+        assert_eq!(lane_rows(project.track(track).unwrap()), 3, "rows 1 and 2 should be empty takes");
+        delete_take(&mut project, track, 0, Fade::NONE).unwrap();
+        assert_eq!(lane_rows(project.track(track).unwrap()), 2, "the empty take was not removed");
+    }
 
     #[test]
     fn picking_a_shorter_take_lights_only_that_take() {
