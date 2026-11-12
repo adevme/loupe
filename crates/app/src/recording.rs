@@ -384,8 +384,8 @@ mod tests {
         let old = crate::takes::lay_take(&mut project, track, Arc::new(Source::from_frames("old", vec![[1.0, 1.0]; 4])), 100, 4, &[0], 0).unwrap();
         let new = crate::takes::lay_take(&mut project, track, Arc::new(Source::from_frames("new", vec![[2.0, 2.0]; 3])), 102, 3, &[0], 0).unwrap();
         let (before, new) = (project.clip(old).unwrap(), project.clip(new).unwrap());
-        assert_eq!((before.start, before.len, before.lane, before.is_silent()), (100, 2, None, false), "the part before the recording stopped playing");
-        let under = project.track(track).unwrap().clips.iter().find(|clip| clip.lane == Some(0)).unwrap();
+        assert_eq!((before.start, before.len, before.lane, before.is_silent()), (100, 2, Some(0), false), "the part before the recording stopped playing");
+        let under = project.track(track).unwrap().clips.iter().find(|clip| clip.lane == Some(0) && clip.start == 102).unwrap();
         assert_eq!((under.start, under.len, under.is_silent()), (102, 2, true), "only the part under the new take should become take 1");
         assert_eq!((new.start, new.len, new.lane, new.is_silent()), (102, 3, Some(1), false), "the new take is not where it was recorded");
     }
@@ -606,6 +606,21 @@ mod tests {
         std::fs::remove_dir_all(&folder).ok();
     }
 
+
+    #[test]
+    fn recording_over_the_end_of_a_clip_keeps_its_start_playing() {
+        let folder = std::env::temp_dir().join(format!("loupe-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut app = App::bare();
+        let Ok(Outcome::Track(track)) = app.project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let old = a_take(&folder, "old.wav", 200_000);
+        let Ok(Outcome::Clip(_)) = app.project.apply(Command::AddClip { track, source: old, start: 0 }) else { panic!() };
+        app.place_take(150_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "new.wav", 100_000))]));
+        let clips = &app.project.track(track).unwrap().clips;        assert_eq!(playing_at(clips, 100_000), vec!["old"]);
+        assert!(clips.iter().filter(|clip| clip.source.name.starts_with("old")).all(|clip| clip.lane.is_none()), "the old clip was pulled into the takes");
+        std::fs::remove_dir_all(&folder).ok();
+    }
+
     fn playing_at(clips: &[loupe_engine::Clip], at: Frames) -> Vec<String> {
         clips
             .iter()
@@ -646,7 +661,7 @@ mod tests {
         app.place_take(0, 0, false, None, None, Ok(vec![(track, a_take(&folder, "one.wav", 480_000))]));
         app.place_take(240_000, 0, true, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 480_000))]));
         let clips = &app.project.track(track).unwrap().clips;
-        assert_eq!(clips.iter().filter_map(|clip| clip.lane).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(clips.iter().filter_map(|clip| clip.lane).collect::<std::collections::BTreeSet<_>>(), [0, 1].into());
         std::fs::remove_dir_all(&folder).ok();
     }
 
@@ -696,7 +711,7 @@ mod tests {
         app.place_take(96_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "one.wav", 96_000))]));
         app.place_take(48_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 96_000))]));
         let clips = &app.project.track(track).unwrap().clips;
-        assert_eq!(clips.iter().filter_map(|clip| clip.lane).collect::<Vec<_>>(), [0, 1], "recording from before the clip did not join it");
+        assert_eq!(clips.iter().filter_map(|clip| clip.lane).collect::<std::collections::BTreeSet<_>>(), [0, 1].into(), "recording from before the clip did not join it");
         std::fs::remove_dir_all(&folder).ok();
     }
 

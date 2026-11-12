@@ -138,15 +138,14 @@ pub fn lay_take(project: &mut Project, track: TrackId, source: Arc<Source>, star
     let under: Vec<Clip> = found.clips.iter().filter(|clip| !clip.is_notes() && clip.start < end && clip.end() > start).cloned().collect();
     let mut next = lane_rows(found);
     let plain: Vec<ClipId> = under.iter().filter(|clip| clip.lane.is_none()).map(|clip| clip.id).collect();
-    let becomes_lanes = offsets.len() > 1 || !under.is_empty();
-    // Only the part of an old clip that the new take covers moves under it.
-    // What sits before or after the recording keeps playing as it was.
-    if !plain.is_empty() {
-        for clip in plain {
-            let middle = middle_of(project, clip, start, end, Fade::NONE, false)?;
-            project.apply(Command::SetClipLane { clip: middle, lane: Some(next), on: false })?;
-        }
-        next += 1;
+    // Every recording is a take, so the next one recorded over it stacks with it.
+    let becomes_lanes = true;
+    // A clip that is not a take (a finished comp, an imported file) never joins
+    // the takes: the new recording replaces just the part it covers, and what
+    // sits before or after keeps playing as it was.
+    for clip in plain {
+        let middle = middle_of(project, clip, start, end, Fade::NONE, false)?;
+        project.apply(Command::DeleteClip(middle))?;
     }
     for clip in under.iter().filter(|clip| clip.lane.is_some() && clip.lane_on) {
         let middle = middle_of(project, clip.id, start, end, Fade::NONE, false)?;
