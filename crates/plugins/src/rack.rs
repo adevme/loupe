@@ -1636,6 +1636,7 @@ fn open_on_a_thread(host: &Path, order: Order, seat: Seat) -> Arrived {
     });
     let (latency, ara) = loaded.map_err(|why| (why, sandbox.gone()))?;
     settle(&mut sandbox, &state).map_err(|why| (why, sandbox.gone()))?;
+    sandbox.settle_seat();
     Ok(Opened { host: sandbox, latency, ara })
 }
 

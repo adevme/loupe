@@ -229,6 +229,13 @@ pub fn pull_out_take(project: &mut Project, track: TrackId, take: usize) -> Resu
     for to in sends {
         project.apply(Command::RemoveSend { from: copy, to })?;
     }
+    // The take now plays through the source's fader and pan as well, so its
+    // own give back what the source adds and the level heard stays the same.
+    let (own, theirs) = (project.track(copy).map_or(1.0, |made| made.gain), project.track(track).map_or(1.0, |found| found.gain));
+    if theirs > 0.0 {
+        project.apply(Command::SetTrackGain { track: copy, gain: own / theirs })?;
+        project.apply(Command::SetTrackPan { track: copy, pan: 0.0 })?;
+    }
     project.apply(Command::SetTrackParent { track: copy, parent: Some(track) })?;
     let copies: Vec<Clip> = project.track(copy).ok_or(CommandError::NoSuchTrack)?.clips.clone();
     for clip in copies {
@@ -241,6 +248,144 @@ pub fn pull_out_take(project: &mut Project, track: TrackId, take: usize) -> Resu
     }
     clear_lane(project, track, take)?;
     Ok(copy)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Healed {
+    pub source: String,
+    pub tracks: usize,
+    pub plugins: usize,
+}
+
+// Songs made before 0.27.13 have take tracks that "Move all takes to tracks"
+// made with a full copy of the source track's chain and sends. A take track
+// that is provably such a copy loses them and plays through the source track
+// instead, as pull_out_take does now. Anything that differs is left alone.
+pub fn heal_copied_take_chains(project: &mut Project) -> Vec<Healed> {
+    let mut healed: Vec<Healed> = Vec::new();
+    let mut at = 0;
+    while at < project.tracks.len() {
+        let source = project.tracks[at].id;
+        let mut next = at + 1;
+        while let Some(candidate) = project.tracks.get(next).map(|track| track.id) {
+            if project.descends_from(candidate, source) {
+                next += 1;
+                continue;
+            }
+            let named_as_a_take = project.track(candidate).is_some_and(|track| take_number(&track.name, &project.tracks[at].name).is_some());
+            if !named_as_a_take {
+                break;
+            }
+            if !is_a_copied_take_of(project, candidate, source) {
+                next += 1;
+                continue;
+            }
+            let end_of_source = at + project.run_from(at);
+            let Some(plugins) = heal_one(project, candidate, source, end_of_source) else {
+                next += 1;
+                continue;
+            };
+            let name = project.tracks[at].name.clone();
+            match healed.iter_mut().find(|done| done.source == name) {
+                Some(done) => {
+                    done.tracks += 1;
+                    done.plugins += plugins;
+                }
+                None => healed.push(Healed { source: name, tracks: 1, plugins }),
+            }
+            next += 1;
+        }
+        at += 1;
+    }
+    healed
+}
+
+pub fn word_for_healed(healed: &[Healed]) -> Option<String> {
+    let parts: Vec<String> = healed
+        .iter()
+        .map(|done| {
+            let tracks = if done.tracks == 1 { "take track" } else { "take tracks" };
+            let play = if done.tracks == 1 { "it now plays" } else { "they now play" };
+            format!("Removed the copied {} plugins from {} {tracks}; {play} through {}.", done.source, done.tracks, done.source)
+        })
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("{} Ctrl+Z puts them back.", parts.join(" ")))
+}
+
+fn take_number(name: &str, source: &str) -> Option<usize> {
+    let number = name.strip_prefix(source)?.strip_prefix(" take ")?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    number.parse::<usize>().ok().filter(|number| *number >= 1)
+}
+
+fn same_plugin(one: &loupe_engine::Fx, other: &loupe_engine::Fx) -> bool {
+    one.path == other.path && one.index == other.index && one.bypassed == other.bypassed && one.mix == other.mix
+}
+
+fn is_a_copied_take_of(project: &Project, take: TrackId, source: TrackId) -> bool {
+    use loupe_engine::Target;
+    let (Some(copy), Some(original)) = (project.track(take), project.track(source)) else { return false };
+    if take_number(&copy.name, &original.name).is_none() || original.name.contains(" take ") {
+        return false;
+    }
+    if project.tracks.iter().filter(|track| track.name == original.name).count() != 1 {
+        return false;
+    }
+    // A take with nothing sounding only ever feeds its chain silence, so its
+    // plugins may have drifted (a noise profile relearned, a knob turned on
+    // Vox since); one that sounds must carry a byte for byte copy.
+    let sounds = copy.clips.iter().any(|clip| !clip.is_silent());
+    let chain_is_a_copy = !copy.fx.is_empty()
+        && copy.fx.len() == original.fx.len()
+        && copy.fx.iter().zip(&original.fx).all(|(one, other)| same_plugin(one, other) && (!sounds || one.state == other.state))
+        && copy.fx_on == original.fx_on;
+    let placed_as_a_copy = copy.parent.is_none() || copy.parent == original.parent;
+    let plays_like_a_copy = copy.sends == original.sends && copy.pan == original.pan && !copy.solo && !original.solo && original.gain > 0.0;
+    let nothing_leans_on_it = !project.tracks.iter().any(|track| track.parent == Some(take) || track.sends.iter().any(|send| send.to == take));
+    let no_own_automation = !project.envelopes.iter().any(|shape| match shape.target {
+        Target::TrackGain(id) | Target::TrackPan(id) => id == take,
+        Target::SendGain { from, to } => from == take || to == take,
+        Target::TrackFx { track, .. } => track == take,
+        _ => false,
+    });
+    let source_moves = project.envelopes.iter().any(|shape| matches!(shape.target, Target::TrackGain(id) | Target::TrackPan(id) if id == source));
+    chain_is_a_copy && placed_as_a_copy && plays_like_a_copy && nothing_leans_on_it && no_own_automation && !(sounds && source_moves)
+}
+
+fn heal_one(project: &mut Project, take: TrackId, source: TrackId, to: usize) -> Option<usize> {
+    let mut trial = project.clone();
+    let plugins = strip_and_parent(&mut trial, take, source, to).ok()?;
+    *project = trial;
+    Some(plugins)
+}
+
+fn strip_and_parent(project: &mut Project, take: TrackId, source: TrackId, to: usize) -> Result<usize, CommandError> {
+    let copy = project.track(take).ok_or(CommandError::NoSuchTrack)?;
+    let original = project.track(source).ok_or(CommandError::NoSuchTrack)?;
+    let (slots, sends) = (copy.fx.len(), copy.sends.iter().map(|send| send.to).collect::<Vec<_>>());
+    // The take now also plays through the source's fader and pan, so its own
+    // fader gives back what the source's adds and the level heard stays put.
+    let gain = copy.gain / original.gain;
+    for slot in (0..slots).rev() {
+        project.apply(Command::RemoveFx { track: take, slot })?;
+    }
+    for to in sends {
+        project.apply(Command::RemoveSend { from: take, to })?;
+    }
+    project.apply(Command::SetTrackGain { track: take, gain })?;
+    project.apply(Command::SetTrackPan { track: take, pan: 0.0 })?;
+    // A child sits in its parent's run of tracks, so a take that is not
+    // already there moves up to the end of it.
+    match project.tracks.iter().position(|track| track.id == take) == Some(to) {
+        true => project.apply(Command::SetTrackParent { track: take, parent: Some(source) })?,
+        false => project.apply(Command::MoveTrack { track: take, to, parent: Some(source) })?,
+    };
+    Ok(slots)
 }
 
 pub fn move_all_takes(project: &mut Project, track: TrackId) -> Result<Vec<TrackId>, CommandError> {
@@ -435,7 +580,7 @@ pub fn short_fade(rate: u32) -> Fade {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use loupe_engine::Source;
@@ -709,5 +854,171 @@ mod tests {
         assert_eq!(clips.len(), 1, "the song was chopped up for nothing");
         assert_eq!(clips[0].id, clip);
     }
-}
 
+    fn chain_fx(path: &str, state: &[u8]) -> loupe_engine::Fx {
+        loupe_engine::Fx { path: path.into(), index: 0, name: path.into(), bypassed: false, state: state.to_vec(), record: false, mix: 1.0 }
+    }
+
+    // A song as "Move all takes to tracks" left it before 0.27.13: every take
+    // track a full copy of Vox, chain, sends, fader and pan included.
+    pub(crate) fn an_old_song() -> (Project, TrackId, Vec<TrackId>) {
+        let mut project = Project::new(48_000);
+        let add = |project: &mut Project, name: &str| {
+            let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: name.into() }) else { panic!() };
+            track
+        };
+        let bus = add(&mut project, "Vocal Bus");
+        let vox = add(&mut project, "Vox");
+        let reverb = add(&mut project, "Vox Reverb");
+        for track in [vox, reverb] {
+            project.apply(Command::SetTrackParent { track, parent: Some(bus) }).unwrap();
+        }
+        project.apply(Command::AddFx { track: vox, fx: chain_fx("Pro-Q 4.vst3", b"eq") }).unwrap();
+        project.apply(Command::AddFx { track: vox, fx: chain_fx("RX 11 Voice De-noise.vst3", b"denoise") }).unwrap();
+        project.apply(Command::AddSend { from: vox, to: reverb }).unwrap();
+        project.apply(Command::SetSendGain { from: vox, to: reverb, gain: 0.2 }).unwrap();
+        project.apply(Command::SetTrackGain { track: vox, gain: 0.8 }).unwrap();
+        project.apply(Command::SetTrackPan { track: vox, pan: 0.25 }).unwrap();
+        let wave = |pitch: f32| Arc::new(Source::from_frames("Vox", (0..2_000).map(|at| [(at as f32 * pitch).sin() * 0.5, (at as f32 * pitch).cos() * 0.3]).collect()));
+        project.apply(Command::AddClip { track: vox, source: wave(0.01), start: 0 }).unwrap();
+        let mut takes = Vec::new();
+        for (number, pitch, muted) in [(4, 0.05, false), (3, 0.03, true), (2, 0.02, false)] {
+            let Ok(Outcome::Track(copy)) = project.apply(Command::DuplicateTrack(vox)) else { panic!() };
+            project.apply(Command::RenameTrack { track: copy, name: format!("Vox take {number}") }).unwrap();
+            let old: Vec<ClipId> = project.track(copy).unwrap().clips.iter().map(|clip| clip.id).collect();
+            for clip in old {
+                project.apply(Command::DeleteClip(clip)).unwrap();
+            }
+            let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track: copy, source: wave(pitch), start: 300 }) else { panic!() };
+            project.apply(Command::SetClipMuted { clip, muted }).unwrap();
+            takes.insert(0, copy);
+        }
+        (project, vox, takes)
+    }
+
+    fn heard_long(project: &Project) -> Vec<[f32; 2]> {
+        let mut out = vec![[0.0; 2]; 3_000];
+        loupe_engine::render(project, 0, &mut out);
+        out
+    }
+
+    fn sounds_alike(one: &[[f32; 2]], other: &[[f32; 2]]) -> bool {
+        one.len() == other.len() && one.iter().zip(other).all(|(a, b)| (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5)
+    }
+
+    fn plugins_in(project: &Project) -> usize {
+        project.tracks.iter().map(|track| track.fx.len()).sum()
+    }
+
+    fn children_sit_under_their_parent(project: &Project) -> bool {
+        project.tracks.iter().enumerate().all(|(at, track)| match track.parent {
+            None => true,
+            Some(parent) => {
+                let Some(head) = project.tracks.iter().position(|one| one.id == parent) else { return false };
+                head < at && at < head + project.run_from(head)
+            }
+        })
+    }
+
+    #[test]
+    fn copied_take_chains_are_removed_and_the_song_sounds_the_same() {
+        let (mut project, vox, takes) = an_old_song();
+        assert_eq!(plugins_in(&project), 8, "the old song carries four copies of the two plugin chain");
+        let before = heard_long(&project);
+        assert!(before.iter().any(|frame| frame[0] != 0.0));
+        let healed = heal_copied_take_chains(&mut project);
+        assert_eq!(healed, vec![Healed { source: "Vox".into(), tracks: 3, plugins: 6 }]);
+        assert_eq!(plugins_in(&project), 2, "only Vox's own chain should be left");
+        for take in &takes {
+            let track = project.track(*take).unwrap();
+            assert!(track.fx.is_empty() && track.sends.is_empty(), "{} kept its copies", track.name);
+            assert_eq!(track.parent, Some(vox), "{} does not play through Vox", track.name);
+        }
+        assert!(children_sit_under_their_parent(&project));
+        assert!(sounds_alike(&heard_long(&project), &before), "the song sounds different after the copies were removed");
+        assert!(heal_copied_take_chains(&mut project).is_empty(), "a healed song is healed again");
+        assert_eq!(
+            word_for_healed(&healed).unwrap(),
+            "Removed the copied Vox plugins from 3 take tracks; they now play through Vox. Ctrl+Z puts them back."
+        );
+    }
+
+    #[test]
+    fn a_sounding_take_that_is_not_an_exact_copy_is_left_alone() {
+        let (mut project, vox, takes) = an_old_song();
+        let changed = takes[0];
+        assert!(project.track(changed).unwrap().clips.iter().any(|clip| !clip.is_silent()));
+        project.apply(Command::SetFxState { track: changed, slot: 1, state: b"learned another noise".to_vec() }).unwrap();
+        let before = heard_long(&project);
+        let untouched = project.track(changed).unwrap().clone();
+        let healed = heal_copied_take_chains(&mut project);
+        assert_eq!(healed, vec![Healed { source: "Vox".into(), tracks: 2, plugins: 4 }]);
+        let now = project.track(changed).unwrap();
+        assert_eq!((&now.fx, &now.sends, now.parent, now.gain, now.pan), (&untouched.fx, &untouched.sends, untouched.parent, untouched.gain, untouched.pan));
+        assert_eq!(project.track(takes[2]).unwrap().parent, Some(vox), "the exact copy after the odd one was not healed");
+        assert!(children_sit_under_their_parent(&project));
+        assert!(sounds_alike(&heard_long(&project), &before));
+    }
+
+    #[test]
+    fn a_silent_take_whose_plugins_drifted_is_healed_but_not_one_with_other_plugins() {
+        let (mut project, vox, takes) = an_old_song();
+        let silent = takes[1];
+        assert!(project.track(silent).unwrap().clips.iter().all(|clip| clip.is_silent()));
+        project.apply(Command::SetFxState { track: silent, slot: 1, state: b"learned another noise".to_vec() }).unwrap();
+        let before = heard_long(&project);
+        let healed = heal_copied_take_chains(&mut project);
+        assert_eq!(healed, vec![Healed { source: "Vox".into(), tracks: 3, plugins: 6 }]);
+        assert_eq!(project.track(silent).unwrap().parent, Some(vox));
+        assert!(sounds_alike(&heard_long(&project), &before));
+
+        let (mut project, _, takes) = an_old_song();
+        let silent = takes[1];
+        project.apply(Command::RemoveFx { track: silent, slot: 1 }).unwrap();
+        project.apply(Command::AddFx { track: silent, fx: chain_fx("Pro-C 2.vst3", b"denoise") }).unwrap();
+        let untouched = project.track(silent).unwrap().fx.clone();
+        let healed = heal_copied_take_chains(&mut project);
+        assert_eq!(healed, vec![Healed { source: "Vox".into(), tracks: 2, plugins: 4 }]);
+        assert_eq!(project.track(silent).unwrap().fx, untouched, "a silent take with a different plugin lost its chain");
+        assert!(children_sit_under_their_parent(&project));
+    }
+
+    #[test]
+    fn pulling_out_a_take_keeps_its_level_and_pan_when_the_source_fader_is_not_at_unity() {
+        let mut project = Project::new(48_000);
+        let (track, _) = stepped_takes(&mut project, 1);
+        project.apply(Command::SetTrackGain { track, gain: 0.5 }).unwrap();
+        project.apply(Command::SetTrackPan { track, pan: 0.4 }).unwrap();
+        let before = heard(&project);
+        assert!(before.iter().any(|frame| frame[0] != 0.0));
+        let copy = pull_out_take(&mut project, track, 1).unwrap();
+        let made = project.track(copy).unwrap();
+        assert_eq!((made.gain, made.pan, made.parent), (1.0, 0.0, Some(track)));
+        assert!(sounds_alike(&heard(&project), &before), "the pulled out take went through the source fader twice");
+    }
+
+    #[test]
+    fn look_alikes_are_never_touched() {
+        let checks: Vec<(&str, Box<dyn Fn(&mut Project, TrackId, TrackId)>)> = vec![
+            ("renamed", Box::new(|project, _, take| { project.apply(Command::RenameTrack { track: take, name: "Vox take two".into() }).unwrap(); })),
+            ("bypassed slot", Box::new(|project, _, take| { project.apply(Command::BypassFx { track: take, slot: 0, bypassed: true }).unwrap(); })),
+            ("panned", Box::new(|project, _, take| { project.apply(Command::SetTrackPan { track: take, pan: -0.5 }).unwrap(); })),
+            ("own send", Box::new(|project, _, take| { project.apply(Command::SetSendGain { from: take, to: project.tracks[2 + 3].id, gain: 0.9 }).unwrap(); })),
+            ("fed by another", Box::new(|project, _, take| { let Ok(Outcome::Track(keys)) = project.apply(Command::AddTrack { name: "Keys".into() }) else { panic!() }; project.apply(Command::AddSend { from: keys, to: take }).unwrap(); })),
+            ("automated", Box::new(|project, _, take| { project.apply(Command::AddEnvelope { target: loupe_engine::Target::TrackGain(take) }).unwrap(); })),
+            ("soloed", Box::new(|project, _, take| { project.apply(Command::SetTrackSolo { track: take, solo: true }).unwrap(); })),
+        ];
+        for (what, change) in checks {
+            let (mut project, vox, takes) = an_old_song();
+            assert_eq!(project.tracks[5].name, "Vox Reverb");
+            change(&mut project, vox, takes[0]);
+            let untouched = project.track(takes[0]).unwrap().fx.clone();
+            heal_copied_take_chains(&mut project);
+            assert_eq!(project.track(takes[0]).unwrap().fx, untouched, "a {what} take lost its plugins");
+            assert!(children_sit_under_their_parent(&project), "{what}");
+        }
+        let (mut project, _, _) = an_old_song();
+        project.apply(Command::AddTrack { name: "Vox".into() }).unwrap();
+        assert!(heal_copied_take_chains(&mut project).is_empty(), "two tracks called Vox: which one is the source is not certain");
+    }
+}

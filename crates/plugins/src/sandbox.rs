@@ -129,6 +129,12 @@ impl Sandbox {
         self.child.id()
     }
 
+    pub fn settle_seat(&mut self) {
+        if let Some(seat) = self.seat.as_mut() {
+            seat.settle();
+        }
+    }
+
     pub fn start(host: &Path) -> Result<Self, String> {
         Self::start_in_a_seat(host, Ceiling::for_this_computer().squeeze_in())
     }

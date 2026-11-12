@@ -294,8 +294,15 @@ impl App {
     }
 
     pub(crate) fn adopt(&mut self, path: PathBuf, opened: Opened, as_template: bool) {
-        let (project, heights) = opened.saved.build(&opened.sources, self.project.rate);
+        let (mut project, heights) = opened.saved.build(&opened.sources, self.project.rate);
+        let as_saved = project.clone();
+        let healed = crate::takes::heal_copied_take_chains(&mut project);
         self.replace_project(project, heights.into_iter().collect());
+        let heal_word = crate::takes::word_for_healed(&healed);
+        if heal_word.is_some() {
+            self.keep_for_undo(as_saved, None);
+            self.revision += 1;
+        }
         self.screen = Screen::Song;
         let newer = opened.saved.saved_by.as_deref().filter(|by| crate::versions::newer_than_this(by));
         let protect = newer.is_some() || !opened.saved.skipped.is_empty();
@@ -316,6 +323,13 @@ impl App {
             settings::remember(&path);
             self.happened(crate::scripting::Event::SongOpen(path.clone()));
             self.path = Some(path);
+        }
+        if let Some(word) = heal_word {
+            self.dirty = true;
+            self.notice = Some(match self.notice.take() {
+                Some(before) => format!("{before} {word}"),
+                None => word,
+            });
         }
         self.problem = match opened.not_found.as_slice() {
             [] => None,
@@ -381,6 +395,68 @@ pub fn show_in_folder(file: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opened_from(project: &Project) -> Opened {
+        Opened { saved: SavedProject::capture(project, |_| None), sources: project.sources.clone(), not_found: Vec::new() }
+    }
+
+    #[test]
+    fn opening_an_old_song_removes_the_copied_take_chains_in_one_undo_step() {
+        let (old, _, takes) = crate::takes::tests::an_old_song();
+        let plugins = |project: &Project| project.tracks.iter().map(|track| track.fx.len()).sum::<usize>();
+        let mut app = App::bare();
+        let song = std::env::temp_dir().join(format!("loupe-heal-{}.lp", std::process::id()));
+        app.adopt(song, opened_from(&old), true);
+        assert_eq!(plugins(&app.project), 2, "the copied chains were loaded");
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Removed the copied Vox plugins from 3 take tracks; they now play through Vox. Ctrl+Z puts them back.")
+        );
+        assert!(app.dirty, "the healed song is not marked to be saved");
+        let _ = app.update(Message::Undo);
+        assert_eq!(plugins(&app.project), 8, "Ctrl+Z did not put the copies back");
+        assert_eq!(takes.len(), 3);
+        assert!(app.project.tracks.iter().filter(|track| track.name.starts_with("Vox take ")).all(|track| track.fx.len() == 2 && track.sends.len() == 1));
+        let _ = app.update(Message::Undo);
+        assert_eq!(plugins(&app.project), 8, "opening the song was more than one undo step");
+    }
+
+    #[test]
+    fn a_song_with_nothing_to_heal_opens_clean_with_no_undo_step() {
+        let mut project = Project::new(48_000);
+        project.apply(loupe_engine::Command::AddTrack { name: "Vox".into() }).unwrap();
+        let mut app = App::bare();
+        app.adopt(std::env::temp_dir().join("loupe-clean.lp"), opened_from(&project), true);
+        assert!(app.notice.is_none());
+        assert!(app.undo.is_empty());
+    }
+
+    // Reads a real song, leaves the file alone, and says what the heal would do:
+    // LOUPE_HEAL_SONG=/path/to/song.lp cargo test -p loupe what_a_real_song -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn what_a_real_song_would_lose() {
+        let Some(path) = std::env::var_os("LOUPE_HEAL_SONG") else { return };
+        let text = std::fs::read_to_string(&path).unwrap();
+        let saved = SavedProject::parse(&text).unwrap();
+        let sources: Vec<Arc<Source>> = saved.sources.iter().map(|file| Arc::new(Source::missing(file))).collect();
+        let (mut project, _) = saved.build(&sources, saved.rate);
+        let before: usize = project.tracks.iter().map(|track| track.fx.len()).sum();
+        let as_saved = project.clone();
+        let healed = crate::takes::heal_copied_take_chains(&mut project);
+        let after: usize = project.tracks.iter().map(|track| track.fx.len()).sum();
+        println!("plugins on tracks: {before} -> {after}; {healed:?}");
+        for track in &as_saved.tracks {
+            let Some(source) = track.name.split(" take ").next().and_then(|name| as_saved.tracks.iter().find(|one| one.name == name)) else { continue };
+            if source.id == track.id || !track.name.contains(" take ") {
+                continue;
+            }
+            let differs: Vec<String> = track.fx.iter().zip(&source.fx).enumerate().filter(|(_, (one, other))| one.state != other.state || one.path != other.path || one.index != other.index || one.bypassed != other.bypassed || one.mix != other.mix).map(|(slot, (one, _))| format!("{slot}:{}", one.path.display())).collect();
+            let healed_now = project.track(track.id).is_some_and(|now| now.fx.is_empty());
+            let sounding = track.clips.iter().filter(|clip| !clip.is_silent()).count();
+            println!("{} | clips {} sounding {sounding} | fx {} vs {} | sends same {} | gain {} pan {} | healed {healed_now} | differs {differs:?}", track.name, track.clips.len(), track.fx.len(), source.fx.len(), track.sends == source.sends, track.gain, track.pan);
+        }
+    }
 
     #[test]
     fn a_dropped_song_is_told_apart_from_dropped_audio() {

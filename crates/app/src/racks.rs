@@ -238,7 +238,7 @@ impl Racks {
     pub fn away_from_the_audio_thread(mut self) -> Self {
         self.off_the_audio_thread = true;
         self.keep_time();
-        self.own_ceiling = Some(loupe_plugins::ceiling::Ceiling::of(loupe_plugins::ceiling::Ceiling::for_this_computer().most()));
+        self.own_ceiling = Some(loupe_plugins::ceiling::Ceiling::fresh_for_this_computer());
         self
     }
 
@@ -319,13 +319,8 @@ impl Racks {
         if held_back == 0 {
             return None;
         }
-        let most = loupe_plugins::ceiling::Ceiling::for_this_computer().most();
-        let one = held_back == 1;
-        Some(format!(
-            "Loupe is running {most} plugins, as many as this computer can manage, so {held_back} {} not loaded. Open an FX chain and press Load to start {}.",
-            if one { "is" } else { "are" },
-            if one { "it" } else { "one" },
-        ))
+        let ceiling = self.own_ceiling.clone().unwrap_or_else(loupe_plugins::ceiling::Ceiling::for_this_computer);
+        Some(word_for_held_back(ceiling.running(), held_back, &ceiling.why_full()))
     }
 
     fn everything_leaving(&mut self) -> Vec<Rack> {
@@ -961,6 +956,15 @@ fn tracks_at_once() -> usize {
         .clamp(FEWEST_TRACKS_AT_ONCE, MOST_TRACKS_AT_ONCE)
 }
 
+fn word_for_held_back(running: usize, held_back: usize, why: &str) -> String {
+    let one = held_back == 1;
+    format!(
+        "Loupe started {running} plugins and {why}, so {held_back} {} not loaded. Open an FX chain and press Load to start {}.",
+        if one { "is" } else { "are" },
+        if one { "it" } else { "one" },
+    )
+}
+
 fn note_plugin_time(spent: &AtomicU64, began: std::time::Instant) {
     spent.fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
@@ -998,6 +1002,15 @@ mod tests {
     use loupe_engine::{Command, Fx, Outcome, Source};
 
     use super::*;
+
+    #[test]
+    fn held_back_plugins_are_explained_by_what_really_ran_out() {
+        assert_eq!(
+            word_for_held_back(1_400, 3, "this computer has only 0.1 GB of memory left to give"),
+            "Loupe started 1400 plugins and this computer has only 0.1 GB of memory left to give, so 3 are not loaded. Open an FX chain and press Load to start one."
+        );
+        assert!(word_for_held_back(256, 1, "LOUPE_PLUGIN_CEILING allows only 256").contains("so 1 is not loaded"));
+    }
 
     fn fx(path: &str, index: usize, state: &[u8]) -> Fx {
         Fx { path: PathBuf::from(path), index, name: format!("{path} {index}"), bypassed: false, state: state.to_vec(), record: false, mix: 1.0 }
