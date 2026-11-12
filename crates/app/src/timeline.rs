@@ -891,19 +891,31 @@ impl Timeline<'_> {
         if self.hidden(track) {
             return Vec::new();
         }
-        let mut folders: Vec<&Clip> = track.clips.iter().filter(|clip| clip.lane.is_some() && !clip.is_notes()).collect();
-        folders.sort_by_key(|clip| clip.start);
-        let mut runs: Vec<(Frames, Frames, Vec<usize>)> = Vec::new();
-        for clip in folders {
+        // One badge per place takes were recorded: takes that start within two
+        // seconds of each other belong together, even when a long take runs on
+        // into the next spot. Overlap alone used to file a later spot's takes
+        // under the earlier badge, so they looked lost.
+        let mut spans: Vec<(usize, Frames, Frames)> = Vec::new();
+        for clip in track.clips.iter().filter(|clip| clip.lane.is_some() && !clip.is_notes()) {
             let lane = clip.lane.unwrap_or(0);
-            match runs.last_mut() {
-                Some((_, end, lanes)) if clip.start <= *end => {
+            match spans.iter_mut().find(|(found, _, _)| *found == lane) {
+                Some((_, start, end)) => {
+                    *start = (*start).min(clip.start);
                     *end = (*end).max(clip.end());
-                    if !lanes.contains(&lane) {
-                        lanes.push(lane);
-                    }
                 }
-                _ => runs.push((clip.start, clip.end(), vec![lane])),
+                None => spans.push((lane, clip.start, clip.end())),
+            }
+        }
+        spans.sort_by_key(|(_, start, _)| *start);
+        let near = self.project.rate as Frames * 2;
+        let mut runs: Vec<(Frames, Frames, Vec<usize>)> = Vec::new();
+        for (lane, start, end) in spans {
+            match runs.last_mut() {
+                Some((first, last, lanes)) if start - *first < near => {
+                    *last = (*last).max(end);
+                    lanes.push(lane);
+                }
+                _ => runs.push((start, end, vec![lane])),
             }
         }
         let top = self.track_top(index) + self.palette.clip_padding + BADGE_INSET;
@@ -911,7 +923,7 @@ impl Timeline<'_> {
         runs.into_iter()
             .filter_map(|(start, end, lanes)| {
                 let count = lanes.len();
-                let shown = |clip: &&Clip| clip.lane.is_some() && clip.lane_on && clip.start < end && clip.end() > start;
+                let shown = |clip: &&Clip| clip.lane.is_some_and(|lane| lanes.contains(&lane)) && clip.lane_on && clip.start < end && clip.end() > start;
                 let start = track.clips.iter().filter(shown).map(|clip| clip.start).min().unwrap_or(start);
                 let end = track.clips.iter().filter(shown).map(|clip| clip.end()).max().unwrap_or(end);
                 let left = self.x_of(start as f64).max(self.lanes_left());
@@ -3384,6 +3396,32 @@ mod take_folders {
         let _ = canvas::Program::update(&timeline, &mut state, moved, CANVAS, at(LEFT + 51.0, y + 1.0));
         let (_, cut) = canvas::Program::update(&timeline, &mut state, released, CANVAS, at(LEFT + 51.0, y + 1.0));
         assert!(matches!(cut, Some(crate::Message::Slice { lane: Some(3), .. })), "the wobble cut every take: {cut:?}");
+    }
+
+    #[test]
+    fn takes_recorded_at_a_later_spot_get_their_own_badge_even_when_earlier_takes_run_into_it() {
+        let (mut app, _, _) = a_looped_vocal_and_drums();
+        let Ok(Outcome::Track(vox)) = app.project.apply(Command::AddTrack { name: "Late".into() }) else { panic!() };
+        let index = app.project.tracks.iter().position(|track| track.id == vox).unwrap();
+        let rate = app.project.rate as Frames;
+        let mut lane = 0;
+        let mut add = |app: &mut crate::App, start: Frames, seconds: Frames| {
+            let source = Arc::new(Source::from_frames("take", vec![[0.5, 0.5]; (seconds * rate) as usize]));
+            let Ok(Outcome::Clip(clip)) = app.project.apply(Command::AddClip { track: vox, source, start }) else { panic!() };
+            app.project.apply(Command::SetClipLane { clip, lane: Some(lane), on: lane == 0 }).unwrap();
+            lane += 1;
+        };
+        for _ in 0..3 {
+            add(&mut app, 0, 25);
+        }
+        for _ in 0..4 {
+            add(&mut app, 15 * rate, 8);
+        }
+        app.view.zoom = 20.0;
+        app.view.scroll = 0.0;
+        let timeline = timeline_of(&app);
+        let counts: Vec<usize> = timeline.take_badges(index).iter().map(|(_, count)| *count).collect();
+        assert_eq!(counts, vec![3, 4], "the later takes were filed under the first badge");
     }
 
     #[test]

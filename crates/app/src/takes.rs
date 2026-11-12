@@ -218,6 +218,18 @@ pub fn pull_out_take(project: &mut Project, track: TrackId, take: usize) -> Resu
     };
     project.apply(Command::RenameTrack { track: copy, name })?;
     project.apply(Command::SetTakesOpen { track: copy, open: false })?;
+    // The take's track carries no plugins or sends of its own: it plays into
+    // the track it came from, through that one chain, so a song with dozens of
+    // takes never loads dozens of copies of the vocal chain.
+    let made = project.track(copy).ok_or(CommandError::NoSuchTrack)?;
+    let (slots, sends) = (made.fx.len(), made.sends.iter().map(|send| send.to).collect::<Vec<_>>());
+    for slot in (0..slots).rev() {
+        project.apply(Command::RemoveFx { track: copy, slot })?;
+    }
+    for to in sends {
+        project.apply(Command::RemoveSend { from: copy, to })?;
+    }
+    project.apply(Command::SetTrackParent { track: copy, parent: Some(track) })?;
     let copies: Vec<Clip> = project.track(copy).ok_or(CommandError::NoSuchTrack)?.clips.clone();
     for clip in copies {
         if clip.lane == Some(take) {
