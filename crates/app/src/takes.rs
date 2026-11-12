@@ -135,18 +135,17 @@ pub fn lane_rows(track: &Track) -> usize {
 pub fn lay_take(project: &mut Project, track: TrackId, source: Arc<Source>, start: Frames, len: Frames, offsets: &[i64], active: usize) -> Result<ClipId, CommandError> {
     let end = start + len;
     let found = project.track(track).ok_or(CommandError::NoSuchTrack)?;
+    // Audio already on the track is not a take and is never touched: a new
+    // recording over it goes on a track of its own (same sound and sends), and
+    // later recordings over that spot stack as takes there.
+    if found.clips.iter().any(|clip| !clip.is_notes() && clip.lane.is_none() && clip.start < end && clip.end() > start) {
+        let takes = takes_track_for(project, track, start, end)?;
+        return lay_take(project, takes, source, start, len, offsets, active);
+    }
     let under: Vec<Clip> = found.clips.iter().filter(|clip| !clip.is_notes() && clip.start < end && clip.end() > start).cloned().collect();
-    let mut next = lane_rows(found);
-    let plain: Vec<ClipId> = under.iter().filter(|clip| clip.lane.is_none()).map(|clip| clip.id).collect();
+    let next = lane_rows(found);
     // Every recording is a take, so the next one recorded over it stacks with it.
     let becomes_lanes = true;
-    // A clip that is not a take (a finished comp, an imported file) never joins
-    // the takes: the new recording replaces just the part it covers, and what
-    // sits before or after keeps playing as it was.
-    for clip in plain {
-        let middle = middle_of(project, clip, start, end, Fade::NONE, false)?;
-        project.apply(Command::DeleteClip(middle))?;
-    }
     for clip in under.iter().filter(|clip| clip.lane.is_some() && clip.lane_on) {
         let middle = middle_of(project, clip.id, start, end, Fade::NONE, false)?;
         project.apply(Command::SetClipLane { clip: middle, lane: clip.lane, on: false })?;
@@ -181,6 +180,30 @@ fn clear_lane(project: &mut Project, track: TrackId, take: usize) -> Result<(), 
         }
     }
     Ok(())
+}
+
+// The track that holds recordings made over existing audio on `track`: the
+// one made for that before if nothing already recorded sits in the way there,
+// otherwise a fresh copy of `track` with the same sound and no clips.
+fn takes_track_for(project: &mut Project, track: TrackId, start: Frames, end: Frames) -> Result<TrackId, CommandError> {
+    let found = project.track(track).ok_or(CommandError::NoSuchTrack)?;
+    let name = format!("{} takes", found.name);
+    let free = project.tracks.iter().find(|other| {
+        other.name == name && !other.clips.iter().any(|clip| !clip.is_notes() && clip.lane.is_none() && clip.start < end && clip.end() > start)
+    });
+    if let Some(free) = free {
+        return Ok(free.id);
+    }
+    let Outcome::Track(copy) = project.apply(Command::DuplicateTrack(track))? else {
+        return Err(CommandError::InvalidValue);
+    };
+    project.apply(Command::RenameTrack { track: copy, name })?;
+    let copies: Vec<ClipId> = project.track(copy).ok_or(CommandError::NoSuchTrack)?.clips.iter().map(|clip| clip.id).collect();
+    for clip in copies {
+        project.apply(Command::DeleteClip(clip))?;
+    }
+    project.apply(Command::SetTakesOpen { track: copy, open: true })?;
+    Ok(copy)
 }
 
 pub fn pull_out_take(project: &mut Project, track: TrackId, take: usize) -> Result<TrackId, CommandError> {

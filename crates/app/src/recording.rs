@@ -616,8 +616,14 @@ mod tests {
         let old = a_take(&folder, "old.wav", 200_000);
         let Ok(Outcome::Clip(_)) = app.project.apply(Command::AddClip { track, source: old, start: 0 }) else { panic!() };
         app.place_take(150_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "new.wav", 100_000))]));
-        let clips = &app.project.track(track).unwrap().clips;        assert_eq!(playing_at(clips, 100_000), vec!["old"]);
-        assert!(clips.iter().filter(|clip| clip.source.name.starts_with("old")).all(|clip| clip.lane.is_none()), "the old clip was pulled into the takes");
+        app.place_take(150_000, 0, true, None, None, Ok(vec![(track, a_take(&folder, "again.wav", 100_000))]));
+        let clips = &app.project.track(track).unwrap().clips;
+        let old: Vec<_> = clips.iter().map(|clip| (clip.source.name.clone(), clip.start, clip.len, clip.lane, clip.muted)).collect();
+        assert_eq!(old, vec![("old".to_string(), 0, 200_000, None, false)], "the audio already there was touched");
+        let takes = app.project.tracks.iter().find(|other| other.name == "Vox takes").expect("the recording did not get its own track");
+        assert_eq!(app.project.tracks.iter().filter(|other| other.name == "Vox takes").count(), 1, "the second recording made another track");
+        assert_eq!(playing_at(&takes.clips, 200_000), vec!["again"], "the newest recording should play on the takes track");
+        assert_eq!(takes.clips.iter().filter(|clip| clip.lane.is_some()).count(), 2, "the two recordings did not stack as takes");
         std::fs::remove_dir_all(&folder).ok();
     }
 
