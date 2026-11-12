@@ -166,7 +166,7 @@ pub struct Interaction {
 enum Drag {
     Range { anchor: Frames, origin: Point, moving: bool },
     Clip { id: ClipId, grab: f64, origin: Point, moving: bool },
-    Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32) },
+    Comp { clip: ClipId, track: TrackId, take: usize, from: Frames, to: Frames, band: (f32, f32), origin: Point, moving: bool },
     SlideTake { clip: ClipId, grab: f64, from: i64, length: i64 },
     Resize { track: TrackId, top: f32 },
     LaneResize { target: loupe_engine::Target, top: f32 },
@@ -1163,7 +1163,7 @@ impl canvas::Program<Message> for Timeline<'_> {
                         };
                         let band = (self.take_lane_top(index, take), self.take_tall(&self.project.tracks[index]));
                         let at = self.snap(self.frames_at(p.x), free);
-                        state.drag = Some(Drag::Comp { clip: clip.id, track: self.project.tracks[index].id, take, from: at, to: at, band });
+                        state.drag = Some(Drag::Comp { clip: clip.id, track: self.project.tracks[index].id, take, from: at, to: at, band, origin: p, moving: false });
                         Some(Message::Refresh)
                     }
                     (Tool::Comp, Hit::Clip(clip) | Hit::Grip(clip, _)) if clip.lane.is_some() => {
@@ -1326,7 +1326,13 @@ impl canvas::Program<Message> for Timeline<'_> {
                         let offset = (*from - moved.round() as i64).clamp(0, (*length - 1).max(0));
                         (Captured, Some(Message::SlideTake { clip: *clip, offset }))
                     }
-                    Drag::Comp { to, .. } => {
+                    Drag::Comp { to, origin, moving, .. } => {
+                        // A hand that shakes during a click is still a click: only a real
+                        // swipe comps, otherwise every take gets cut where it landed.
+                        if !*moving && p.distance(*origin) < DRAG_THRESHOLD {
+                            return (Captured, None);
+                        }
+                        *moving = true;
                         *to = self.snap(self.frames_at(p.x), free);
                         (Captured, Some(Message::Refresh))
                     }
@@ -1483,9 +1489,10 @@ impl canvas::Program<Message> for Timeline<'_> {
                     (Captured, Some(Message::MoveTrack { track, to, parent: self.folder_at(to, track) }))
                 }
                 Some(Drag::SlideTake { .. }) => (Captured, Some(Message::Refresh)),
-                Some(Drag::Comp { clip, track, take, from, to, .. }) => {
-                    let message = match from == to {
-                        true => Message::UseTake(clip),
+                Some(Drag::Comp { track, take, from, to, moving, .. }) => {
+                    // A click picks the whole take, so only that take plays and lights up.
+                    let message = match !moving || from == to {
+                        true => Message::UseTakeOnTrack(track, take),
                         false => Message::Comp { track, take, from: from.min(to), to: from.max(to) },
                     };
                     (Captured, Some(message))
@@ -3258,7 +3265,7 @@ mod take_folders {
         assert!(matches!(swiped, Some(crate::Message::Comp { track, take: 3, from, to }) if track == vox && from < to), "a swipe on lane 4 did not comp take 4");
         let _ = canvas::Program::update(&timeline, &mut state, press, CANVAS, cursor(LEFT + 60.0));
         let (_, clicked) = canvas::Program::update(&timeline, &mut state, released, CANVAS, cursor(LEFT + 60.0));
-        assert!(matches!(clicked, Some(crate::Message::UseTake(_))), "a click on lane 4 did not pick take 4");
+        assert!(matches!(clicked, Some(crate::Message::UseTakeOnTrack(track, 3)) if track == vox), "a click on lane 4 did not pick take 4");
     }
 
     #[test]

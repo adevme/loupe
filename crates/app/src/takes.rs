@@ -30,7 +30,9 @@ impl App {
 
     pub(crate) fn use_take_on_track(&mut self, track: TrackId, take: usize) {
         let fade = short_fade(self.project.rate);
-        let waiting = self.project.track(track).is_some_and(|found| found.clips.iter().any(|clip| clip.lane == Some(take) && !clip.lane_on));
+        let waiting = self.project.track(track).is_some_and(|found| {
+            found.clips.iter().any(|clip| clip.lane.is_some() && clip.lane_on != (clip.lane == Some(take)))
+        });
         if waiting {
             self.transact(None, |project| {
                 use_take_on_track(project, track, take, fade)?;
@@ -253,9 +255,19 @@ pub fn delete_take(project: &mut Project, track: TrackId, take: usize, fade: Fad
 }
 
 pub fn use_take_on_track(project: &mut Project, track: TrackId, take: usize, fade: Fade) -> Result<(), CommandError> {
-    let chosen: Vec<ClipId> = project.track(track).ok_or(CommandError::NoSuchTrack)?.clips.iter().filter(|clip| clip.lane == Some(take)).map(|clip| clip.id).collect();
-    for clip in chosen {
-        sound_only(project, clip, fade)?;
+    // The picked take plays everywhere it has audio and every other take goes
+    // quiet, even where the picked one is shorter, so one pick lights one take.
+    let _ = fade;
+    let lanes: Vec<(ClipId, Option<usize>, bool)> = project
+        .track(track)
+        .ok_or(CommandError::NoSuchTrack)?
+        .clips
+        .iter()
+        .filter(|clip| clip.lane.is_some())
+        .map(|clip| (clip.id, clip.lane, clip.lane == Some(take)))
+        .collect();
+    for (clip, lane, on) in lanes {
+        project.apply(Command::SetClipLane { clip, lane, on })?;
     }
     Ok(())
 }
@@ -359,6 +371,23 @@ mod tests {
 
     use super::*;
     use crate::Message;
+
+    #[test]
+    fn picking_a_shorter_take_lights_only_that_take() {
+        let mut project = Project::new(48_000);
+        let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
+        let mut add = |project: &mut Project, frames: usize, lane: usize, on: bool| {
+            let source = Arc::new(Source::from_frames("Take", vec![[0.5, 0.5]; frames]));
+            let Ok(Outcome::Clip(clip)) = project.apply(Command::AddClip { track, source, start: 1_000 }) else { panic!() };
+            project.apply(Command::SetClipLane { clip, lane: Some(lane), on }).unwrap();
+        };
+        add(&mut project, 20_000, 0, true);
+        add(&mut project, 8_000, 1, false);
+        add(&mut project, 30_000, 2, true);
+        use_take_on_track(&mut project, track, 1, Fade::NONE).unwrap();
+        let lit: Vec<usize> = project.track(track).unwrap().clips.iter().filter(|clip| clip.lane_on).filter_map(|clip| clip.lane).collect();
+        assert_eq!(lit, vec![1], "other takes stayed lit after picking take 2");
+    }
 
     #[test]
     fn punching_in_keeps_what_is_either_side_and_clears_the_middle() {
