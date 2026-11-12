@@ -28,6 +28,7 @@ pub fn take_slow_slots() -> Vec<(String, u64)> {
 
 const GRACE_IN_BLOCKS: u32 = 2;
 const LEAST_GRACE: std::time::Duration = std::time::Duration::from_millis(5);
+const WINDOW_PATIENCE: std::time::Duration = std::time::Duration::from_millis(1);
 pub const QUIET: f32 = 1.0e-7;
 pub const QUIET_SECONDS_BEFORE_DOZING: f32 = 10.0;
 
@@ -583,6 +584,40 @@ impl Rack {
             host.may_come_forward();
         }
         self.tell(slot, Ask::Show)
+    }
+
+    pub fn show_on_time(&mut self, slot: usize, named: Option<(&str, i64, &str)>) {
+        self.take_arrivals();
+        let Some(found) = self.slots.get_mut(slot) else { return };
+        if found.built.is_some() {
+            return;
+        }
+        if found.on_its_way() {
+            found.wanted_open = true;
+            return;
+        }
+        let Some(host) = found.host.as_mut() else { return };
+        host.may_come_forward();
+        let mut asks = Vec::with_capacity(3);
+        if let Some((track, seat, label)) = named {
+            asks.push(Ask::OnTrack(track.to_string(), seat));
+            asks.push(Ask::Called(label.to_string()));
+        }
+        asks.push(Ask::Show);
+        match host.ask_all_within(&asks, WINDOW_PATIENCE) {
+            Ok(replies) => {
+                for reply in replies {
+                    if let Reply::Trouble(why) = reply {
+                        crate::sandbox::a_window_failed(why);
+                    }
+                }
+            }
+            Err(why) => {
+                let fell = host.gone();
+                self.lost_host(slot, why.clone(), fell);
+                crate::sandbox::a_window_failed(why);
+            }
+        }
     }
 
     pub fn called(&mut self, slot: usize, label: &str) -> Result<(), String> {
@@ -1911,6 +1946,69 @@ mod fallen_tests {
         assert_eq!(rack.late_replies(), late_before + 1);
         assert_eq!(rack.knobs(0), vec!["Gain".to_string()], "the late answer to the turn was taken for the next answer");
         assert!(rack.slots()[0].trouble.is_none());
+    }
+
+    fn showing_host(name: &str, on_show: &str) -> Host {
+        host(name, &format!("read ask\nprintf 'loaded\\t2\\t2\\t0\\n'\nwhile read ask; do\n  case \"$ask\" in\n    process*) head -c 517 ;;\n    ontrack*|called*) printf 'fine\\n' ;;\n    show*) {on_show} ;;\n    knobs*) printf 'knobs\\tGain\\n' ;;\n  esac\ndone\n"))
+    }
+
+    #[test]
+    fn a_window_asked_for_on_time_never_holds_the_song_up_even_if_the_host_is_slow_to_answer() {
+        let script = showing_host("slow-window", "sleep 0.3 ; printf 'fine\\n'");
+        let mut rack = kept_in_time(&script);
+        let began = std::time::Instant::now();
+        rack.show_on_time(0, Some(("Vox", 0, "Auto-Tune")));
+        assert!(began.elapsed() < std::time::Duration::from_millis(50), "asking for the window waited {:?}", began.elapsed());
+        let gave_up = std::time::Instant::now();
+        let mut slowest = std::time::Duration::ZERO;
+        while gave_up.elapsed() < std::time::Duration::from_millis(700) {
+            let mut audio = vec![[0.5; 2]; 64];
+            let began = std::time::Instant::now();
+            rack.process(&mut audio);
+            slowest = slowest.max(began.elapsed());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(slowest < std::time::Duration::from_millis(50), "a block waited {slowest:?} behind the window");
+        let late = rack.late_replies();
+        for _ in 0..20 {
+            rack.process(&mut vec![[0.5; 2]; 64]);
+        }
+        assert!(rack.late_replies() <= late + 2, "the host never caught up after its window opened");
+        assert!(rack.slots()[0].trouble.is_none());
+        assert_eq!(rack.knobs(0), vec!["Gain".to_string()], "a late answer about the window was taken for the next answer");
+    }
+
+    #[test]
+    fn a_window_asked_for_on_time_from_a_quick_host_keeps_every_block_in_time() {
+        let script = showing_host("quick-window", "printf 'fine\\n'");
+        let mut rack = kept_in_time(&script);
+        for _ in 0..10 {
+            rack.process(&mut vec![[0.5; 2]; 64]);
+        }
+        let late = rack.late_replies();
+        rack.show_on_time(0, Some(("Vox", 0, "Auto-Tune")));
+        for _ in 0..20 {
+            rack.process(&mut vec![[0.5; 2]; 64]);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(rack.late_replies() <= late + 1, "{} blocks came back late around the window", rack.late_replies() - late);
+        assert!(rack.slots()[0].trouble.is_none());
+    }
+
+    #[test]
+    fn a_window_that_would_not_open_is_told_without_holding_the_song_up() {
+        let script = showing_host("no-window", "printf 'fine\\n' ; printf 'nowindow\\tthe rack test plugin has no window\\n'");
+        let mut rack = kept_in_time(&script);
+        rack.show_on_time(0, None);
+        let gave_up = std::time::Instant::now();
+        let mut told = false;
+        while !told && gave_up.elapsed() < std::time::Duration::from_secs(5) {
+            rack.process(&mut vec![[0.5; 2]; 64]);
+            told = crate::sandbox::windows_that_failed().iter().any(|why| why == "the rack test plugin has no window");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(told, "the window's trouble never reached Loupe");
+        assert!(rack.slots()[0].trouble.is_none(), "a plugin with no window was taken for a broken one");
     }
 
     #[test]

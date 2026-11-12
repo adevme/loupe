@@ -550,6 +550,19 @@ impl Chains for Racks {
         self.settle(project)
     }
 
+    fn show_on_time(&mut self, window: &loupe_engine::PluginWindow) {
+        let named = window.named.as_ref().map(|named| (named.track.as_str(), named.seat, named.label.as_str()));
+        let (rack, slot) = match window.which {
+            Touched::Track(track, slot) => (self.chains.get_mut(&track), slot),
+            Touched::Clip(clip, slot) => (self.clips.get_mut(&clip), slot),
+            Touched::Master(slot) => (self.master.as_mut(), slot),
+            Touched::Monitor(slot) => (self.monitor.as_mut(), slot),
+        };
+        if let Some(rack) = rack {
+            rack.show_on_time(slot, named);
+        }
+    }
+
     fn troubles(&self) -> Vec<(TrackId, String, String)> {
         self.problems()
     }

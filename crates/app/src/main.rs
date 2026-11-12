@@ -67,7 +67,7 @@ use iced::widget::{
 use iced::{keyboard, window, Alignment, Element, Length, Point, Rectangle, Size, Subscription, Task};
 use loupe_engine::{
     Chains, ClipId, Command, CommandError, Edge, Engine, Fade, Frames, Input, InputChannels, InputChoice, Instrument, Note, Outcome,
-    Output, Device, Project, Source, TrackId,
+    Output, Device, Project, Source, Touched, TrackId,
 };
 
 use settings::{Settings, MAX_SCALE, MIN_SCALE};
@@ -1330,6 +1330,9 @@ impl App {
                 }
                 self.keep_writing();
                 self.take_falls();
+                if let Some(why) = loupe_plugins::sandbox::windows_that_failed().pop() {
+                    self.problem = Some(why);
+                }
                 for open in &mut self.stocks {
                     open.editor.tick();
                 }
@@ -3060,6 +3063,14 @@ impl App {
         racks
     }
 
+    fn show_on_the_audio_thread(&mut self, which: Touched, named: Option<loupe_engine::WindowName>) -> bool {
+        if !self.racks.is_out() || !crate::touches::racks_must_stay(&self.engine) {
+            return false;
+        }
+        self.engine.show_plugin(loupe_engine::PluginWindow { which, named });
+        true
+    }
+
     fn borrow_racks(&mut self) -> Option<Box<dyn Chains>> {
         racks::borrow(&mut self.engine, &mut self.racks)
     }
@@ -3104,10 +3115,14 @@ impl App {
         };
         let label = self.fx_label(track, slot);
         if !loupe_plugins::rack::is_built_in(&fx.path) {
+            let seat = self.project.tracks.iter().position(|t| t.id == track).unwrap_or(0) as i64;
+            let on = self.project.tracks.iter().find(|t| t.id == track).map(|t| t.name.clone()).unwrap_or_default();
+            let named = loupe_engine::WindowName { track: on.clone(), seat, label: label.clone() };
+            if self.show_on_the_audio_thread(Touched::Track(track, slot), Some(named)) {
+                return;
+            }
             if let Some(mut racks) = self.take_or_make_racks() {
                 racks.follow(&self.project);
-                let seat = self.project.tracks.iter().position(|t| t.id == track).unwrap_or(0) as i64;
-                let on = self.project.tracks.iter().find(|t| t.id == track).map(|t| t.name.clone()).unwrap_or_default();
                 let _ = racks.on_track(track, slot, &on, seat);
                 let _ = racks.called(track, slot, &label);
                 if let Err(why) = racks.show(track, slot) {
@@ -3149,6 +3164,9 @@ impl App {
             return;
         };
         if !loupe_plugins::rack::is_built_in(&fx.path) {
+            if self.show_on_the_audio_thread(Touched::Clip(clip, slot), None) {
+                return;
+            }
             if let Some(mut racks) = self.take_or_make_racks() {
                 racks.follow(&self.project);
                 if let Err(why) = racks.show_clip(clip, slot) {
@@ -4343,6 +4361,9 @@ impl App {
             }
             return;
         }
+        if self.show_on_the_audio_thread(Touched::Master(slot), None) {
+            return;
+        }
         if let Some(mut racks) = self.take_or_make_racks() {
             racks.follow(&self.project);
             if let Err(why) = racks.show_master(slot) {
@@ -4372,6 +4393,9 @@ impl App {
             if let Some(window) = stockwin::Window::open(stockwin::Spot::Monitor, slot, fx.index, &fx.name, &values, peek, rate, bpm) {
                 self.stocks_waiting.push(window);
             }
+            return;
+        }
+        if self.show_on_the_audio_thread(Touched::Monitor(slot), None) {
             return;
         }
         if let Some(mut racks) = self.take_or_make_racks() {
@@ -4733,5 +4757,86 @@ mod automation_undo {
         assert_eq!(points(&app), start + 2, "one undo took back more than the last point");
         let _ = app.update(Message::Undo);
         assert_eq!(points(&app), start + 1);
+    }
+}
+
+#[cfg(test)]
+mod plugin_windows_while_playing {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    const A_HEAVY_WINDOW: Duration = Duration::from_millis(150);
+
+    #[derive(Default)]
+    struct Seen {
+        shown_off_the_audio_thread: AtomicUsize,
+        shown_on_time: std::sync::Mutex<Vec<loupe_engine::PluginWindow>>,
+        blocks: AtomicUsize,
+    }
+
+    struct Watched(Arc<Seen>);
+
+    impl Chains for Watched {
+        fn process_with(&mut self, _track: TrackId, _audio: &mut [[f32; 2]], _side: &[[f32; 2]]) {
+            self.0.blocks.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn show(&mut self, _track: TrackId, _slot: usize) -> Result<(), String> {
+            self.0.shown_off_the_audio_thread.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(A_HEAVY_WINDOW);
+            Ok(())
+        }
+
+        fn show_on_time(&mut self, window: &loupe_engine::PluginWindow) {
+            self.0.shown_on_time.lock().unwrap().push(window.clone());
+        }
+    }
+
+    fn playing_with_a_hosted_plugin() -> (App, TrackId, Arc<Seen>) {
+        let mut app = App::bare();
+        let track = match app.project.apply(Command::AddTrack { name: "Vox".into() }) {
+            Ok(Outcome::Track(track)) => track,
+            _ => panic!("the track was not made"),
+        };
+        let source = Arc::new(loupe_engine::Source::from_frames("take", vec![[0.5, 0.5]; app.engine.rate() as usize * 10]));
+        app.project.apply(Command::AddClip { track, source, start: 0 }).unwrap();
+        let fx = loupe_engine::Fx {
+            path: std::path::PathBuf::from("Auto-Tune.vst3"),
+            index: 0,
+            name: "Auto-Tune".into(),
+            bypassed: false,
+            state: Vec::new(),
+            record: false,
+            mix: 1.0,
+        };
+        app.project.apply(Command::AddFx { track, fx }).unwrap();
+        app.engine.set_project(&app.project);
+        let seen = Arc::new(Seen::default());
+        app.engine.use_chains(Box::new(Watched(seen.clone())));
+        app.racks.gone_out();
+        app.engine.play();
+        let began = Instant::now();
+        while seen.blocks.load(Ordering::Relaxed) < 3 {
+            assert!(began.elapsed() < Duration::from_secs(5), "the song never ran through the plugins");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (app, track, seen)
+    }
+
+    #[test]
+    fn opening_a_plugin_window_while_playing_leaves_the_plugins_on_the_audio_thread() {
+        let (mut app, track, seen) = playing_with_a_hosted_plugin();
+        let before = seen.blocks.load(Ordering::Relaxed);
+        let began = Instant::now();
+        app.open_plugin_window(track, 0);
+        std::thread::sleep(A_HEAVY_WINDOW.saturating_sub(began.elapsed()));
+        let through_the_plugins = seen.blocks.load(Ordering::Relaxed) - before;
+        let blocks_due = began.elapsed().as_millis() as usize / 10;
+        app.engine.stop();
+        assert_eq!(seen.shown_off_the_audio_thread.load(Ordering::Relaxed), 0, "the window was opened by taking every plugin off the audio thread ({through_the_plugins} of about {blocks_due} blocks went through the plugins)");
+        assert!(app.racks.is_out(), "the plugins were not handed back to the audio thread");
+        assert!(through_the_plugins + 3 >= blocks_due, "only {through_the_plugins} of about {blocks_due} blocks went through the plugins while the window opened");
+        let named = loupe_engine::WindowName { track: "Vox".into(), seat: 0, label: app.fx_label(track, 0) };
+        assert_eq!(*seen.shown_on_time.lock().unwrap(), vec![loupe_engine::PluginWindow { which: Touched::Track(track, 0), named: Some(named) }], "the audio thread was not asked to open the window");
     }
 }

@@ -13,7 +13,7 @@ use crate::devices::{self, Device, Failure, Running};
 use crate::instrument::Note;
 use crate::midi_in::{KeyEvent, KeySender};
 use crate::model::{ClipId, Frames, MeterPoint, Project, TrackId, METER_POINTS};
-use crate::render::{loudest, mix_tracks_metered, TrackPeaks, pan_gains, scale, shape_of, Chains, Mixdown, Round, Shape};
+use crate::render::{loudest, mix_tracks_metered, TrackPeaks, pan_gains, scale, shape_of, Chains, Mixdown, PluginWindow, Round, Shape};
 
 const MAX_BLOCK: usize = 4096;
 const FADE_SECONDS: f32 = 0.005;
@@ -26,6 +26,7 @@ const LOAD_KEEP: f32 = 0.95;
 const PEAK_KEEP: f32 = 0.995;
 const ROLL_BLOCK: usize = 512;
 const STILL_FOR: f32 = 0.1;
+const WINDOWS_WAITING: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Load {
@@ -62,6 +63,7 @@ enum Msg {
     Chains(Option<Box<dyn Chains>>),
     Tweak { track: TrackId, slot: usize, knob: usize, value: f32 },
     TweakClip { clip: ClipId, slot: usize, knob: usize, value: f32 },
+    ShowPlugin(Box<PluginWindow>),
     Play,
     Stop,
     Seek(Frames),
@@ -172,6 +174,7 @@ struct Rt {
     load: f32,
     load_peak: f32,
     chains: Option<Box<dyn Chains>>,
+    windows_to_show: Vec<Box<PluginWindow>>,
     peaks: [TrackPeaks; METERS],
     project: Arc<Project>,
     inbox: Consumer<Msg>,
@@ -467,6 +470,7 @@ fn pair(rate: u32) -> (Rt, Remote) {
         done_feeds: done_in,
         scratch,
         chains: None,
+        windows_to_show: Vec::with_capacity(WINDOWS_WAITING),
         peaks: [[0.0; METER_POINTS]; METERS],
         project: Arc::new(Project::new(rate)),
         inbox,
@@ -514,6 +518,11 @@ impl Rt {
                 Msg::TweakClip { clip, slot, knob, value } => {
                     if let Some(racks) = self.chains.as_deref_mut() {
                         racks.tweak_clip(clip, slot, knob, value);
+                    }
+                }
+                Msg::ShowPlugin(window) => {
+                    if self.windows_to_show.len() < WINDOWS_WAITING {
+                        self.windows_to_show.push(window);
                     }
                 }
                 Msg::Play => self.playing = true,
@@ -592,6 +601,7 @@ impl Rt {
 
         self.step = frames.clamp(1, MAX_BLOCK);
         self.collect_roll();
+        self.show_waiting_windows();
         let rate = self.project.rate;
         let beat = beat_frames(self.project.bpm, rate);
         let where_we_are = crate::render::Song::where_it_is(&self.project, self.pos, self.playing, self.recording);
@@ -715,6 +725,13 @@ impl Rt {
         match end > 0 && at < end {
             true => Some((0, end)),
             false => None,
+        }
+    }
+
+    fn show_waiting_windows(&mut self) {
+        let Some(racks) = self.chains.as_deref_mut() else { return };
+        for window in self.windows_to_show.drain(..) {
+            racks.show_on_time(&window);
         }
     }
 
@@ -1259,6 +1276,10 @@ impl Engine {
 
     pub fn tweak_clip(&mut self, clip: ClipId, slot: usize, knob: usize, value: f32) {
         self.send(Msg::TweakClip { clip, slot, knob, value });
+    }
+
+    pub fn show_plugin(&mut self, window: PluginWindow) {
+        self.send(Msg::ShowPlugin(Box::new(window)));
     }
 
     pub fn hear(&mut self, input: &mut crate::input::Input) {
@@ -1982,6 +2003,53 @@ mod tests {
         assert!((heard - full * 0.5).abs() < 1e-5, "half the listen level played {heard} against {full}");
         assert!(quiet.windows(2).all(|pair| (pair[1][0] - pair[0][0]).abs() <= full * 0.01), "the listen level jumped and would click");
         assert_eq!(project.master, 1.0);
+    }
+
+    #[derive(Default)]
+    struct Windows {
+        shown: Arc<std::sync::Mutex<Vec<PluginWindow>>>,
+    }
+
+    impl Chains for Windows {
+        fn show_on_time(&mut self, window: &PluginWindow) {
+            if let Ok(mut kept) = self.shown.lock() {
+                kept.push(window.clone());
+            }
+        }
+    }
+
+    fn a_window(slot: usize) -> PluginWindow {
+        PluginWindow { which: crate::render::Touched::Track(TrackId(1), slot), named: None }
+    }
+
+    #[test]
+    fn a_plugin_window_opened_while_playing_is_asked_for_on_the_audio_thread_without_the_plugins_leaving() {
+        let (mut rt, mut remote) = pair(RATE);
+        let shown = Arc::new(std::sync::Mutex::new(Vec::new()));
+        remote.outbox.push(Msg::Project(Arc::new(steady(RATE as usize)))).ok().unwrap();
+        remote.outbox.push(Msg::Chains(Some(Box::new(Windows { shown: shown.clone() })))).ok().unwrap();
+        remote.outbox.push(Msg::Play).ok().unwrap();
+        rt.process(128);
+        remote.outbox.push(Msg::ShowPlugin(Box::new(a_window(2)))).ok().unwrap();
+        rt.process(128);
+        assert_eq!(*shown.lock().unwrap(), vec![a_window(2)]);
+        assert!(rt.chains.is_some(), "the plugins left the audio thread to open a window");
+        assert!(remote.handed_back.pop().is_err(), "the plugins were handed back to open a window");
+        rt.process(128);
+        assert_eq!(shown.lock().unwrap().len(), 1, "the window was asked for twice");
+    }
+
+    #[test]
+    fn a_plugin_window_asked_for_while_the_plugins_are_away_opens_when_they_come_back() {
+        let (mut rt, mut remote) = pair(RATE);
+        let shown = Arc::new(std::sync::Mutex::new(Vec::new()));
+        remote.outbox.push(Msg::Project(Arc::new(steady(RATE as usize)))).ok().unwrap();
+        remote.outbox.push(Msg::ShowPlugin(Box::new(a_window(0)))).ok().unwrap();
+        rt.process(128);
+        assert!(shown.lock().unwrap().is_empty());
+        remote.outbox.push(Msg::Chains(Some(Box::new(Windows { shown: shown.clone() })))).ok().unwrap();
+        rt.process(128);
+        assert_eq!(*shown.lock().unwrap(), vec![a_window(0)], "the window asked for while the plugins were away was lost");
     }
 
     #[derive(Default)]

@@ -90,6 +90,7 @@ pub enum Reply {
     UndoAnEdit,
     RedoAnEdit,
     LatencyMoved { seat: usize, frames: usize },
+    NoWindow(String),
     Trouble(String),
 }
 
@@ -240,6 +241,7 @@ impl Reply {
             Reply::UndoAnEdit => "undoedit".to_string(),
             Reply::RedoAnEdit => "redoedit".to_string(),
             Reply::LatencyMoved { seat, frames } => format!("{LATENCY_MOVED}\t{seat}\t{frames}"),
+            Reply::NoWindow(why) => format!("{NO_WINDOW}\t{}", tidy(why)),
             Reply::Trouble(why) => format!("trouble\t{}", why.replace('\n', " ")),
         };
         writeln!(out, "{line}")?;
@@ -283,6 +285,7 @@ impl Reply {
             "undoedit" => Some(Reply::UndoAnEdit),
             "redoedit" => Some(Reply::RedoAnEdit),
             LATENCY_MOVED => Some(Reply::LatencyMoved { seat: parts.next()?.parse().ok()?, frames: parts.next()?.parse().ok()? }),
+            NO_WINDOW => Some(Reply::NoWindow(parts.next().unwrap_or("the plugin window would not open").to_string())),
             "trouble" => Some(Reply::Trouble(parts.next().unwrap_or("something went wrong").to_string())),
             _ => None,
         }
@@ -291,6 +294,7 @@ impl Reply {
 
 pub const FELL: &str = "fell";
 pub const LATENCY_MOVED: &str = "latencymoved";
+pub const NO_WINDOW: &str = "nowindow";
 
 pub enum Came {
     Block,
@@ -506,6 +510,7 @@ mod tests {
             Reply::RedoAnEdit,
             Reply::LatencyMoved { seat: 0, frames: 1_024 },
             Reply::LatencyMoved { seat: 3, frames: 0 },
+            Reply::NoWindow("this plugin has no window".into()),
             Reply::Trouble("it broke".into()),
         ];
         for reply in replies {

@@ -77,6 +77,10 @@ impl Open {
         matches!(self, Open::Vst3(effect) if effect.is_ara())
     }
 
+    fn has_a_window(&self) -> bool {
+        matches!(self, Open::Vst3(_))
+    }
+
     fn told_the_time(&mut self, song: Song) {
         if let Open::Vst3(effect) = self {
             effect.told_the_time(song);
@@ -426,6 +430,31 @@ fn read_asks(to_main: Sender<ForMain>, seats: Arc<Mutex<Seats>>, out: Arc<Out>, 
                 out.say(&Reply::Edited(touches.taken()));
                 true
             }
+            Ask::OnTrack(name, index) => {
+                if let Some(seated) = hold(&seats).at(seat) {
+                    seated.on_track = name;
+                    seated.seat_index = index;
+                }
+                out.say(&Reply::Fine);
+                true
+            }
+            Ask::Called(called) => {
+                if let Some(seated) = hold(&seats).at(seat) {
+                    seated.shown_as = called;
+                }
+                out.say(&Reply::Fine);
+                true
+            }
+            Ask::Show => match hold(&seats).at(seat).is_some_and(|seated| seated.open.has_a_window()) {
+                true => {
+                    out.say(&Reply::Fine);
+                    tell_main(ForMain::Ask(Ask::Show, seat))
+                }
+                false => {
+                    out.say(&Reply::Trouble(NO_WINDOW_YET.into()));
+                    true
+                }
+            },
             other => tell_main(ForMain::Ask(other, seat)),
         };
         if !sent {
@@ -522,7 +551,7 @@ fn main() {
             ForMain::Done => break,
         };
         let reply = match ask {
-            Ask::Process | Ask::ProcessWithSide | Ask::ProcessAt(_) | Ask::Chain { .. } | Ask::Timing(_) | Ask::Turn { .. } | Ask::Seat(_) | Ask::Touched => continue,
+            Ask::Process | Ask::ProcessWithSide | Ask::ProcessAt(_) | Ask::Chain { .. } | Ask::Timing(_) | Ask::Turn { .. } | Ask::Seat(_) | Ask::Touched | Ask::OnTrack(..) | Ask::Called(_) => continue,
             Ask::Unload(gone) => {
                 if editor.as_ref().is_some_and(|(_, _, held)| *held == gone) {
                     editor = None;
@@ -545,34 +574,16 @@ fn main() {
                 }
             }
             Ask::Show => {
-                let mut held = hold(&seats);
-                let name = held.at(seat).map(|seated| match seated.shown_as.is_empty() {
-                    true => seated.name.clone(),
-                    false => seated.shown_as.clone(),
-                }).unwrap_or_default();
-                let on = held.at(seat).map(|seated| (seated.on_track.clone(), seated.seat_index)).unwrap_or_default();
-                match show(held.at(seat).map(|seated| &mut seated.open), &mut editor, &name, seat, &on) {
+                match show(&seats, &mut editor, seat) {
                     Ok(()) => {
                         if let Some((_, pane, _)) = editor.as_ref() {
                             was_sized = pane.inside();
                         }
-                        Reply::Fine
                     }
-                    Err(why) => Reply::Trouble(why),
+                    Err(why) => out.say(&Reply::NoWindow(why)),
                 }
-            }
-            Ask::OnTrack(name, index) => {
-                if let Some(seated) = hold(&seats).at(seat) {
-                    seated.on_track = name;
-                    seated.seat_index = index;
-                }
-                Reply::Fine
-            }
-            Ask::Called(called) => {
-                if let Some(seated) = hold(&seats).at(seat) {
-                    seated.shown_as = called;
-                }
-                Reply::Fine
+                touches.watch(editor.as_ref().map(|(made, _, _)| made.touches()));
+                continue;
             }
             Ask::Hide => {
                 let shut = editor.as_ref().map(|(_, pane, seat)| {
@@ -657,13 +668,14 @@ fn main() {
     com::stop();
 }
 
-fn show(
-    open: Option<&mut Open>,
-    editor: &mut Showing,
-    name: &str,
-    seat: usize,
-    on: &(String, i64),
-) -> Result<(), String> {
+const NO_WINDOW_YET: &str = "only VST3 plugins have a window so far";
+
+enum Making {
+    Made(loupe_plugins::editor::Editor),
+    ToMake(vst3::EditorRecipe),
+}
+
+fn show(seats: &Mutex<Seats>, editor: &mut Showing, seat: usize) -> Result<(), String> {
     if let Some((_, pane, held)) = editor.as_ref() {
         if *held == seat {
             pane.show();
@@ -671,10 +683,28 @@ fn show(
         }
         return Err("this plugin host already has a window open".into());
     }
-    let Some(Open::Vst3(effect)) = open else {
-        return Err("only VST3 plugins have a window so far".into());
+    let (making, name, on) = {
+        let mut held = hold(seats);
+        let Some(seated) = held.at(seat) else {
+            return Err(NO_WINDOW_YET.into());
+        };
+        let name = match seated.shown_as.is_empty() {
+            true => seated.name.clone(),
+            false => seated.shown_as.clone(),
+        };
+        let on = (seated.on_track.clone(), seated.seat_index);
+        let making = match &mut seated.open {
+            Open::Vst3(effect) if effect.is_ara() => Making::Made(effect.editor()?),
+            Open::Vst3(effect) => Making::ToMake(effect.editor_recipe()),
+            _ => return Err(NO_WINDOW_YET.into()),
+        };
+        (making, name, on)
     };
-    let made = std::rc::Rc::new(effect.editor()?);
+    let (name, on) = (name.as_str(), &on);
+    let made = std::rc::Rc::new(match making {
+        Making::Made(made) => made,
+        Making::ToMake(recipe) => recipe.make()?,
+    });
     let kind = loupe_plugins::editor::platform_kind();
     if !made.fits(kind) {
         return Err("this plugin has no window for this computer".into());
