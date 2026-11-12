@@ -28,7 +28,7 @@ pub use model::{
     Clip, ClipId, Command, CommandError, Edge, Fade, Frames, Fx, InputChannels, MeterPoint, Outcome, METER_POINTS, Project, Send, Track, TrackId,
 };
 pub use envelope::{Envelope, Mode, Point, Shape, Target, Writer};
-pub use render::{mix_tracks, TrackPeaks, monitor_latency, render, render_through, scale, Chains, Job, Mixdown, PluginSpending, Saved, Song, Touched};
+pub use render::{mix_tracks, TrackPeaks, monitor_latency, render, render_through, scale, Chains, Job, Mixdown, PluginSpending, PluginWindow, Saved, Song, Touched, WindowName};
 pub use loupe_stretch::{LONGEST as LONGEST_STRETCH, SHORTEST as SHORTEST_STRETCH};
 pub use source::Source;
 pub use wav::{repair_takes, write_frames};

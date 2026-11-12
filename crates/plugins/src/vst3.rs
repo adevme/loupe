@@ -87,14 +87,7 @@ impl Library {
     }
 
     pub unsafe fn make<I: vst3::Interface>(&self, id: &[u8; 16]) -> Result<ComPtr<I>, String> {
-        let mut made: *mut std::ffi::c_void = std::ptr::null_mut();
-        let cid = id.map(|b| b as i8);
-        let iid = I::IID;
-        let ok = self.factory.createInstance(cid.as_ptr(), &iid as *const _ as *const i8, &mut made);
-        if ok != vst3::Steinberg::kResultOk || made.is_null() {
-            return Err("the plugin would not make that part".into());
-        }
-        ComPtr::from_raw(made as *mut I).ok_or_else(|| "the plugin gave back nothing".to_string())
+        make_from(&self.factory, id)
     }
 
     pub fn classes(&self) -> Vec<Class> {
@@ -119,6 +112,17 @@ impl Library {
         }
         classes
     }
+}
+
+unsafe fn make_from<I: vst3::Interface>(factory: &ComPtr<IPluginFactory>, id: &[u8; 16]) -> Result<ComPtr<I>, String> {
+    let mut made: *mut std::ffi::c_void = std::ptr::null_mut();
+    let cid = id.map(|b| b as i8);
+    let iid = I::IID;
+    let ok = factory.createInstance(cid.as_ptr(), &iid as *const _ as *const i8, &mut made);
+    if ok != vst3::Steinberg::kResultOk || made.is_null() {
+        return Err("the plugin would not make that part".into());
+    }
+    ComPtr::from_raw(made as *mut I).ok_or_else(|| "the plugin gave back nothing".to_string())
 }
 
 impl Drop for Library {
@@ -252,52 +256,33 @@ impl Effect {
     }
 
     pub fn editor(&mut self) -> Result<crate::editor::Editor, String> {
-        use vst3::Steinberg::Vst::IEditController;
         if let Some(document) = self.ara.as_mut() {
             document.start_reading();
         }
-        let made = unsafe {
-            let context = self
-                .us
-                .as_com_ref::<vst3::Steinberg::FUnknown>()
-                .map(|found| found.as_ptr())
-                .unwrap_or(std::ptr::null_mut());
-            let mut cid = [0i8; 16];
-            let named = (self.component.getControllerClassId(&mut cid) == kResultOk).then(|| cid.map(|c| c as u8));
-            let listed = self
-                ._library
-                .classes()
-                .into_iter()
-                .find(|class| class.category == "Component Controller Class")
-                .map(|class| class.id);
-            let mut refused = String::new();
-            let mut separate = None;
-            for id in [named, listed].into_iter().flatten() {
-                match self._library.make::<IEditController>(&id) {
-                    Ok(controller) => {
-                        separate = Some(controller);
-                        break;
-                    }
-                    Err(why) => refused = why,
-                }
-            }
-            match separate {
-                Some(controller) => {
-                    let settings = self.settings().unwrap_or_default();
-                    crate::editor::Editor::joined(controller, &self.component, &settings, context)
-                }
-                None if !refused.is_empty() => Err(format!("the window lives in another part of the plugin, and {refused}")),
-                None => {
-                    let controller: ComPtr<IEditController> = self.component.cast().ok_or("this plugin has no window")?;
-                    crate::editor::Editor::already_started(controller, context)
-                }
-            }
-        }?;
-        made.passes_edits_to(self.turns.clone());
+        let made = self.editor_recipe().make()?;
         if let Some(document) = self.ara.as_ref() {
             document.select();
         }
         Ok(made)
+    }
+
+    pub fn editor_recipe(&mut self) -> EditorRecipe {
+        let mut cid = [0i8; 16];
+        let named = (unsafe { self.component.getControllerClassId(&mut cid) } == kResultOk).then(|| cid.map(|c| c as u8));
+        let listed = self._library.classes().into_iter().find(|class| class.category == "Component Controller Class").map(|class| class.id);
+        let ids: Vec<[u8; 16]> = [named, listed].into_iter().flatten().collect();
+        let settings = match ids.is_empty() {
+            true => Vec::new(),
+            false => self.settings().unwrap_or_default(),
+        };
+        EditorRecipe {
+            factory: self._library.factory.clone(),
+            component: self.component.clone(),
+            us: self.us.clone(),
+            ids,
+            settings,
+            turns: self.turns.clone(),
+        }
     }
 
     pub fn is_ara(&self) -> bool {
@@ -771,4 +756,47 @@ unsafe fn channels_on(component: &ComPtr<IComponent>, direction: i32, index: i32
         return 2;
     }
     info.channelCount.clamp(0, MOST_CHANNELS as i32)
+}
+
+pub struct EditorRecipe {
+    factory: ComPtr<IPluginFactory>,
+    component: ComPtr<IComponent>,
+    us: vst3::ComWrapper<crate::context::Us>,
+    ids: Vec<[u8; 16]>,
+    settings: Vec<u8>,
+    turns: vst3::ComWrapper<crate::changes::Turns>,
+}
+
+impl EditorRecipe {
+    pub fn make(self) -> Result<crate::editor::Editor, String> {
+        use vst3::Steinberg::Vst::IEditController;
+        let made = unsafe {
+            let context = self
+                .us
+                .as_com_ref::<vst3::Steinberg::FUnknown>()
+                .map(|found| found.as_ptr())
+                .unwrap_or(std::ptr::null_mut());
+            let mut refused = String::new();
+            let mut separate = None;
+            for id in &self.ids {
+                match make_from::<IEditController>(&self.factory, id) {
+                    Ok(controller) => {
+                        separate = Some(controller);
+                        break;
+                    }
+                    Err(why) => refused = why,
+                }
+            }
+            match separate {
+                Some(controller) => crate::editor::Editor::joined(controller, &self.component, &self.settings, context),
+                None if !refused.is_empty() => Err(format!("the window lives in another part of the plugin, and {refused}")),
+                None => {
+                    let controller: ComPtr<IEditController> = self.component.cast().ok_or("this plugin has no window")?;
+                    crate::editor::Editor::already_started(controller, context)
+                }
+            }
+        }?;
+        made.passes_edits_to(self.turns.clone());
+        Ok(made)
+    }
 }

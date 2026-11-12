@@ -48,6 +48,19 @@ enum Want {
 static A_SAVE_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
 static AN_UNDO_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
 static A_REDO_WAS_ASKED_FOR: AtomicBool = AtomicBool::new(false);
+static WINDOWS_THAT_FAILED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+const MOST_WINDOW_TROUBLES: usize = 16;
+
+pub fn a_window_failed(why: String) {
+    let mut held = WINDOWS_THAT_FAILED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if held.len() < MOST_WINDOW_TROUBLES {
+        held.push(why);
+    }
+}
+
+pub fn windows_that_failed() -> Vec<String> {
+    std::mem::take(&mut *WINDOWS_THAT_FAILED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
 
 fn flag_for(chord: &Reply) -> Option<&'static AtomicBool> {
     match chord {
@@ -219,6 +232,49 @@ impl Sandbox {
             }
             Err(RecvTimeoutError::Disconnected) => Err(self.give_up("the plugin crashed")),
         }
+    }
+
+    pub fn ask_all_within(&mut self, asks: &[Ask], within: Duration) -> Result<Vec<Reply>, String> {
+        if self.lost {
+            return Err("the plugin host is gone".into());
+        }
+        self.take_what_came_late()?;
+        let behind = !self.owed.is_empty();
+        self.outgoing.clear();
+        self.outgoing.append(&mut self.pending);
+        for ask in asks {
+            let _ = ask.write(&mut self.outgoing);
+        }
+        if self.writing.write_all(&self.outgoing).is_err() || self.writing.flush().is_err() {
+            return Err(self.give_up("the plugin host stopped listening"));
+        }
+        for _ in asks {
+            if self.wants.as_ref().is_none_or(|w| w.send(Want::Line).is_err()) {
+                return Err(self.give_up("the plugin host stopped listening"));
+            }
+        }
+        if behind {
+            self.owed.extend(asks.iter().map(|_| Want::Line));
+            self.fell_behind()?;
+            return Ok(Vec::new());
+        }
+        let began = Instant::now();
+        let mut replies = Vec::with_capacity(asks.len());
+        for at in 0..asks.len() {
+            match self.gets.recv_timeout(within.saturating_sub(began.elapsed())) {
+                Ok(got) => {
+                    self.late_since = None;
+                    replies.push(self.reply_from(got)?);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.owed.extend((at..asks.len()).map(|_| Want::Line));
+                    self.fell_behind()?;
+                    return Ok(replies);
+                }
+                Err(RecvTimeoutError::Disconnected) => return Err(self.give_up("the plugin crashed")),
+            }
+        }
+        Ok(replies)
     }
 
     fn send_the_ask(&mut self, ask: &Ask, want: Want) -> Result<(), String> {
@@ -464,6 +520,10 @@ fn read_for(out: impl Read, _asked: Receiver<Want>, sends: Sender<Got>, tells: S
                 match Reply::read(line) {
                     Some(Reply::LatencyMoved { seat, frames }) => {
                         let _ = tells.send((seat, frames));
+                        continue;
+                    }
+                    Some(Reply::NoWindow(why)) => {
+                        a_window_failed(why);
                         continue;
                     }
                     Some(said) if remember_the_chord(&said) => continue,
@@ -910,5 +970,27 @@ mod latency_tests {
         assert!(moved.try_recv().is_err(), "nothing else was said");
         drop(wants);
         reader.join().expect("the reader finished");
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn a_window_that_would_not_open_does_not_stand_in_for_a_block() {
+        let mut said = Vec::new();
+        Reply::NoWindow("the sandbox test window would not open".into()).write(&mut said).expect("the word is written");
+        write_block(&mut said, &[[0.5f32, -0.5]; 4]).expect("the block is written");
+        let (wants, asked) = channel::<Want>();
+        let (sends, gets) = channel::<Got>();
+        let (tells, _moved) = channel::<(usize, usize)>();
+        let reader = std::thread::spawn(move || read_for(&said[..], asked, sends, tells));
+        wants.send(Want::Block).expect("the reader is listening");
+        let Ok(Got::Block(came)) = gets.recv_timeout(PATIENCE) else { panic!("the block never came back") };
+        assert_eq!(came, vec![[0.5f32, -0.5]; 4]);
+        drop(wants);
+        reader.join().expect("the reader finished");
+        assert!(windows_that_failed().iter().any(|why| why == "the sandbox test window would not open"), "the window's trouble was lost");
     }
 }

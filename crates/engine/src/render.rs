@@ -59,6 +59,19 @@ pub enum Touched {
     Monitor(usize),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginWindow {
+    pub which: Touched,
+    pub named: Option<WindowName>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowName {
+    pub track: String,
+    pub seat: i64,
+    pub label: String,
+}
+
 pub trait Chains: Send {
     fn process(&mut self, track: TrackId, audio: &mut [[f32; 2]]) {
         self.process_with(track, audio, &[]);
@@ -268,6 +281,10 @@ pub trait Chains: Send {
 
     fn still_opening(&self) -> bool {
         false
+    }
+
+    fn show_on_time(&mut self, window: &PluginWindow) {
+        let _ = window;
     }
 
     fn not_ready(&self) -> Vec<String> {
