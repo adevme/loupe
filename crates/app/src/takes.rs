@@ -139,14 +139,18 @@ pub fn lay_take(project: &mut Project, track: TrackId, source: Arc<Source>, star
     let mut next = lane_rows(found);
     let plain: Vec<ClipId> = under.iter().filter(|clip| clip.lane.is_none()).map(|clip| clip.id).collect();
     let becomes_lanes = offsets.len() > 1 || !under.is_empty();
+    // Only the part of an old clip that the new take covers moves under it.
+    // What sits before or after the recording keeps playing as it was.
     if !plain.is_empty() {
         for clip in plain {
-            project.apply(Command::SetClipLane { clip, lane: Some(next), on: false })?;
+            let middle = middle_of(project, clip, start, end, Fade::NONE, false)?;
+            project.apply(Command::SetClipLane { clip: middle, lane: Some(next), on: false })?;
         }
         next += 1;
     }
     for clip in under.iter().filter(|clip| clip.lane.is_some() && clip.lane_on) {
-        project.apply(Command::SetClipLane { clip: clip.id, lane: clip.lane, on: false })?;
+        let middle = middle_of(project, clip.id, start, end, Fade::NONE, false)?;
+        project.apply(Command::SetClipLane { clip: middle, lane: clip.lane, on: false })?;
     }
     let mut playing = None;
     for (pass, offset) in offsets.iter().enumerate() {

@@ -383,8 +383,10 @@ mod tests {
         let Ok(Outcome::Track(track)) = project.apply(Command::AddTrack { name: "Vox".into() }) else { panic!() };
         let old = crate::takes::lay_take(&mut project, track, Arc::new(Source::from_frames("old", vec![[1.0, 1.0]; 4])), 100, 4, &[0], 0).unwrap();
         let new = crate::takes::lay_take(&mut project, track, Arc::new(Source::from_frames("new", vec![[2.0, 2.0]; 3])), 102, 3, &[0], 0).unwrap();
-        let (old, new) = (project.clip(old).unwrap(), project.clip(new).unwrap());
-        assert_eq!((old.start, old.len, old.lane, old.is_silent()), (100, 4, Some(0), true), "the old take moved or still plays");
+        let (before, new) = (project.clip(old).unwrap(), project.clip(new).unwrap());
+        assert_eq!((before.start, before.len, before.lane, before.is_silent()), (100, 2, None, false), "the part before the recording stopped playing");
+        let under = project.track(track).unwrap().clips.iter().find(|clip| clip.lane == Some(0)).unwrap();
+        assert_eq!((under.start, under.len, under.is_silent()), (102, 2, true), "only the part under the new take should become take 1");
         assert_eq!((new.start, new.len, new.lane, new.is_silent()), (102, 3, Some(1), false), "the new take is not where it was recorded");
     }
 
@@ -604,6 +606,14 @@ mod tests {
         std::fs::remove_dir_all(&folder).ok();
     }
 
+    fn playing_at(clips: &[loupe_engine::Clip], at: Frames) -> Vec<String> {
+        clips
+            .iter()
+            .filter(|clip| clip.start <= at && clip.end() > at && !clip.is_silent())
+            .map(|clip| clip.source.name.split('.').next().unwrap_or_default().to_string())
+            .collect()
+    }
+
     fn a_take(folder: &Path, name: &str, frames: usize) -> Arc<Source> {
         let file = folder.join(name);
         loupe_engine::write_frames(&file, &vec![[0.5, 0.5]; frames], 48_000).unwrap();
@@ -619,11 +629,11 @@ mod tests {
         app.place_take(0, 0, false, None, None, Ok(vec![(track, a_take(&folder, "one.wav", 480_000))]));
         app.place_take(240_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 480_000))]));
         let clips = &app.project.track(track).unwrap().clips;
-        assert_eq!(clips.len(), 2);
-        let first = clips.iter().find(|clip| clip.start == 0).unwrap();
-        assert_eq!(first.end(), 480_000, "the old take was cut short");
-        assert!(clips.iter().all(|clip| clip.lane.is_some()), "the new recording did not stack");
-        assert_eq!(clips.iter().filter(|clip| clip.lane_on).count(), 1, "both play");
+        let old: Frames = clips.iter().filter(|clip| clip.source.name.starts_with("one")).map(|clip| clip.len).sum();
+        assert_eq!(old, 480_000, "the old take lost audio");
+        assert_eq!(playing_at(clips, 100_000), vec!["one"], "the part before the new take stopped playing");
+        assert_eq!(playing_at(clips, 300_000), vec!["two"], "the new take does not play where it was recorded");
+        assert!(clips.iter().filter(|clip| clip.start >= 240_000).all(|clip| clip.lane.is_some()), "the new recording did not stack");
         std::fs::remove_dir_all(&folder).ok();
     }
 
@@ -672,10 +682,8 @@ mod tests {
         app.place_take(48_000, 0, true, None, None, Ok(vec![(track, a_take(&folder, "two.wav", 90_000))]));
         app.place_take(48_000, 0, false, None, None, Ok(vec![(track, a_take(&folder, "three.wav", 40_000))]));
         let clips = &app.project.track(track).unwrap().clips;
-        assert_eq!(clips.len(), 3, "a take went missing");
-        assert!(clips.iter().all(|clip| clip.lane.is_some()), "a take is outside the group");
-        let playing: Vec<_> = clips.iter().filter(|clip| clip.lane_on).map(|clip| clip.source.name.clone()).collect();
-        assert_eq!(playing.len(), 1, "more than one take plays: {playing:?}");
+        assert_eq!(playing_at(clips, 60_000), vec!["three"], "only the newest take should play where it was recorded");
+        assert_eq!(playing_at(clips, 120_000), vec!["two"], "past the short take the one before should keep playing");
         std::fs::remove_dir_all(&folder).ok();
     }
 
