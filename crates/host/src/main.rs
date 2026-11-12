@@ -327,20 +327,42 @@ impl Out {
 }
 
 #[derive(Default)]
-struct Touches(Mutex<Option<Arc<AtomicBool>>>);
+struct Touches(Mutex<Watched>);
+
+#[derive(Default)]
+struct Watched {
+    flag: Option<Arc<AtomicBool>>,
+    left_behind: bool,
+}
 
 impl Touches {
     fn watch(&self, flag: Option<Arc<AtomicBool>>) {
-        *self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = flag;
+        let mut held = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let same = match (&held.flag, &flag) {
+            (Some(was), Some(now)) => Arc::ptr_eq(was, now),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        if held.flag.as_ref().is_some_and(|was| was.swap(false, Ordering::Relaxed)) {
+            held.left_behind = true;
+        }
+        held.flag = flag;
     }
 
     fn taken(&self) -> bool {
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().is_some_and(|flag| flag.swap(false, Ordering::Relaxed))
+        let mut held = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let left = std::mem::take(&mut held.left_behind);
+        let now = held.flag.as_ref().is_some_and(|flag| flag.swap(false, Ordering::Relaxed));
+        left || now
     }
 }
 
 const WINDOW_TICK: Duration = Duration::from_millis(8);
 const IDLE_EVERY: Duration = Duration::from_millis(30);
+const KNOB_WORD_EVERY: Duration = Duration::from_millis(50);
 
 fn blocks_after(ask: &Ask) -> usize {
     match ask {
@@ -483,6 +505,7 @@ fn main() {
     let mut editor: Showing = None;
     let mut was_sized = (0, 0);
     let mut region: Option<Region> = None;
+    let mut knob_word = std::time::Instant::now();
     let mut idled = std::time::Instant::now();
     'living: loop {
         if let Some((made, pane, seat)) = editor.as_ref() {
@@ -501,6 +524,10 @@ fn main() {
             }
             for chord in chords {
                 out.say(&chord);
+            }
+            if knob_word.elapsed() >= KNOB_WORD_EVERY && made.heard_an_edit() {
+                knob_word = std::time::Instant::now();
+                out.say(&Reply::KnobMoved);
             }
             if made.latency_moved() {
                 say_if_it_moved(&mut hold(&seats), seat, &out);
@@ -830,4 +857,39 @@ fn au_open(_path: &Path, index: usize, rate: f64, block: usize) -> Result<Open, 
 #[cfg(not(target_os = "macos"))]
 fn au_open(_path: &Path, _index: usize, _rate: f64, _block: usize) -> Result<Open, String> {
     Err("Audio Units only run on a Mac".into())
+}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+
+    #[test]
+    fn a_knob_moved_just_before_the_window_closed_is_still_told() {
+        let touches = Touches::default();
+        let window = Arc::new(AtomicBool::new(false));
+        touches.watch(Some(window.clone()));
+        window.store(true, Ordering::Relaxed);
+        touches.watch(None);
+        assert!(touches.taken(), "closing the window lost the knob he just turned");
+        assert!(!touches.taken(), "one knob was told twice");
+    }
+
+    #[test]
+    fn watching_the_same_window_again_keeps_its_touch_where_it_is() {
+        let touches = Touches::default();
+        let window = Arc::new(AtomicBool::new(false));
+        touches.watch(Some(window.clone()));
+        window.store(true, Ordering::Relaxed);
+        touches.watch(Some(window.clone()));
+        assert!(touches.taken());
+        assert!(!touches.taken());
+    }
+
+    #[test]
+    fn an_untouched_window_closing_tells_nothing() {
+        let touches = Touches::default();
+        touches.watch(Some(Arc::new(AtomicBool::new(false))));
+        touches.watch(None);
+        assert!(!touches.taken());
+    }
 }
